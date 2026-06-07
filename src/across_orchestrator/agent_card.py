@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from . import __version__
+
+
+def render_agent_card() -> dict:
+    return {
+        "name": "Across Orchestrator",
+        "version": __version__,
+        "description": "Local-first task orchestration runtime for agent-to-agent delivery work.",
+        "url": "https://github.com/fantasyce/across-orchestrator",
+        "capabilities": {
+            "taskOrchestration": True,
+            "contracts": True,
+            "artifacts": True,
+            "evidenceBundles": True,
+            "qualityBenchmarks": True,
+            "eventStreaming": True,
+            "localFirst": True,
+        },
+        "protocols": {
+            "a2a": {
+                "agentCard": "/.well-known/agent-card.json",
+                "tasks": True,
+                "artifacts": True,
+                "statusEvents": True,
+            },
+            "mcp": {
+                "transport": "stdio",
+                "command": "across-orchestrator",
+                "args": ["mcp"],
+                "tools": True,
+            },
+            "http": {
+                "command": "across-orchestrator",
+                "args": ["serve"],
+            },
+        },
+        "skills": [
+            {
+                "id": "task-orchestration",
+                "name": "Task Orchestration",
+                "description": "Submit, run, pause, inspect, and verify multi-artifact delivery tasks.",
+            },
+            {
+                "id": "delivery-contracts",
+                "name": "Delivery Contracts",
+                "description": "Track required artifacts and quality gates as explicit task contracts.",
+            },
+            {
+                "id": "evidence-bundles",
+                "name": "Evidence Bundles",
+                "description": "Export task status, contract, artifacts, quality, and event history.",
+            },
+        ],
+        "storage": {
+            "defaultHome": "~/.across-orchestrator",
+            "overrideEnv": "ACROSS_ORCHESTRATOR_HOME",
+        },
+    }

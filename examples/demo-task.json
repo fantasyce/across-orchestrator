@@ -1,0 +1,9 @@
+{
+  "goal": "Build a tiny product page",
+  "projectRoot": "/tmp/across-orchestrator-demo",
+  "deliverables": [
+    "README.md",
+    "web/index.html"
+  ],
+  "agent": "demo"
+}

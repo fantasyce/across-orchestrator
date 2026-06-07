@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "across-orchestrator"
+version = "0.1.0"
+description = "Local-first task orchestration runtime for agent-to-agent delivery work."
+requires-python = ">=3.11"
+dependencies = []
+license = { text = "MIT" }
+authors = [
+  { name = "Across Orchestrator contributors" }
+]
+keywords = ["agent", "a2a", "mcp", "orchestration", "tasks"]
+
+[project.scripts]
+across-orchestrator = "across_orchestrator.cli:main"
+across-tasks = "across_orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
