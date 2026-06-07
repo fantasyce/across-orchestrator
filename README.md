@@ -2,14 +2,22 @@
 
 Local-first task orchestration runtime for agent-to-agent delivery work.
 
+> Alpha foundation: `v0.1.0` is not feature-parity with the mature task
+> orchestration runtime inside Across Agents Assistant. It proves the independent
+> product boundary, protocol surfaces, storage shape, and deterministic E2E
+> skeleton. See [Parity Audit](docs/parity-audit.md) before treating it as a
+> replacement for the app runtime.
+
 Across Orchestrator is the task runtime companion to Across Context. It is a
 standalone product: host apps provide UI, agent credentials, and local
 permissions; Across Orchestrator owns task lifecycle, contracts, evidence,
 quality checks, and protocol surfaces.
 
 This repository is intentionally small for the first milestone. It proves the
-runtime can submit, run, inspect, and verify tasks without being embedded inside
-Across Agents Assistant.
+runtime can submit, run, inspect, and verify deterministic tasks without being
+embedded inside Across Agents Assistant. It does not yet include owner-agent
+decomposition, multi-wave governance, acceptance parsing, remediation loops, or
+release-grade quality gates.
 
 ## Why It Exists
 
@@ -35,6 +43,17 @@ evidence, and quality loop.
 - Emits append-only JSONL task events
 - Builds evidence bundles with artifacts, hashes, quality, and event history
 - Exposes CLI, HTTP/SSE, A2A-style Agent Card, and MCP stdio surfaces
+
+## What It Does Not Yet Do
+
+- Owner-agent decomposition
+- Multi-wave DAG governance
+- Agent-to-agent contract negotiation
+- Local/cloud agent dispatch through real adapters
+- Acceptance parsing and repair loops
+- Workspace hygiene and release E2E gates
+- Agent-mix enforcement
+- Full evidence-bundle compatibility with Across Agents Assistant
 
 ## Install From Source
 

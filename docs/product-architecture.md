@@ -1,5 +1,10 @@
 # Across Orchestrator Product Architecture
 
+> Alpha foundation note: `v0.1.0` is the independent runtime skeleton. It is not
+> equivalent to the mature Across Agents Assistant orchestration runtime yet.
+> The app runtime remains the quality reference until the parity gates in
+> `docs/parity-audit.md` pass.
+
 ## Product Position
 
 Across Orchestrator is an open, local-first task orchestration runtime for
@@ -29,7 +34,7 @@ Across Orchestrator
 ## First Release Scope
 
 The first release proves the product can stand alone before Across Agents
-Assistant depends on it.
+Assistant depends on it. It does not claim feature parity.
 
 It includes:
 
