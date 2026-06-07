@@ -122,6 +122,23 @@ class HttpTests(unittest.TestCase):
         body = stream.read().decode("utf-8")
         self.assertIn("event: task.completed", body)
 
+    def test_http_submit_release_e2e(self):
+        task = self.post(
+            "/release-e2e",
+            {
+                "projectRoot": str(self.project),
+                "runLabel": "http-test",
+            },
+        )
+        self.assertEqual(task["contract"]["engine"], "app_grade_release_e2e")
+
+        completed = self.post(f"/tasks/{task['task_id']}/run", {})
+        self.assertEqual(completed["status"], "completed")
+
+        evidence = self.get(f"/tasks/{task['task_id']}/evidence-bundle")
+        self.assertEqual(evidence["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
+        self.assertIn(evidence["app_grade"]["delivery_quality"], {"passed", "partial"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,9 @@
 # Across Agents Assistant Integration Plan
 
-Across Agents Assistant should consume Across Orchestrator the same way it now
+Across Agents Assistant should consume Across Orchestrator the same way it
 consumes Across Context: plugin first, compatibility fallback second.
 
-## Target Boundary
+## Boundary
 
 Across Agents Assistant owns:
 
@@ -18,86 +18,130 @@ Across Orchestrator owns:
 
 - task, subtask, wave, and event lifecycle
 - delivery contracts and required artifacts
-- agent assignment plan
+- owner orchestration state
+- acceptance and remediation policy
 - evidence bundle and quality benchmark
-- remediation policy
 - A2A-style task and artifact protocol
+
+## Integration Modes
+
+### External Process Mode
+
+The app starts or connects to:
+
+```bash
+across-orchestrator serve --host 127.0.0.1 --port <port>
+```
+
+The app then submits tasks and reads status/evidence through HTTP:
+
+- `POST /tasks`
+- `POST /release-e2e`
+- `POST /tasks/{task_id}/run`
+- `GET /tasks/{task_id}`
+- `GET /tasks/{task_id}/events`
+- `GET /tasks/{task_id}/evidence-bundle`
+- `GET /tasks/{task_id}/quality-benchmark`
+
+This mode is best for plugin isolation and for non-app hosts.
+
+### Embedded Engine Mode
+
+The app imports:
+
+```python
+from across_orchestrator.engine import MatureOrchestrationEngine
+```
+
+Then it injects app-owned adapters:
+
+- dispatcher adapter backed by the app's local/cloud agent execution
+- validator adapter
+- owner-agent adapter backed by the app's LLM gateway and native skill routing
+- optional persistence adapter
+
+This mode is best while Across Agents Assistant still needs tight control over
+permissions, approvals, and existing task UI behavior.
+
+### Built-In Compatibility Mode
+
+If the plugin is unavailable, the app can keep using its current built-in
+runtime. The UI should report this as `builtin_compatibility` so users and
+maintainers know which implementation is active.
 
 ## Migration Phases
 
-### Phase 1: External Runtime Probe
+### Phase 1: Probe And Diagnostics
 
-Add an app-side `OrchestratorPluginManager` that probes:
+Add an app-side plugin manager that detects:
 
-```bash
-across-orchestrator serve --host 127.0.0.1 --port 0
-```
+- external `across-orchestrator` executable
+- HTTP health endpoint
+- Python package importability
+- version and Agent Card metadata
 
-or a configured HTTP endpoint. Display implementation mode:
+Display implementation mode:
 
 - `external`
+- `embedded_plugin`
 - `builtin_compatibility`
 - `unavailable`
 
-No existing in-app task runtime is removed in this phase.
+### Phase 2: Read-Only External Task Console
 
-### Phase 2: Read-Only Task Console
-
-Let the app read external runtime tasks through:
+Let the app display external runtime tasks from:
 
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/events`
 - `GET /tasks/{task_id}/evidence-bundle`
 - `GET /tasks/{task_id}/quality-benchmark`
 
-The current task UI can show external tasks in a separate source filter.
+### Phase 3: App-Grade Release E2E Through Plugin
 
-### Phase 3: Submit And Run Via External Runtime
+Run the fixed release scenario through:
 
-Route new task submission to external runtime when implementation mode is
-`external`:
+```bash
+across-orchestrator submit-release-e2e --project <project>
+```
 
-- app gathers project, owner/subtask agent choices, and permissions
-- app passes task goal, projectRoot, deliverables, and adapter metadata
-- Across Orchestrator owns lifecycle after submission
+or:
 
-If external runtime is unavailable and mode is auto, the app falls back to the
-existing built-in runtime.
+```http
+POST /release-e2e
+```
+
+This verifies the app can consume plugin evidence that comes from the same
+contract and quality modules as the mature in-app runtime.
 
 ### Phase 4: Host-Provided Agent Adapters
 
-Across Orchestrator should not store provider credentials. The app should expose
-agent execution to the runtime through one of:
+Route real task execution through `MatureOrchestrationEngine` with app-provided
+adapters. Across Orchestrator receives scoped task/subtask input and returns
+task state, events, contracts, quality results, and evidence.
 
-- command adapter with scoped environment
-- local loopback callback endpoint
-- MCP tool call back into the host
+The plugin must not persist provider keys or silently approve tools.
 
-The runtime receives only the task/subtask input and scoped project permissions.
+### Phase 5: Default To Plugin
 
-### Phase 5: Remove Duplicated Built-In Runtime
-
-Only after the external runtime passes the same release E2E bar as the current
-app runtime should the app remove duplicated orchestration internals. Until
-then, the in-app runtime remains a compatibility bridge.
+Only after external or embedded plugin mode passes the same release-grade gates
+as the built-in runtime should the app default to the plugin.
 
 ## Required Compatibility Gates
 
-Before the app defaults to external Orchestrator:
-
-- submit/run/status/evidence/quality work through HTTP
+- original orchestration parity tests pass in the plugin repo
+- submit/run/status/evidence/quality work through public surfaces
 - event stream updates the Swift task UI
 - task state survives app and runtime restart
-- agent execution can be scoped by projectRoot and writable files
+- app-provided dispatch respects projectRoot and writable-file scope
 - evidence bundle maps to the current Release Evidence Center model
-- existing complex Release E2E can be represented as external contracts
+- fixed complex Release E2E passes with browser, API, CLI, static web, security,
+  workspace hygiene, and agent-mix gates
 - fallback to built-in runtime is visible and non-destructive
 
 ## Non-Goals
 
 - Do not move chat into Across Orchestrator.
 - Do not move model keys into Across Orchestrator.
-- Do not require Across Agents Assistant to install external runtime before the
-  fallback path is proven.
-- Do not remove current task code until external runtime can pass release-grade
-  E2E.
+- Do not move macOS approval prompts into Across Orchestrator.
+- Do not remove current app task code until plugin mode passes release-grade
+  parity under real app adapters.

@@ -24,6 +24,11 @@ def artifact_record(project_root: str, path: str) -> dict[str, Any]:
 
 
 def build_quality(task: Task) -> dict[str, Any]:
+    app_grade = task.metadata.get("app_grade") or {}
+    if app_grade.get("quality_report"):
+        report = dict(app_grade["quality_report"])
+        report.setdefault("status", report.get("quality_gate", "unknown"))
+        return report
     required = list(task.contract.get("requiredArtifacts", []))
     artifacts = [artifact_record(task.project_root, path) for path in required]
     present = [artifact for artifact in artifacts if artifact.get("present")]
@@ -44,7 +49,7 @@ def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str,
     required = list(task.contract.get("requiredArtifacts", []))
     artifacts = [artifact_record(task.project_root, path) for path in required]
     quality = build_quality(task)
-    return {
+    bundle = {
         "schema_version": "0.1",
         "task_id": task.task_id,
         "goal": task.goal,
@@ -56,3 +61,6 @@ def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str,
         "quality": quality,
         "events": events,
     }
+    if task.metadata.get("app_grade"):
+        bundle["app_grade"] = task.metadata["app_grade"]
+    return bundle

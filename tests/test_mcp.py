@@ -81,6 +81,43 @@ class McpTests(unittest.TestCase):
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
 
+    def test_mcp_submit_release_e2e_task(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            project = Path(tempdir) / "release-project"
+            home = Path(tempdir) / "home"
+            project.mkdir()
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "submit_release_e2e_task",
+                    "arguments": {
+                        "projectRoot": str(project),
+                        "runLabel": "mcp-test",
+                    },
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            task = json.loads(responses[1]["result"]["content"][0]["text"])
+            self.assertEqual(task["contract"]["engine"], "app_grade_release_e2e")
+
 
 if __name__ == "__main__":
     unittest.main()

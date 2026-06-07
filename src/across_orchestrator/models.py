@@ -36,6 +36,7 @@ class Task:
     agent: str = "demo"
     subtasks: list[SubTask] = field(default_factory=list)
     contract: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -81,6 +82,7 @@ class Task:
             agent=data.get("agent", "demo"),
             subtasks=subtasks,
             contract=data.get("contract", {}),
+            metadata=data.get("metadata", {}),
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
         )

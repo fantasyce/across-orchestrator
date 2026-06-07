@@ -1,98 +1,101 @@
 # Across Orchestrator Product Architecture
 
-> Alpha foundation note: `v0.1.0` is the independent runtime skeleton. It is not
-> equivalent to the mature Across Agents Assistant orchestration runtime yet.
-> The app runtime remains the quality reference until the parity gates in
-> `docs/parity-audit.md` pass.
-
 ## Product Position
 
 Across Orchestrator is an open, local-first task orchestration runtime for
-agent-to-agent delivery work. It owns task state, waves, subtasks, contracts,
-events, evidence bundles, quality checks, and remediation policy.
+agent-to-agent delivery work. It owns task state, subtasks, waves, contracts,
+events, evidence bundles, quality gates, and remediation policy.
 
 It does not own chat UI, model credentials, macOS permissions, local agent
 installation, or user preferences. A host application provides those surfaces
-and talks to Across Orchestrator through stable protocols.
+through adapters.
 
 ```text
 Host app / IDE / CLI
-  -> agent configuration
-  -> user approval and permissions
-  -> project selection
-  -> UI console
+  -> user interaction
+  -> model credentials
+  -> local/cloud agent execution
+  -> permissions and approvals
 
 Across Orchestrator
   -> task lifecycle
-  -> agent assignment
+  -> owner orchestration state
+  -> wave governance
   -> delivery contracts
-  -> event stream
+  -> acceptance and remediation
+  -> quality gates
   -> evidence bundle
-  -> quality benchmark
 ```
 
-## First Release Scope
+## Runtime Layers
 
-The first release proves the product can stand alone before Across Agents
-Assistant depends on it. It does not claim feature parity.
+### Product Surface
 
-It includes:
+The public package keeps stable protocol surfaces:
 
-- a Python package with no runtime dependencies
-- a CLI entrypoint
-- a local JSON event store
-- deterministic task, subtask, contract, artifact, and evidence models
-- a built-in demo agent adapter for repeatable E2E tests
-- a command adapter contract for future host-provided agents
-- a stdlib HTTP API with task endpoints and an A2A-style Agent Card
-- an MCP stdio server exposing orchestration tools
-- tests for runtime, CLI, HTTP, MCP, and end-to-end task delivery
+- CLI
+- HTTP/SSE
+- MCP stdio
+- A2A-style Agent Card
 
-It intentionally does not include:
+These surfaces support both simple deterministic demo tasks and app-grade
+Release E2E tasks.
 
-- LLM provider keys
-- macOS permissions
-- Swift UI
-- Across Agents Assistant task page migration
-- full owner-agent decomposition copied from the app
+### Mature Engine
 
-Those stay in the host until the independent runtime proves stable.
+The mature engine is transplanted from Across Agents Assistant and remains
+covered by the original test suite. It includes:
 
-## Protocol Shape
+- `TaskState`
+- `TaskOrchestrator`
+- `TaskDispatcher`
+- `OwnerAgent`
+- delivery contracts
+- contract acceptance
+- project acceptance
+- quality gates
+- quality benchmark
+- release E2E scenario definitions
+- release evaluation
 
-Across Orchestrator is A2A-first and MCP-compatible.
+The public wrapper is:
 
-A2A-style surfaces:
+```python
+from across_orchestrator.engine import MatureOrchestrationEngine
+```
 
-- `/.well-known/agent-card.json`
-- task lifecycle state
-- messages/events
-- artifacts
-- streaming status events
+Hosts pass dispatcher, validator, and owner-agent adapters into this wrapper.
 
-MCP-compatible surfaces:
+### Compatibility Namespace
 
-- `submit_task`
-- `run_task`
-- `get_task`
-- `get_evidence_bundle`
-- `get_agent_card`
+The package currently includes an `across_agents_assistant` compatibility
+namespace. This is deliberate: it lets the original app orchestration tests run
+unchanged while the public product API stabilizes under `across_orchestrator`.
 
-HTTP surfaces:
+The compatibility namespace should shrink over time as the mature modules are
+renamed behind stable public interfaces.
 
-- `GET /health`
-- `GET /.well-known/agent-card.json`
-- `POST /tasks`
-- `POST /tasks/{task_id}/run`
-- `GET /tasks/{task_id}`
-- `GET /tasks/{task_id}/events`
-- `GET /tasks/{task_id}/events/stream`
-- `GET /tasks/{task_id}/evidence-bundle`
-- `GET /tasks/{task_id}/quality-benchmark`
+## Host Adapter Boundary
 
-## Data Ownership
+Across Orchestrator never stores provider secrets or macOS approval state. A
+host must provide:
 
-The local state directory defaults to:
+- local/cloud agent execution
+- available-agent detection
+- LLM gateway calls
+- user approval decisions
+- scoped tool execution
+- persistence integration when needed
+
+The host adapter protocols live in:
+
+```text
+src/across_orchestrator/host_adapters.py
+```
+
+## State Ownership
+
+The standalone state directory defaults to:
 
 ```text
 ~/.across-orchestrator
@@ -107,16 +110,27 @@ ACROSS_ORCHESTRATOR_HOME=/path/to/state
 The project workspace remains wherever the user or host points the task.
 Artifacts are written only under `projectRoot`.
 
-## Host Integration Strategy
+## Quality Model
 
-Across Agents Assistant should eventually follow the same plugin-first pattern
-used for Across Context:
+Across Orchestrator exposes two quality paths:
 
-1. Prefer external `across-orchestrator serve`.
-2. Report implementation mode in API/UI: `external` or `builtin_compatibility`.
-3. Fall back to the current in-app runtime only in auto mode.
-4. Remove duplicated in-app orchestration internals after external mode becomes
-   reliable.
+- Demo path: required files, hashes, events, and simple quality.
+- App-grade path: transplanted release contract acceptance with artifact
+  integrity, workspace hygiene, security/privacy, agent mix, static web, browser
+  E2E, API service, and CLI generic probes.
 
-The first milestone does not remove existing app code. It creates the product
-that the app can later consume.
+The browser probe requires Node Playwright in the development environment. If it
+is unavailable, the mature acceptance report marks the gate as
+environment-blocked and the delivery as partial.
+
+## Integration Direction
+
+Across Agents Assistant should consume Across Orchestrator the same way it
+consumes Across Context:
+
+1. Prefer an external plugin process.
+2. Use app-provided adapters for real local/cloud agent execution.
+3. Report implementation mode in UI and diagnostics.
+4. Fall back to built-in compatibility mode when external mode is unavailable.
+5. Remove duplicated app internals only after external mode passes the same
+   Release E2E and restart-recovery gates.

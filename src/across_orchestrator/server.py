@@ -65,6 +65,13 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 )
                 self.respond(task.to_dict(), status=201)
                 return
+            if path == "/release-e2e":
+                task = self.runtime.submit_release_e2e_task(
+                    project_root=payload.get("projectRoot") or payload.get("project_root") or ".",
+                    run_label=payload.get("runLabel") or payload.get("run_label"),
+                )
+                self.respond(task.to_dict(), status=201)
+                return
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "run":
                 task = self.runtime.run_task(parts[1])

@@ -79,6 +79,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(card["name"], "Across Orchestrator")
         self.assertTrue(card["capabilities"]["taskOrchestration"])
 
+    def test_cli_submit_release_e2e_uses_app_grade_engine(self):
+        submit = self.run_cli(
+            "submit-release-e2e",
+            "--project",
+            str(self.project),
+            "--run-label",
+            "cli-test",
+            "--json",
+        )
+        self.assertEqual(submit.returncode, 0, submit.stderr)
+        task = json.loads(submit.stdout)
+        self.assertEqual(task["contract"]["engine"], "app_grade_release_e2e")
+
+        run = self.run_cli("run", task["task_id"], "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["status"], "completed")
+
+        evidence = self.run_cli("evidence", task["task_id"], "--json")
+        self.assertEqual(evidence.returncode, 0, evidence.stderr)
+        payload = json.loads(evidence.stdout)
+        self.assertEqual(payload["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
+        self.assertIn(payload["app_grade"]["delivery_quality"], {"passed", "partial"})
+
 
 if __name__ == "__main__":
     unittest.main()

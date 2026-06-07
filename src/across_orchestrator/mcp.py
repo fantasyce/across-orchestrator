@@ -35,6 +35,18 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "submit_release_e2e_task",
+            "description": "Submit the app-grade Across Agents Assistant release E2E parity scenario.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "projectRoot": {"type": "string"},
+                    "runLabel": {"type": "string"},
+                },
+                "required": ["projectRoot"],
+            },
+        },
+        {
             "name": "get_task",
             "description": "Fetch task state.",
             "inputSchema": {
@@ -81,6 +93,11 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         ).to_dict()
     if name == "run_task":
         return runtime.run_task(arguments["taskId"]).to_dict()
+    if name == "submit_release_e2e_task":
+        return runtime.submit_release_e2e_task(
+            project_root=arguments.get("projectRoot") or arguments.get("project_root") or ".",
+            run_label=arguments.get("runLabel") or arguments.get("run_label"),
+        ).to_dict()
     if name == "get_task":
         return runtime.get_task(arguments["taskId"]).to_dict()
     if name == "get_evidence_bundle":
