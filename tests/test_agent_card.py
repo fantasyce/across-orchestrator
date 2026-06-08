@@ -12,6 +12,8 @@ class AgentCardTests(unittest.TestCase):
         self.assertEqual(card["protocols"]["mcp"]["command"], "across-orchestrator")
         self.assertEqual(card["protocols"]["a2a"]["agentCard"], "/.well-known/agent-card.json")
         self.assertEqual(card["storage"]["overrideEnv"], "ACROSS_ORCHESTRATOR_HOME")
+        self.assertEqual(card["storage"]["defaultHome"], "~/.across/data/across-orchestrator")
+        self.assertEqual(card["storage"]["acrossHomeEnv"], "ACROSS_HOME")
 
 
 if __name__ == "__main__":

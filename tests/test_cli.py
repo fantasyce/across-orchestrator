@@ -79,6 +79,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(card["name"], "Across Orchestrator")
         self.assertTrue(card["capabilities"]["taskOrchestration"])
 
+    def test_cli_plugin_manifest_is_json(self):
+        result = self.run_cli("plugin-manifest", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(manifest["id"], "across-orchestrator")
+        self.assertEqual(manifest["kind"], "task-runtime")
+        self.assertEqual(manifest["entrypoints"]["sidecar"]["command"], "across-orchestrator")
+        self.assertEqual(manifest["paths"]["data"], "~/.across/data/across-orchestrator")
+
     def test_cli_submit_release_e2e_uses_app_grade_engine(self):
         submit = self.run_cli(
             "submit-release-e2e",

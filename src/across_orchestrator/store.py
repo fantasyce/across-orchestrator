@@ -1,31 +1,45 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import json
 import os
+import shutil
 import time
 
 from .models import Task
+from .paths import component_data_home, legacy_default_home
 
 
-def default_home() -> Path:
-    override = os.environ.get("ACROSS_ORCHESTRATOR_HOME")
+def default_home(env: Mapping[str, str] | None = None) -> Path:
+    source = env if env is not None else os.environ
+    override = source.get("ACROSS_ORCHESTRATOR_HOME")
     if override and override.strip():
         return Path(override).expanduser().resolve()
-    return Path.home() / ".across-orchestrator"
+    return component_data_home(env=source)
 
 
 class LocalStore:
-    def __init__(self, home: str | Path | None = None):
-        self.home = Path(home).expanduser().resolve() if home else default_home()
+    def __init__(self, home: str | Path | None = None, env: Mapping[str, str] | None = None):
+        self.env = env if env is not None else os.environ
+        self.home = Path(home).expanduser().resolve() if home else default_home(self.env)
+        self.should_migrate_legacy = home is None and not (self.env.get("ACROSS_ORCHESTRATOR_HOME") or "").strip()
         self.tasks_dir = self.home / "tasks"
         self.events_dir = self.home / "events"
         self.init()
 
     def init(self) -> None:
+        self._migrate_legacy_default_home()
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.events_dir.mkdir(parents=True, exist_ok=True)
+
+    def _migrate_legacy_default_home(self) -> None:
+        if not self.should_migrate_legacy or self.home.exists():
+            return
+        legacy_home = legacy_default_home(self.env)
+        if legacy_home == self.home or not legacy_home.exists():
+            return
+        shutil.copytree(legacy_home, self.home)
 
     def save_task(self, task: Task) -> None:
         task.updated_at = time.time()

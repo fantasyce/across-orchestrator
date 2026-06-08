@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 import json
+import os
+import time
 
 from .agent_card import render_agent_card
+from .paths import COMPONENT_ID, run_home
 from .runtime import OrchestratorRuntime
 
 
@@ -118,9 +122,45 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
         self.runtime = OrchestratorRuntime()
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
+def _runtime_info_path(runtime_id: str, runtime_info: str | None = None) -> Path:
+    if runtime_info and runtime_info.strip():
+        return Path(runtime_info).expanduser().resolve()
+    return run_home() / f"{runtime_id}.json"
+
+
+def _write_runtime_info(server: OrchestratorHTTPServer, host: str, runtime_id: str, runtime_info: str | None) -> Path:
+    actual_host, actual_port = server.server_address[:2]
+    endpoint_host = host or actual_host
+    path = _runtime_info_path(runtime_id, runtime_info)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "componentId": COMPONENT_ID,
+        "runtimeId": runtime_id,
+        "pid": os.getpid(),
+        "host": endpoint_host,
+        "port": actual_port,
+        "endpoint": f"http://{endpoint_host}:{actual_port}",
+        "transport": "http",
+        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    runtime_id: str | None = None,
+    runtime_info: str | None = None,
+) -> None:
     server = OrchestratorHTTPServer((host, port))
+    info_path = _write_runtime_info(server, host, runtime_id, runtime_info) if runtime_id else None
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        if info_path:
+            try:
+                info_path.unlink()
+            except FileNotFoundError:
+                pass

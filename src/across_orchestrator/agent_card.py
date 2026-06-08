@@ -32,8 +32,10 @@ def render_agent_card() -> dict:
                 "tools": True,
             },
             "http": {
+                "transport": "local-sidecar",
                 "command": "across-orchestrator",
-                "args": ["serve"],
+                "args": ["serve", "--host", "127.0.0.1"],
+                "health": "/health",
             },
         },
         "skills": [
@@ -54,7 +56,8 @@ def render_agent_card() -> dict:
             },
         ],
         "storage": {
-            "defaultHome": "~/.across-orchestrator",
+            "defaultHome": "~/.across/data/across-orchestrator",
             "overrideEnv": "ACROSS_ORCHESTRATOR_HOME",
+            "acrossHomeEnv": "ACROSS_HOME",
         },
     }

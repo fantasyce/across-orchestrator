@@ -9,7 +9,7 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.2.0` extracts and ships the mature task orchestration core from Across
+`v0.3.0` ships the mature task orchestration core from Across
 Agents Assistant instead of reimplementing a simplified runtime from scratch.
 The transplanted core is kept under an app-compatible namespace so the original
 orchestration tests can run unchanged.
@@ -17,6 +17,10 @@ orchestration tests can run unchanged.
 Validated in this repository:
 
 - 395 original Across Agents Assistant orchestration tests pass unchanged.
+- Sidecar-first host integration writes runtime metadata under
+  `~/.across/run/across-orchestrator`.
+- Durable task state defaults to `~/.across/data/across-orchestrator`.
+- The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
 - The public `MatureOrchestrationEngine` wraps the transplanted `TaskState` and
   `TaskOrchestrator` for host-provided dispatch, validation, and owner-agent
   adapters.
@@ -127,6 +131,7 @@ across-orchestrator events <task-id> --json
 across-orchestrator evidence <task-id> --json
 across-orchestrator quality <task-id> --json
 across-orchestrator agent-card --json
+across-orchestrator plugin-manifest --json
 across-orchestrator serve --host 127.0.0.1 --port 8765
 across-orchestrator mcp
 ```

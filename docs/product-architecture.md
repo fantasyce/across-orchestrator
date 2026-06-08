@@ -98,7 +98,7 @@ src/across_orchestrator/host_adapters.py
 The standalone state directory defaults to:
 
 ```text
-~/.across-orchestrator
+~/.across/data/across-orchestrator
 ```
 
 It can be overridden with:

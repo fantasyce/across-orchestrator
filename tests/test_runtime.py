@@ -104,6 +104,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(task_file.read_text())["task_id"], task.task_id)
         self.assertGreaterEqual(len(event_file.read_text().splitlines()), 3)
 
+    def test_legacy_default_home_migrates_into_across_data_namespace(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            from across_orchestrator.store import LocalStore
+
+            across_home = Path(tempdir) / "across"
+            legacy_home = Path(tempdir) / ".across-orchestrator"
+            legacy_tasks = legacy_home / "tasks"
+            legacy_events = legacy_home / "events"
+            legacy_tasks.mkdir(parents=True)
+            legacy_events.mkdir(parents=True)
+            (legacy_tasks / "task-legacy.json").write_text(
+                json.dumps({
+                    "task_id": "task-legacy",
+                    "goal": "Legacy task",
+                    "project_root": str(self.project),
+                    "deliverables": ["README.md"],
+                    "agent": "demo",
+                    "subtasks": [],
+                    "contract": {},
+                    "metadata": {},
+                    "status": "pending",
+                    "created_at": 1,
+                    "updated_at": 1,
+                }),
+                encoding="utf-8",
+            )
+
+            store = LocalStore(env={"HOME": tempdir, "ACROSS_HOME": str(across_home)})
+
+            self.assertEqual(store.home, across_home.resolve() / "data" / "across-orchestrator")
+            self.assertEqual(store.list_task_ids(), ["task-legacy"])
+
 
 if __name__ == "__main__":
     unittest.main()

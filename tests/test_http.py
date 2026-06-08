@@ -139,6 +139,61 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(evidence["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
         self.assertIn(evidence["app_grade"]["delivery_quality"], {"passed", "partial"})
 
+    def test_sidecar_runtime_info_is_written_under_across_run_home(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            port = free_port()
+            across_home = Path(tempdir) / "across"
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_HOME"] = str(across_home)
+            env.pop("ACROSS_ORCHESTRATOR_HOME", None)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "across_orchestrator.cli",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--runtime-id",
+                    "unit-host",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                base = f"http://127.0.0.1:{port}"
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    try:
+                        with request.urlopen(base + "/health", timeout=1) as response:
+                            if json.loads(response.read().decode("utf-8"))["status"] == "ok":
+                                break
+                    except Exception:
+                        time.sleep(0.1)
+                else:
+                    self.fail("sidecar did not become healthy")
+
+                runtime_info = across_home / "run" / "across-orchestrator" / "unit-host.json"
+                payload = json.loads(runtime_info.read_text(encoding="utf-8"))
+                self.assertEqual(payload["componentId"], "across-orchestrator")
+                self.assertEqual(payload["runtimeId"], "unit-host")
+                self.assertEqual(payload["endpoint"], base)
+                self.assertEqual(payload["transport"], "http")
+            finally:
+                process.terminate()
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

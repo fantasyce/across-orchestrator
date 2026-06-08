@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
+from .plugin_manifest import render_plugin_manifest
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
 
@@ -62,11 +63,16 @@ def build_parser() -> argparse.ArgumentParser:
     card = sub.add_parser("agent-card", help="Print the A2A-style Agent Card")
     card.add_argument("--json", action="store_true")
 
+    manifest = sub.add_parser("plugin-manifest", help="Print the Across plugin manifest")
+    manifest.add_argument("--json", action="store_true")
+
     sub.add_parser("mcp", help="Start MCP stdio server")
 
     serve = sub.add_parser("serve", help="Start HTTP server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--runtime-id")
+    serve.add_argument("--runtime-info")
     return parser
 
 
@@ -124,6 +130,10 @@ def main(argv: list[str] | None = None) -> int:
         _print(render_agent_card(), args.json)
         return 0
 
+    if args.command == "plugin-manifest":
+        _print(render_plugin_manifest(), args.json)
+        return 0
+
     if args.command == "mcp":
         from .mcp import main as mcp_main
 
@@ -132,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         from .server import serve
 
-        serve(args.host, args.port)
+        serve(args.host, args.port, runtime_id=args.runtime_id, runtime_info=args.runtime_info)
         return 0
 
     parser.print_help()
