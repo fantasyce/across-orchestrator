@@ -6,6 +6,7 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
+from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 
 
@@ -72,6 +73,29 @@ def tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def resource_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "uri": "across-orchestrator://agent-card",
+            "name": "Across Orchestrator Agent Card",
+            "description": "A2A-style task runtime capability card.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "across-orchestrator://plugin-manifest",
+            "name": "Across Orchestrator Plugin Manifest",
+            "description": "Across plugin discovery manifest for hosts.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "across-orchestrator://plugin-status",
+            "name": "Across Orchestrator Plugin Status",
+            "description": "Resolved local plugin install and runtime status.",
+            "mimeType": "application/json",
+        },
+    ]
+
+
 def text_result(payload: Any) -> dict[str, Any]:
     return {
         "content": [
@@ -107,6 +131,26 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
     raise ValueError(f"Unknown tool: {name}")
 
 
+def read_resource(uri: str) -> dict[str, Any]:
+    if uri == "across-orchestrator://agent-card":
+        payload = render_agent_card()
+    elif uri == "across-orchestrator://plugin-manifest":
+        payload = render_plugin_manifest()
+    elif uri == "across-orchestrator://plugin-status":
+        payload = render_plugin_status()
+    else:
+        raise ValueError(f"Unknown resource: {uri}")
+    return {
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(payload, indent=2, sort_keys=True),
+            }
+        ]
+    }
+
+
 def response(message_id: Any, result: Any = None, error: str | None = None) -> dict[str, Any]:
     payload = {"jsonrpc": "2.0", "id": message_id}
     if error is not None:
@@ -130,19 +174,23 @@ def main() -> int:
             if method == "initialize":
                 result = {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "resources": {"listChanged": False}},
                     "serverInfo": {"name": "Across Orchestrator", "version": __version__},
                 }
             elif method == "tools/list":
                 result = {"tools": tool_definitions()}
+            elif method == "resources/list":
+                result = {"resources": resource_definitions()}
+            elif method == "resources/read":
+                result = read_resource((request.get("params") or {}).get("uri") or "")
             elif method == "tools/call":
                 params = request.get("params") or {}
                 result = text_result(handle_tool_call(runtime, params.get("name"), params.get("arguments") or {}))
             else:
                 raise ValueError(f"Unsupported method: {method}")
             print(json.dumps(response(message_id, result=result)), flush=True)
-        except Exception as exc:
-            print(json.dumps(response(message_id, error=str(exc))), flush=True)
+        except Exception:
+            print(json.dumps(response(message_id, error="Across Orchestrator MCP request failed.")), flush=True)
     return 0
 
 

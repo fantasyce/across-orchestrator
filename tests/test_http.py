@@ -89,6 +89,10 @@ class HttpTests(unittest.TestCase):
             return json.loads(response.read().decode("utf-8"))
 
     def test_http_submit_run_and_fetch_evidence(self):
+        plugin_manifest = self.get("/.well-known/across-plugin.json")
+        self.assertEqual(plugin_manifest["id"], "across-orchestrator")
+        self.assertEqual(plugin_manifest["entrypoints"]["sidecar"]["healthPath"], "/health")
+
         card = self.get("/.well-known/agent-card.json")
         self.assertEqual(card["name"], "Across Orchestrator")
 

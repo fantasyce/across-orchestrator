@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
-from .plugin_manifest import render_plugin_manifest
+from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
 
@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     manifest = sub.add_parser("plugin-manifest", help="Print the Across plugin manifest")
     manifest.add_argument("--json", action="store_true")
+
+    plugin_status = sub.add_parser("plugin-status", help="Print Across plugin install and runtime status")
+    plugin_status.add_argument("--json", action="store_true")
+
+    health = sub.add_parser("health", help="Probe local runtime health")
+    health.add_argument("--json", action="store_true")
 
     sub.add_parser("mcp", help="Start MCP stdio server")
 
@@ -132,6 +138,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "plugin-manifest":
         _print(render_plugin_manifest(), args.json)
+        return 0
+
+    if args.command == "plugin-status":
+        _print(render_plugin_status(), args.json)
+        return 0
+
+    if args.command == "health":
+        _print(render_plugin_health(), args.json)
         return 0
 
     if args.command == "mcp":

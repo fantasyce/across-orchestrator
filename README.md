@@ -27,6 +27,10 @@ Validated in this repository:
 - Existing legacy `~/.across-orchestrator` task/event files are backfilled into
   `~/.across/data/across-orchestrator` without overwriting newer files.
 - The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
+- Hosts can inspect `plugin-status`, `health`, and
+  `/.well-known/across-plugin.json` before routing work to the runtime.
+- Hosting platforms can pass registered agent-container descriptors through the
+  Python SDK boundary without adopting Across Agents Assistant internals.
 - The public `MatureOrchestrationEngine` wraps the transplanted `TaskState` and
   `TaskOrchestrator` for host-provided dispatch, validation, and owner-agent
   adapters.
@@ -138,6 +142,8 @@ across-orchestrator evidence <task-id> --json
 across-orchestrator quality <task-id> --json
 across-orchestrator agent-card --json
 across-orchestrator plugin-manifest --json
+across-orchestrator plugin-status --json
+across-orchestrator health --json
 across-orchestrator serve --host 127.0.0.1 --port 8765
 across-orchestrator mcp
 ```
@@ -154,6 +160,7 @@ Endpoints:
 
 - `GET /health`
 - `GET /.well-known/agent-card.json`
+- `GET /.well-known/across-plugin.json`
 - `POST /tasks`
 - `POST /release-e2e`
 - `POST /tasks/{task_id}/run`
@@ -174,13 +181,19 @@ The MCP server exposes:
 - `get_evidence_bundle`
 - `get_agent_card`
 
+It also exposes resources:
+
+- `across-orchestrator://agent-card`
+- `across-orchestrator://plugin-manifest`
+- `across-orchestrator://plugin-status`
+
 Run:
 
 ```bash
 across-orchestrator mcp
 ```
 
-## Host Boundary
+## Host Boundary And Hosting Platforms
 
 The public `across_orchestrator.engine.MatureOrchestrationEngine` wraps the
 transplanted mature engine. Hosts provide:
@@ -193,6 +206,32 @@ transplanted mature engine. Hosts provide:
 
 Across Orchestrator keeps the contracts, waves, task state, acceptance,
 remediation, and quality logic in the plugin.
+
+For a hosting platform that exposes many user-owned agent containers, the
+platform remains the A2A-facing host. Across Orchestrator mounts inside the
+platform as a task-runtime plugin: it receives agent descriptors, creates the
+delivery contract and execution waves, then asks the host to dispatch actual
+agent work through the platform's own SDK, HTTP, MCP, or A2A adapters.
+
+The lightweight SDK helper keeps that boundary serializable:
+
+```python
+from across_orchestrator.host_adapters import build_hosting_platform_contract
+
+contract = build_hosting_platform_contract(
+    "example-host",
+    [
+        {
+            "agent_id": "frontend-agent",
+            "display_name": "Frontend Agent",
+            "endpoint": "https://host.example/agents/frontend-agent",
+            "protocols": ["a2a", "sdk"],
+            "capabilities": ["web-ui", "tests"],
+        }
+    ],
+    memory_provider="across-context",
+)
+```
 
 ## Development Checks
 

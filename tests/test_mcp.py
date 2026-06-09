@@ -29,7 +29,9 @@ class McpTests(unittest.TestCase):
                 rpc(1, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test"}}),
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 rpc(2, "tools/list"),
-                rpc(3, "tools/call", {
+                rpc(3, "resources/list"),
+                rpc(4, "resources/read", {"uri": "across-orchestrator://plugin-manifest"}),
+                rpc(5, "tools/call", {
                     "name": "submit_task",
                     "arguments": {
                         "goal": "Build MCP demo",
@@ -53,9 +55,14 @@ class McpTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
             self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "Across Orchestrator")
+            self.assertIn("resources", responses[0]["result"]["capabilities"])
             tool_names = [tool["name"] for tool in responses[1]["result"]["tools"]]
             self.assertIn("submit_task", tool_names)
-            submit_text = responses[2]["result"]["content"][0]["text"]
+            resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
+            self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
+            manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
+            self.assertEqual(manifest["id"], "across-orchestrator")
+            submit_text = responses[4]["result"]["content"][0]["text"]
             task_id = json.loads(submit_text)["task_id"]
 
             run_messages = [

@@ -10,6 +10,7 @@ import time
 
 from .agent_card import render_agent_card
 from .paths import COMPONENT_ID, run_home
+from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
 
 
@@ -28,10 +29,13 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
         path = parsed.path
         try:
             if path == "/health":
-                self.respond({"status": "ok"})
+                self.respond(render_plugin_health())
                 return
             if path == "/.well-known/agent-card.json":
                 self.respond(render_agent_card())
+                return
+            if path == "/.well-known/across-plugin.json":
+                self.respond(render_plugin_manifest())
                 return
             parts = [part for part in path.split("/") if part]
             if len(parts) == 2 and parts[0] == "tasks":
@@ -50,10 +54,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 self.respond(self.runtime.quality_benchmark(parts[1]))
                 return
             self.respond({"error": "not_found"}, status=404)
-        except KeyError as exc:
-            self.respond({"error": str(exc)}, status=404)
-        except Exception as exc:
-            self.respond({"error": str(exc)}, status=500)
+        except KeyError:
+            self.respond({"error": "not_found"}, status=404)
+        except Exception:
+            self.respond({"error": "internal_error"}, status=500)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -82,10 +86,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 self.respond(task.to_dict())
                 return
             self.respond({"error": "not_found"}, status=404)
-        except KeyError as exc:
-            self.respond({"error": str(exc)}, status=404)
-        except Exception as exc:
-            self.respond({"error": str(exc)}, status=500)
+        except KeyError:
+            self.respond({"error": "not_found"}, status=404)
+        except Exception:
+            self.respond({"error": "internal_error"}, status=500)
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or "0")
