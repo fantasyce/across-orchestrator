@@ -139,9 +139,9 @@ workspace. This can reduce overhead, but it requires stronger tenant isolation,
 explicit task ownership, per-container capability mapping, and careful
 workspace scoping. Sidecar mode is safer as the first general-purpose target.
 
-## Current v0.3.0 Readiness
+## Current v0.3.1 Readiness
 
-Across Orchestrator v0.3.0 is a good independent-runtime foundation, but it is
+Across Orchestrator v0.3.1 is a good independent-runtime foundation, but it is
 not yet a complete "install into any hosting platform" plugin standard.
 
 Already in place:

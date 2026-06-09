@@ -9,7 +9,7 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.3.0` ships the mature task orchestration core from Across
+`v0.3.1` ships the mature task orchestration core from Across
 Agents Assistant instead of reimplementing a simplified runtime from scratch.
 The transplanted core is kept under an app-compatible namespace so the original
 orchestration tests can run unchanged.
@@ -20,6 +20,8 @@ Validated in this repository:
 - Sidecar-first host integration writes runtime metadata under
   `~/.across/run/across-orchestrator`.
 - Durable task state defaults to `~/.across/data/across-orchestrator`.
+- Existing legacy `~/.across-orchestrator` task/event files are backfilled into
+  `~/.across/data/across-orchestrator` without overwriting newer files.
 - The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
 - The public `MatureOrchestrationEngine` wraps the transplanted `TaskState` and
   `TaskOrchestrator` for host-provided dispatch, validation, and owner-agent

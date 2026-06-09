@@ -136,6 +136,61 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(store.home, across_home.resolve() / "data" / "across-orchestrator")
             self.assertEqual(store.list_task_ids(), ["task-legacy"])
 
+    def test_legacy_default_home_backfills_when_across_data_exists(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            from across_orchestrator.store import LocalStore
+
+            across_home = Path(tempdir) / "across"
+            new_home = across_home / "data" / "across-orchestrator"
+            new_tasks = new_home / "tasks"
+            legacy_home = Path(tempdir) / ".across-orchestrator"
+            legacy_tasks = legacy_home / "tasks"
+            legacy_events = legacy_home / "events"
+            new_tasks.mkdir(parents=True)
+            legacy_tasks.mkdir(parents=True)
+            legacy_events.mkdir(parents=True)
+            (new_tasks / "task-current.json").write_text(
+                json.dumps({
+                    "task_id": "task-current",
+                    "goal": "Current task",
+                    "project_root": str(self.project),
+                    "deliverables": ["README.md"],
+                    "agent": "demo",
+                    "subtasks": [],
+                    "contract": {},
+                    "metadata": {},
+                    "status": "pending",
+                    "created_at": 1,
+                    "updated_at": 1,
+                }),
+                encoding="utf-8",
+            )
+            (legacy_tasks / "task-legacy.json").write_text(
+                json.dumps({
+                    "task_id": "task-legacy",
+                    "goal": "Legacy task",
+                    "project_root": str(self.project),
+                    "deliverables": ["README.md"],
+                    "agent": "demo",
+                    "subtasks": [],
+                    "contract": {},
+                    "metadata": {},
+                    "status": "pending",
+                    "created_at": 1,
+                    "updated_at": 1,
+                }),
+                encoding="utf-8",
+            )
+            (legacy_events / "task-legacy.jsonl").write_text(
+                '{"type":"created","task_id":"task-legacy"}\n',
+                encoding="utf-8",
+            )
+
+            store = LocalStore(env={"HOME": tempdir, "ACROSS_HOME": str(across_home)})
+
+            self.assertEqual(store.list_task_ids(), ["task-current", "task-legacy"])
+            self.assertTrue((new_home / "events" / "task-legacy.jsonl").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

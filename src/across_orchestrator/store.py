@@ -34,12 +34,12 @@ class LocalStore:
         self.events_dir.mkdir(parents=True, exist_ok=True)
 
     def _migrate_legacy_default_home(self) -> None:
-        if not self.should_migrate_legacy or self.home.exists():
+        if not self.should_migrate_legacy:
             return
         legacy_home = legacy_default_home(self.env)
         if legacy_home == self.home or not legacy_home.exists():
             return
-        shutil.copytree(legacy_home, self.home)
+        _copy_missing_regular_files(legacy_home, self.home)
 
     def save_task(self, task: Task) -> None:
         task.updated_at = time.time()
@@ -76,3 +76,14 @@ class LocalStore:
             if line.strip():
                 events.append(json.loads(line))
         return events
+
+
+def _copy_missing_regular_files(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in source.iterdir():
+        target = destination / child.name
+        if child.is_dir():
+            _copy_missing_regular_files(child, target)
+        elif child.is_file() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, target)
