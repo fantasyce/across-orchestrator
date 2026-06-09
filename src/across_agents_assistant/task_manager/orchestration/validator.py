@@ -473,12 +473,20 @@ class ContractValidator:
 
     @staticmethod
     def _is_within_project_dir(path: str, project_dir: str) -> bool:
-        normalized_path = os.path.realpath(path)
-        normalized_project_dir = os.path.realpath(project_dir)
+        normalized_path = ContractValidator._normalize_path_alias(os.path.realpath(path))
+        normalized_project_dir = ContractValidator._normalize_path_alias(os.path.realpath(project_dir))
         return (
             normalized_path == normalized_project_dir
             or normalized_path.startswith(normalized_project_dir + os.sep)
         )
+
+    @staticmethod
+    def _normalize_path_alias(path: str) -> str:
+        if path == "/private/tmp":
+            return "/tmp"
+        if path.startswith("/private/tmp/"):
+            return "/tmp/" + path.removeprefix("/private/tmp/")
+        return path
 
 
 def extract_routers(code_dir: str) -> Dict[str, List[str]]:

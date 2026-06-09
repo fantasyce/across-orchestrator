@@ -118,7 +118,15 @@ class AppGradeRuntimeTests(unittest.TestCase):
 
 def _node_playwright_available() -> bool:
     probe = subprocess.run(
-        ["node", "-e", "require('playwright');"],
+        [
+            "node",
+            "-e",
+            (
+                "const { chromium } = require('playwright');"
+                "(async () => { const browser = await chromium.launch({ headless: true });"
+                "await browser.close(); })().catch(() => process.exit(1));"
+            ),
+        ],
         text=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

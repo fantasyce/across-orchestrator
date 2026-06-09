@@ -2382,6 +2382,11 @@ function includesAll(text, terms) {
   return terms.every(term => lowered.includes(term));
 }
 
+function isBrowserEnvironmentError(err) {
+  const message = String((err && err.message) || err || '');
+  return /Executable doesn't exist|playwright install|Host system is missing dependencies|browserType\.launch/i.test(message);
+}
+
 (async () => {
   const failures = [];
   const checks = [];
@@ -2610,15 +2615,17 @@ function includesAll(text, terms) {
     }));
     process.exit(passed ? 0 : 1);
   } catch (err) {
+    const blockedByEnvironment = isBrowserEnvironmentError(err);
+    const prefix = blockedByEnvironment ? 'browser e2e environment unavailable: ' : 'browser e2e exception: ';
     console.log(JSON.stringify({
       passed: false,
-      blockedByEnvironment: false,
-      failures: ['browser e2e exception: ' + err.message],
+      blockedByEnvironment,
+      failures: [prefix + err.message],
       checks,
       consoleMessages,
       pageErrors
     }));
-    process.exit(1);
+    process.exit(blockedByEnvironment ? 2 : 1);
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
@@ -3462,15 +3469,16 @@ def _quality_gate_results_from_acceptance(
 
     for probe in probe_results:
         passed = bool(probe.get("passed"))
+        blocked_by_environment = bool(probe.get("blocked_by_environment"))
         results.append(QualityGateResult(
             gate_id=str(probe.get("id") or probe.get("probe_type") or "probe"),
             adapter_id=str(probe.get("probe_type") or "probe"),
-            status="passed" if passed else "failed",
+            status="passed" if passed else ("skipped" if blocked_by_environment else "failed"),
             required=bool(probe.get("required", True)),
             summary=str(probe.get("output_tail") or probe.get("stage") or probe.get("probe_type") or ""),
             evidence={key: value for key, value in probe.items() if key not in {"output_tail"}},
             output_tail=str(probe.get("output_tail") or ""),
-            blocked_by_environment=bool(probe.get("blocked_by_environment")),
+            blocked_by_environment=blocked_by_environment,
         ))
 
     if evidence_gaps:
