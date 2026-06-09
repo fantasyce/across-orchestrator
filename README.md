@@ -1,5 +1,9 @@
 # Across Orchestrator
 
+![Quality](https://github.com/fantasyce/across-orchestrator/actions/workflows/quality.yml/badge.svg)
+![Security](https://github.com/fantasyce/across-orchestrator/actions/workflows/security.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+
 Local-first task orchestration runtime for agent-to-agent delivery work.
 
 Across Orchestrator is the task-runtime companion to Across Context. It is a
@@ -200,3 +204,7 @@ bash scripts/check.sh
 
 The Python package has no runtime dependencies. `pytest` and Node Playwright are
 development/test dependencies only.
+
+GitHub Quality and Security workflows run the same repository checks, CodeQL for
+the Python source, and npm audit for the development-only browser probe
+dependencies.
