@@ -39,6 +39,50 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "hostingPlatformAdapters": True,
             "localFirst": True,
         },
+        "compatibility": {
+            "requiredHostVersion": ">=0.6.0",
+            "pluginApiVersion": "2026-06-10",
+            "compatiblePluginApiVersions": ["2026-06-10"],
+        },
+        "permissions": {
+            "filesystem": [
+                {"path": "~/.across/data/across-orchestrator", "access": "read-write", "reason": "Task state, events, and evidence"},
+                {"path": "~/.across/plugins/across-orchestrator", "access": "read", "reason": "Managed plugin runtime"},
+                {"path": "~/.across/run/across-orchestrator", "access": "read-write", "reason": "Local sidecar runtime metadata"},
+            ],
+            "network": [
+                {"host": "127.0.0.1", "reason": "Local HTTP sidecar only"}
+            ],
+            "secrets": [],
+        },
+        "diagnostics": {
+            "startupSafe": True,
+            "startsProcess": False,
+            "statusCommandSafeAtStartup": True,
+            "healthMayInitializeStore": True,
+        },
+        "lifecycle": {
+            "install": {
+                "hostManaged": True,
+                "strategy": "python-venv",
+                "idempotent": True,
+            },
+            "upgrade": {
+                "hostManaged": True,
+                "strategy": "reinstall",
+            },
+            "repair": {
+                "hostManaged": True,
+                "strategy": "reinstall",
+            },
+            "uninstall": {
+                "hostManaged": True,
+                "command": command,
+                "args": ["plugin-uninstall", "--json"],
+                "removesRuntime": True,
+                "preservesData": True,
+            },
+        },
         "entrypoints": {
             "sidecar": {
                 "command": command,
@@ -155,6 +199,10 @@ def render_plugin_status(command: str = "across-orchestrator", env: Mapping[str,
             "command": "python3 -m pip install across-orchestrator",
             "installDir": str(plugin_dir),
         },
+        "lifecycle": {
+            "actions": ["install", "upgrade", "repair", "uninstall"],
+            "preservesDataOnUninstall": True,
+        },
     }
 
 
@@ -167,4 +215,22 @@ def render_plugin_health(env: Mapping[str, str] | None = None) -> dict:
         "home": str(store.home),
         "taskCount": len(store.list_task_ids()),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def uninstall_managed_plugin(env: Mapping[str, str] | None = None) -> dict:
+    source = env if env is not None else os.environ
+    plugin_dir = plugin_root(source) / COMPONENT_ID
+    wrapper = ecosystem_bin_dir(source) / "across-orchestrator"
+    shutil.rmtree(plugin_dir, ignore_errors=True)
+    try:
+        wrapper.unlink()
+    except FileNotFoundError:
+        pass
+    return {
+        "pluginId": COMPONENT_ID,
+        "removed": True,
+        "pluginDir": str(plugin_dir),
+        "wrapper": str(wrapper),
+        "preservedData": str(component_data_home(env=source)),
     }

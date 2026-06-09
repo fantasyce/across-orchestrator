@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
-from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status
+from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
 
@@ -71,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     health = sub.add_parser("health", help="Probe local runtime health")
     health.add_argument("--json", action="store_true")
+
+    plugin_uninstall = sub.add_parser("plugin-uninstall", help="Remove a managed host plugin runtime while preserving data")
+    plugin_uninstall.add_argument("--json", action="store_true")
 
     sub.add_parser("mcp", help="Start MCP stdio server")
 
@@ -146,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         _print(render_plugin_health(), args.json)
+        return 0
+
+    if args.command == "plugin-uninstall":
+        _print(uninstall_managed_plugin(), args.json)
         return 0
 
     if args.command == "mcp":

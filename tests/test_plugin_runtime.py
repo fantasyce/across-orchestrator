@@ -56,9 +56,32 @@ class PluginRuntimeTests(unittest.TestCase):
 
         self.assertEqual(manifest["pluginApiVersion"], "2026-06-10")
         self.assertTrue(manifest["capabilities"]["hostingPlatformAdapters"])
+        self.assertEqual(manifest["compatibility"]["requiredHostVersion"], ">=0.6.0")
+        self.assertEqual(manifest["lifecycle"]["uninstall"]["args"][0], "plugin-uninstall")
+        self.assertTrue(manifest["lifecycle"]["uninstall"]["preservesData"])
+        self.assertEqual(manifest["permissions"]["network"][0]["host"], "127.0.0.1")
         self.assertEqual(manifest["entrypoints"]["sidecar"]["pluginManifestPath"], "/.well-known/across-plugin.json")
         self.assertIn("registered_agent_containers", manifest["hostingPlatform"]["hostProvides"])
         self.assertIn("evidence_bundles", manifest["hostingPlatform"]["pluginProvides"])
+
+    def test_plugin_uninstall_removes_runtime_not_data(self):
+        plugin_dir = self.home / "plugins" / "across-orchestrator"
+        wrapper = self.home / "bin" / "across-orchestrator"
+        data_dir = self.home / "data" / "across-orchestrator"
+        plugin_dir.mkdir(parents=True)
+        wrapper.parent.mkdir(parents=True)
+        data_dir.mkdir(parents=True)
+        (plugin_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        result = self.run_cli("plugin-uninstall", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+
+        self.assertTrue(payload["removed"])
+        self.assertFalse(plugin_dir.exists())
+        self.assertFalse(wrapper.exists())
+        self.assertTrue(data_dir.exists())
 
     def test_hosting_platform_contract_is_serializable(self):
         from across_orchestrator.host_adapters import build_hosting_platform_contract
