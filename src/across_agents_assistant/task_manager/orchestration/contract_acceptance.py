@@ -972,8 +972,8 @@ STATIC_WEB_FEATURE_RULES = [
 def _read_static_web_source_text(project_dir: str) -> str:
     chunks: List[str] = []
     for root, dirs, files in os.walk(project_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIR_NAMES]
-        for filename in files:
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIR_NAMES)
+        for filename in sorted(files):
             if not filename.lower().endswith((".html", ".css", ".js", ".jsx", ".ts", ".tsx")):
                 continue
             path = os.path.join(root, filename)
@@ -987,8 +987,8 @@ def _read_static_web_source_text(project_dir: str) -> str:
 def _read_static_script_source_text(project_dir: str, *, preserve_case: bool = False) -> str:
     chunks: List[str] = []
     for root, dirs, files in os.walk(project_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIR_NAMES]
-        for filename in files:
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIR_NAMES)
+        for filename in sorted(files):
             if not filename.lower().endswith((".js", ".jsx", ".ts", ".tsx")):
                 continue
             path = os.path.join(root, filename)
@@ -1004,8 +1004,8 @@ def _read_static_script_source_text(project_dir: str, *, preserve_case: bool = F
 def _read_static_project_text(project_dir: str) -> str:
     chunks: List[str] = []
     for root, dirs, files in os.walk(project_dir):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIR_NAMES]
-        for filename in files:
+        dirs[:] = sorted(d for d in dirs if d not in IGNORED_DIR_NAMES)
+        for filename in sorted(files):
             if not filename.lower().endswith((".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".md", ".txt")):
                 continue
             path = os.path.join(root, filename)
@@ -1387,10 +1387,17 @@ def _static_missing_js_dom_id_references(project_dir: str, entrypoint: str | Non
     return missing
 
 
-def _static_web_interaction_source_failures(source_text: str, description: str) -> List[str]:
+def _static_web_interaction_source_failures(
+    source_text: str,
+    description: str,
+    *,
+    script_source_text: str | None = None,
+) -> List[str]:
     normalized_description = _normalize_requirement_text(description)
     raw = _strip_static_source_comments(source_text)
+    script_raw = _strip_static_source_comments(script_source_text if script_source_text is not None else source_text)
     lowered = raw.lower()
+    script_lowered = script_raw.lower()
     failures: List[str] = []
 
     if (
@@ -1415,8 +1422,8 @@ def _static_web_interaction_source_failures(source_text: str, description: str) 
             failures.append("functional/artifact mode toggle cannot select Artifact")
         if "contract-tab" in lowered or "role=\"tab\"" in lowered or "role='tab'" in lowered:
             tab_click_handlers = []
-            for match in re.finditer(r"addEventListener\s*\(\s*['\"]click['\"]", raw, flags=re.IGNORECASE):
-                handler_window = raw[match.start():match.start() + 900]
+            for match in re.finditer(r"addEventListener\s*\(\s*['\"]click['\"]", script_raw, flags=re.IGNORECASE):
+                handler_window = script_raw[match.start():match.start() + 900]
                 tab_click_handlers.append(handler_window)
             tab_handlers = [
                 handler for handler in tab_click_handlers
@@ -1428,13 +1435,13 @@ def _static_web_interaction_source_failures(source_text: str, description: str) 
             ):
                 failures.append("functional/artifact mode tab does not update active state")
 
-    if "checklist" in lowered and re.search(r"checklist\s*\.\s*addeventlistener\s*\(\s*['\"]click", lowered):
-        guards_input = bool(re.search(r"tagname\s*={2,3}\s*['\"]input['\"]", lowered))
-        guards_label = bool(re.search(r"tagname\s*={2,3}\s*['\"]label['\"]", lowered))
+    if "checklist" in lowered and re.search(r"checklist\s*\.\s*addeventlistener\s*\(\s*['\"]click", script_lowered):
+        guards_input = bool(re.search(r"tagname\s*={2,3}\s*['\"]input['\"]", script_lowered))
+        guards_label = bool(re.search(r"tagname\s*={2,3}\s*['\"]label['\"]", script_lowered))
         if guards_input and not guards_label:
             failures.append("checklist label click double-toggle risk")
-        for match in re.finditer(r"checklist\s*\.\s*addeventlistener\s*\(\s*['\"]click['\"]", raw, flags=re.IGNORECASE):
-            handler_window = raw[match.start():match.start() + 1100]
+        for match in re.finditer(r"checklist\s*\.\s*addeventlistener\s*\(\s*['\"]click['\"]", script_raw, flags=re.IGNORECASE):
+            handler_window = script_raw[match.start():match.start() + 1100]
             handler_lower = handler_window.lower()
             handles_label_click = bool(
                 re.search(r"target\s*\.\s*tagname\s*!={1,2}\s*['\"]label['\"]", handler_lower)
@@ -1867,7 +1874,13 @@ def _static_web_explicit_requirement_failures(project_dir: str, task_description
     for metric in dynamic_missing_metrics:
         failures.append(f"delivery report runtime metric: {metric}")
     failures.extend(_static_missing_js_dom_id_references(project_dir, entrypoint))
-    failures.extend(_static_web_interaction_source_failures(source_text, description))
+    failures.extend(
+        _static_web_interaction_source_failures(
+            source_text,
+            description,
+            script_source_text=script_source_text,
+        )
+    )
     failures.extend(_static_js_runtime_risk_failures(script_source_text))
 
     requested_sections = [
@@ -2157,7 +2170,10 @@ def _static_web_responsive_layout_failures(project_dir: str) -> List[str]:
         r"{[^{}]*grid-template-columns\s*:\s*"
         r"(?:repeat\(\s*[23456789]\s*,|[^;{}]*(?:\b1fr\s+1fr\b|auto\s+repeat\())"
     )
-    mobile_fix_pattern = r"(?:grid-template-columns\s*:\s*1fr|overflow-x\s*:\s*auto|display\s*:\s*block|flex-direction\s*:\s*column)"
+    mobile_fix_pattern = (
+        r"(?:grid-template-columns\s*:\s*1fr\s*(?:[;}])|"
+        r"overflow-x\s*:\s*auto|display\s*:\s*block|flex-direction\s*:\s*column)"
+    )
     for selector in risky_selectors:
         selector_pattern = re.escape(selector)
         has_risky_grid = re.search(selector_pattern + r"[^{}]*" + risky_grid_pattern, source_text, flags=re.DOTALL)
