@@ -32,6 +32,33 @@ class PathTests(unittest.TestCase):
 
             self.assertEqual(default_home(env), override.resolve())
 
+    def test_app_grade_compat_paths_do_not_use_legacy_across_agents_home(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            from across_agents_assistant.paths import app_home
+
+            old_across_home = os.environ.get("ACROSS_HOME")
+            old_agents_home = os.environ.get("ACROSS_AGENTS_HOME")
+            os.environ["ACROSS_HOME"] = tempdir
+            os.environ.pop("ACROSS_AGENTS_HOME", None)
+            try:
+                self.assertEqual(
+                    app_home(),
+                    Path(tempdir).resolve()
+                    / "data"
+                    / "across-orchestrator"
+                    / "compat"
+                    / "across-agents-assistant",
+                )
+            finally:
+                if old_across_home is None:
+                    os.environ.pop("ACROSS_HOME", None)
+                else:
+                    os.environ["ACROSS_HOME"] = old_across_home
+                if old_agents_home is None:
+                    os.environ.pop("ACROSS_AGENTS_HOME", None)
+                else:
+                    os.environ["ACROSS_AGENTS_HOME"] = old_agents_home
+
 
 if __name__ == "__main__":
     unittest.main()

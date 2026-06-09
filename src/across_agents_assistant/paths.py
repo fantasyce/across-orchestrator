@@ -4,9 +4,19 @@ import os
 from pathlib import Path
 
 
+def _ecosystem_home() -> Path:
+    override = os.environ.get("ACROSS_HOME")
+    if override and override.strip():
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".across").resolve()
+
+
 def app_home() -> Path:
-    """Return the single app-owned local data root."""
-    return Path(os.path.expanduser(os.environ.get("ACROSS_AGENTS_HOME", "~/.across_agents")))
+    """Return the compatibility data root for transplanted app-grade modules."""
+    override = os.environ.get("ACROSS_AGENTS_HOME")
+    if override and override.strip():
+        return Path(override).expanduser().resolve()
+    return _ecosystem_home() / "data" / "across-orchestrator" / "compat" / "across-agents-assistant"
 
 
 def ensure_app_home() -> Path:
