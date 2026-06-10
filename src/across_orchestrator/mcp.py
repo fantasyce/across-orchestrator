@@ -6,6 +6,7 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
+from .agent_loop import AgentLoopRuntime
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 
@@ -70,6 +71,49 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": "Fetch the Across Orchestrator Agent Card.",
             "inputSchema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "start_agent_loop",
+            "description": "Start a durable agent loop run with context, actions, checkpoints, and memory policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "projectRoot": {"type": "string"},
+                    "agent": {"type": "string", "default": "owner"},
+                    "maxTurns": {"type": "integer", "default": 8},
+                    "memoryPolicy": {"type": "object"},
+                    "approvalPolicy": {"type": "object"},
+                },
+                "required": ["goal", "projectRoot"],
+            },
+        },
+        {
+            "name": "run_agent_loop",
+            "description": "Run or continue a durable agent loop until completion, approval wait, or turn budget stop.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
+        {
+            "name": "get_agent_loop",
+            "description": "Fetch durable agent loop state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
+        {
+            "name": "get_agent_loop_events",
+            "description": "Fetch durable agent loop events.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
     ]
 
 
@@ -93,6 +137,12 @@ def resource_definitions() -> list[dict[str, Any]]:
             "description": "Resolved local plugin install and runtime status.",
             "mimeType": "application/json",
         },
+        {
+            "uri": "across-orchestrator://agent-loop-schema",
+            "name": "Across Agent Loop Schema",
+            "description": "Stable loop run, step, action, observation, checkpoint, and memory-hook contract.",
+            "mimeType": "application/json",
+        },
     ]
 
 
@@ -107,7 +157,25 @@ def text_result(payload: Any) -> dict[str, Any]:
     }
 
 
+def agent_loop_schema() -> dict[str, Any]:
+    return {
+        "schemaVersion": "0.1",
+        "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
+        "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed"],
+        "actions": ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
+        "memoryPolicy": {
+            "provider": "across-context",
+            "read": "search active memory before planning",
+            "writeCandidates": "write durable summaries as pending candidates only",
+        },
+        "approvalPolicy": {
+            "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
+        },
+    }
+
+
 def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[str, Any]) -> Any:
+    loop_runtime = AgentLoopRuntime(runtime.store)
     if name == "submit_task":
         return runtime.submit_task(
             goal=arguments.get("goal") or "",
@@ -128,6 +196,21 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return runtime.evidence_bundle(arguments["taskId"])
     if name == "get_agent_card":
         return render_agent_card()
+    if name == "start_agent_loop":
+        return loop_runtime.start_loop(
+            goal=arguments.get("goal") or "",
+            project_root=arguments.get("projectRoot") or arguments.get("project_root") or ".",
+            agent=arguments.get("agent") or "owner",
+            max_turns=arguments.get("maxTurns") or arguments.get("max_turns") or 8,
+            memory_policy=arguments.get("memoryPolicy") or arguments.get("memory_policy"),
+            approval_policy=arguments.get("approvalPolicy") or arguments.get("approval_policy"),
+        ).to_dict()
+    if name == "run_agent_loop":
+        return loop_runtime.run_loop(arguments["loopId"]).to_dict()
+    if name == "get_agent_loop":
+        return loop_runtime.get_loop(arguments["loopId"]).to_dict()
+    if name == "get_agent_loop_events":
+        return loop_runtime.list_loop_events(arguments["loopId"])
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -138,6 +221,8 @@ def read_resource(uri: str) -> dict[str, Any]:
         payload = render_plugin_manifest()
     elif uri == "across-orchestrator://plugin-status":
         payload = render_plugin_status()
+    elif uri == "across-orchestrator://agent-loop-schema":
+        payload = agent_loop_schema()
     else:
         raise ValueError(f"Unknown resource: {uri}")
     return {

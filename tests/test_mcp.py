@@ -58,8 +58,10 @@ class McpTests(unittest.TestCase):
             self.assertIn("resources", responses[0]["result"]["capabilities"])
             tool_names = [tool["name"] for tool in responses[1]["result"]["tools"]]
             self.assertIn("submit_task", tool_names)
+            self.assertIn("start_agent_loop", tool_names)
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
+            self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
             manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
             self.assertEqual(manifest["id"], "across-orchestrator")
             submit_text = responses[4]["result"]["content"][0]["text"]
@@ -87,6 +89,68 @@ class McpTests(unittest.TestCase):
             self.assertEqual(json.loads(second[1]["result"]["content"][0]["text"])["status"], "completed")
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
+
+    def test_mcp_agent_loop_tools(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            project = Path(tempdir) / "project"
+            home = Path(tempdir) / "home"
+            project.mkdir()
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "start_agent_loop",
+                    "arguments": {
+                        "goal": "MCP loop scenario",
+                        "projectRoot": str(project),
+                        "maxTurns": 8,
+                    },
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            loop = json.loads(responses[1]["result"]["content"][0]["text"])
+            self.assertTrue(loop["loop_id"].startswith("loop-"))
+
+            run_messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {"name": "run_agent_loop", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(3, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"]}}),
+            ]
+            process2 = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in run_messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process2.returncode, 0, process2.stderr)
+            second = [json.loads(line) for line in process2.stdout.splitlines() if line.strip()]
+            completed = json.loads(second[1]["result"]["content"][0]["text"])
+            self.assertEqual(completed["status"], "completed")
+            events = json.loads(second[2]["result"]["content"][0]["text"])
+            self.assertIn("loop.completed", [event["type"] for event in events])
 
     def test_mcp_submit_release_e2e_task(self):
         with tempfile.TemporaryDirectory() as tempdir:

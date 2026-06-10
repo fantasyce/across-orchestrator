@@ -35,6 +35,8 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertTrue(task.task_id.startswith("task-"))
         self.assertEqual(task.status, "pending")
+        self.assertTrue(task.metadata["agent_loop"]["loop_id"].startswith("loop-"))
+        self.assertEqual(task.metadata["agent_loop"]["runtime"], "across-orchestrator")
         self.assertEqual([sub.path for sub in task.subtasks], ["README.md", "web/index.html"])
         self.assertEqual(task.contract["requiredArtifacts"], ["README.md", "web/index.html"])
 
@@ -46,6 +48,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], [
             "task.created",
             "contract.created",
+            "agent_loop.created",
             "subtask.created",
             "subtask.created",
         ])
@@ -70,6 +73,14 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(evidence["task_id"], task.task_id)
         self.assertEqual(evidence["status"], "completed")
         self.assertEqual(evidence["quality"]["status"], "passed")
+        self.assertEqual(evidence["agent_loop"]["status"], "completed")
+        self.assertEqual(evidence["agent_loop"]["step_count"], 5)
+        self.assertEqual(evidence["agent_loop"]["checkpoint_count"], 5)
+        self.assertEqual(
+            evidence["agent_loop"]["action_types"],
+            ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
+        )
+        self.assertEqual(evidence["agent_loop"]["memory_policy"]["provider"], "across-context")
         self.assertEqual(
             [artifact["path"] for artifact in evidence["artifacts"]],
             ["README.md", "notes/release.md"],

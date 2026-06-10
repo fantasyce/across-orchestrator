@@ -9,6 +9,7 @@ import os
 import time
 
 from .agent_card import render_agent_card
+from .agent_loop import AgentLoopRuntime
 from .paths import COMPONENT_ID, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
@@ -23,6 +24,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
     @property
     def runtime(self) -> OrchestratorRuntime:
         return self.server.runtime  # type: ignore[attr-defined]
+
+    @property
+    def loop_runtime(self) -> AgentLoopRuntime:
+        return self.server.loop_runtime  # type: ignore[attr-defined]
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -53,6 +58,12 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "quality-benchmark":
                 self.respond(self.runtime.quality_benchmark(parts[1]))
                 return
+            if len(parts) == 2 and parts[0] == "loops":
+                self.respond(self.loop_runtime.get_loop(parts[1]).to_dict())
+                return
+            if len(parts) == 3 and parts[0] == "loops" and parts[2] == "events":
+                self.respond(self.loop_runtime.list_loop_events(parts[1]))
+                return
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
@@ -80,10 +91,26 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 )
                 self.respond(task.to_dict(), status=201)
                 return
+            if path == "/loops":
+                loop = self.loop_runtime.start_loop(
+                    goal=payload.get("goal") or "",
+                    project_root=payload.get("projectRoot") or payload.get("project_root") or ".",
+                    agent=payload.get("agent") or "owner",
+                    max_turns=payload.get("maxTurns") or payload.get("max_turns") or 8,
+                    memory_policy=payload.get("memoryPolicy") or payload.get("memory_policy"),
+                    approval_policy=payload.get("approvalPolicy") or payload.get("approval_policy"),
+                    metadata=payload.get("metadata"),
+                )
+                self.respond(loop.to_dict(), status=201)
+                return
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "run":
                 task = self.runtime.run_task(parts[1])
                 self.respond(task.to_dict())
+                return
+            if len(parts) == 3 and parts[0] == "loops" and parts[2] == "run":
+                loop = self.loop_runtime.run_loop(parts[1])
+                self.respond(loop.to_dict())
                 return
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
@@ -124,6 +151,7 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int]):
         super().__init__(server_address, OrchestratorHandler)
         self.runtime = OrchestratorRuntime()
+        self.loop_runtime = AgentLoopRuntime(self.runtime.store)
 
 
 def _runtime_info_path(runtime_id: str, runtime_info: str | None = None) -> Path:

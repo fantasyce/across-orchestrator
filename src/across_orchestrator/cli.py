@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
+from .agent_loop import AgentLoopRuntime
 from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
@@ -60,6 +61,25 @@ def build_parser() -> argparse.ArgumentParser:
     quality.add_argument("task_id")
     quality.add_argument("--json", action="store_true")
 
+    loop_start = sub.add_parser("loop-start", help="Start a durable agent loop run")
+    loop_start.add_argument("goal")
+    loop_start.add_argument("--project", required=True)
+    loop_start.add_argument("--agent", default="owner")
+    loop_start.add_argument("--max-turns", type=int, default=8)
+    loop_start.add_argument("--json", action="store_true")
+
+    loop_run = sub.add_parser("loop-run", help="Run or continue an agent loop")
+    loop_run.add_argument("loop_id")
+    loop_run.add_argument("--json", action="store_true")
+
+    loop_status = sub.add_parser("loop-status", help="Show agent loop status")
+    loop_status.add_argument("loop_id")
+    loop_status.add_argument("--json", action="store_true")
+
+    loop_events = sub.add_parser("loop-events", help="Show agent loop events")
+    loop_events.add_argument("loop_id")
+    loop_events.add_argument("--json", action="store_true")
+
     card = sub.add_parser("agent-card", help="Print the A2A-style Agent Card")
     card.add_argument("--json", action="store_true")
 
@@ -89,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     runtime = OrchestratorRuntime()
+    loop_runtime = AgentLoopRuntime(runtime.store)
 
     if args.command == "init":
         store = LocalStore()
@@ -133,6 +154,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "quality":
         _print(runtime.quality_benchmark(args.task_id), args.json)
+        return 0
+
+    if args.command == "loop-start":
+        loop = loop_runtime.start_loop(
+            goal=args.goal,
+            project_root=args.project,
+            agent=args.agent,
+            max_turns=args.max_turns,
+        )
+        _print(loop.to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-run":
+        _print(loop_runtime.run_loop(args.loop_id).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-status":
+        _print(loop_runtime.get_loop(args.loop_id).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-events":
+        _print(loop_runtime.list_loop_events(args.loop_id), args.json)
         return 0
 
     if args.command == "agent-card":

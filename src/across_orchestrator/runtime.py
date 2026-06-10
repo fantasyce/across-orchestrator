@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .app_grade import APP_GRADE_RELEASE_E2E_ENGINE, build_release_e2e_payload, run_release_e2e_payload
 from .adapters import adapter_for
+from .agent_loop import AgentLoopRuntime
 from .evidence import build_evidence_bundle, build_quality
 from .models import SubTask, Task
 from .store import LocalStore
@@ -12,6 +14,7 @@ from .store import LocalStore
 class OrchestratorRuntime:
     def __init__(self, store: LocalStore | None = None):
         self.store = store or LocalStore()
+        self.loop_runtime = AgentLoopRuntime(self.store)
 
     def submit_task(
         self,
@@ -26,9 +29,21 @@ class OrchestratorRuntime:
         root.mkdir(parents=True, exist_ok=True)
         paths = list(deliverables or ["README.md"])
         task = Task.new(goal=goal.strip(), project_root=str(root), deliverables=paths, agent=agent)
+        loop = self.loop_runtime.start_loop(
+            goal=task.goal,
+            project_root=str(root),
+            agent=agent,
+            metadata={"task_id": task.task_id, "task_kind": "delivery"},
+        )
+        task.metadata["agent_loop"] = {
+            "loop_id": loop.loop_id,
+            "runtime": "across-orchestrator",
+            "mode": "durable",
+        }
         self.store.save_task(task)
         self.store.append_event(task.task_id, "task.created", {"goal": task.goal, "agent": task.agent})
         self.store.append_event(task.task_id, "contract.created", task.contract)
+        self.store.append_event(task.task_id, "agent_loop.created", task.metadata["agent_loop"])
         for subtask in task.subtasks:
             self.store.append_event(task.task_id, "subtask.created", subtask.__dict__)
         return task
@@ -69,9 +84,21 @@ class OrchestratorRuntime:
             for item in payload["subtasks"]
         ]
         task.metadata["app_grade_request"] = payload
+        loop = self.loop_runtime.start_loop(
+            goal=task.goal,
+            project_root=str(root),
+            agent=task.agent,
+            metadata={"task_id": task.task_id, "task_kind": "release_e2e"},
+        )
+        task.metadata["agent_loop"] = {
+            "loop_id": loop.loop_id,
+            "runtime": "across-orchestrator",
+            "mode": "durable",
+        }
         self.store.save_task(task)
         self.store.append_event(task.task_id, "task.created", {"goal": task.goal, "agent": task.agent})
         self.store.append_event(task.task_id, "contract.created", task.contract)
+        self.store.append_event(task.task_id, "agent_loop.created", task.metadata["agent_loop"])
         self.store.append_event(task.task_id, "app_grade.release_e2e.created", {
             "scenario_id": payload["scenario_id"],
             "required_files": task.contract["requiredArtifacts"],
@@ -93,6 +120,7 @@ class OrchestratorRuntime:
         task.status = "running"
         self.store.save_task(task)
         self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
+        self._run_task_loop(task)
         for subtask in task.subtasks:
             if subtask.status == "completed":
                 continue
@@ -127,7 +155,11 @@ class OrchestratorRuntime:
 
     def evidence_bundle(self, task_id: str) -> dict:
         task = self.store.load_task(task_id)
-        return build_evidence_bundle(task, self.store.list_events(task_id))
+        bundle = build_evidence_bundle(task, self.store.list_events(task_id))
+        loop_summary = self._agent_loop_summary(task)
+        if loop_summary:
+            bundle["agent_loop"] = loop_summary
+        return bundle
 
     def quality_benchmark(self, task_id: str) -> dict:
         task = self.store.load_task(task_id)
@@ -137,6 +169,7 @@ class OrchestratorRuntime:
         task.status = "running"
         self.store.save_task(task)
         self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
+        self._run_task_loop(task)
         payload = task.metadata.get("app_grade_request")
         if not payload:
             payload = build_release_e2e_payload(
@@ -161,3 +194,49 @@ class OrchestratorRuntime:
         })
         self.store.append_event(task.task_id, "task.completed", result["quality_report"])
         return task
+
+    def _run_task_loop(self, task: Task) -> None:
+        loop_id = str((task.metadata.get("agent_loop") or {}).get("loop_id") or "")
+        if not loop_id:
+            return
+        loop = self.loop_runtime.run_loop(loop_id)
+        self.store.append_event(task.task_id, "agent_loop.completed", {
+            "loop_id": loop.loop_id,
+            "status": loop.status,
+            "turn_count": loop.turn_count,
+            "checkpoint_count": loop.checkpoint_count,
+        })
+        task.metadata["agent_loop"].update({
+            "status": loop.status,
+            "turn_count": loop.turn_count,
+            "checkpoint_count": loop.checkpoint_count,
+        })
+        self.store.save_task(task)
+
+    def _agent_loop_summary(self, task: Task) -> dict[str, Any] | None:
+        loop_id = str((task.metadata.get("agent_loop") or {}).get("loop_id") or "")
+        if not loop_id:
+            return None
+        try:
+            loop = self.loop_runtime.get_loop(loop_id)
+        except KeyError:
+            return {
+                "loop_id": loop_id,
+                "status": "missing",
+                "step_count": 0,
+                "checkpoint_count": 0,
+                "action_types": [],
+            }
+        return {
+            "loop_id": loop.loop_id,
+            "status": loop.status,
+            "agent": loop.agent,
+            "turn_count": loop.turn_count,
+            "step_count": len(loop.steps),
+            "checkpoint_count": loop.checkpoint_count,
+            "action_types": [step.action.type for step in loop.steps],
+            "memory_policy": loop.memory_policy,
+            "approval_policy": loop.approval_policy,
+            "final_output": loop.final_output,
+            "events": self.loop_runtime.list_loop_events(loop.loop_id),
+        }

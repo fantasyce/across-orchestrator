@@ -11,6 +11,10 @@ def render_agent_card() -> dict:
         "url": "https://github.com/fantasyce/across-orchestrator",
         "capabilities": {
             "taskOrchestration": True,
+            "agentLoopRuntime": True,
+            "checkpoints": True,
+            "humanApproval": True,
+            "memoryHooks": True,
             "contracts": True,
             "artifacts": True,
             "evidenceBundles": True,
@@ -39,6 +43,11 @@ def render_agent_card() -> dict:
             },
         },
         "skills": [
+            {
+                "id": "agent-loop-runtime",
+                "name": "Agent Loop Runtime",
+                "description": "Run durable goal-action-observation loops with checkpoints, approval gates, and memory hooks.",
+            },
             {
                 "id": "task-orchestration",
                 "name": "Task Orchestration",

@@ -92,6 +92,7 @@ class HttpTests(unittest.TestCase):
         plugin_manifest = self.get("/.well-known/across-plugin.json")
         self.assertEqual(plugin_manifest["id"], "across-orchestrator")
         self.assertEqual(plugin_manifest["entrypoints"]["sidecar"]["healthPath"], "/health")
+        self.assertTrue(plugin_manifest["capabilities"]["agentLoopRuntime"])
 
         card = self.get("/.well-known/agent-card.json")
         self.assertEqual(card["name"], "Across Orchestrator")
@@ -125,6 +126,33 @@ class HttpTests(unittest.TestCase):
         stream = request.urlopen(self.base + f"/tasks/{task_id}/events/stream", timeout=5)
         body = stream.read().decode("utf-8")
         self.assertIn("event: task.completed", body)
+
+    def test_http_agent_loop_lifecycle(self):
+        loop = self.post(
+            "/loops",
+            {
+                "goal": "Run platform loop over hosted agents",
+                "projectRoot": str(self.project),
+                "agent": "owner",
+                "maxTurns": 8,
+            },
+        )
+        loop_id = loop["loop_id"]
+        self.assertTrue(loop_id.startswith("loop-"))
+        self.assertEqual(loop["status"], "pending")
+
+        completed = self.post(f"/loops/{loop_id}/run", {})
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(
+            [step["action"]["type"] for step in completed["steps"]],
+            ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
+        )
+
+        status = self.get(f"/loops/{loop_id}")
+        self.assertEqual(status["final_output"], "Agent loop completed for: Run platform loop over hosted agents")
+
+        events = self.get(f"/loops/{loop_id}/events")
+        self.assertIn("loop.completed", [event["type"] for event in events])
 
     def test_http_submit_release_e2e(self):
         task = self.post(
