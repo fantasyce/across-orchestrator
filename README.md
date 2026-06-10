@@ -13,14 +13,15 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.4.0` ships the mature task orchestration core from Across
-Agents Assistant instead of reimplementing a simplified runtime from scratch.
-The transplanted core is kept under an app-compatible namespace so the original
-orchestration tests can run unchanged.
+`v0.5.0` adds a durable Agent Loop Runtime on top of the mature task
+orchestration core that was split out from Across Agents Assistant. The
+runtime keeps loop state, step checkpoints, approval gates, memory hooks, and
+final output evidence in the external plugin so hosts can stay thin.
 
 Validated in this repository:
 
-- 395 original Across Agents Assistant orchestration tests pass unchanged.
+- 427 repository tests pass, including the transplanted Across Agents Assistant
+  orchestration suite and the new Agent Loop Runtime protocol tests.
 - Sidecar-first host integration writes runtime metadata under
   `~/.across/run/across-orchestrator`.
 - Durable task state defaults to `~/.across/data/across-orchestrator`.
@@ -29,6 +30,8 @@ Validated in this repository:
 - The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
 - Hosts can inspect `plugin-status`, `health`, and
   `/.well-known/across-plugin.json` before routing work to the runtime.
+- Hosts can start, resume, inspect, and audit durable agent loops through CLI,
+  HTTP, MCP, or the Python runtime boundary.
 - Hosting platforms can pass registered agent-container descriptors through the
   Python SDK boundary without adopting Across Agents Assistant internals.
 - Hosts can run explicit plugin lifecycle actions, including uninstalling the
@@ -40,6 +43,10 @@ Validated in this repository:
 - CLI, HTTP, and MCP also expose an app-grade Release E2E scenario that uses the
   mature requirement, delivery contract, acceptance, quality gate, and evidence
   modules.
+- Agent loop runs produce explicit `memory_search`, `task_dispatch`,
+  `quality_gate`, `memory_write_candidate`, and `final_output` steps so hosting
+  platforms can attach memory providers, agent dispatchers, and human approval
+  UI without adopting Across Agents Assistant internals.
 
 Across Orchestrator still does not own model keys, macOS permissions, or local
 agent installation. Those remain host responsibilities by design.
@@ -142,6 +149,10 @@ across-orchestrator status <task-id> --json
 across-orchestrator events <task-id> --json
 across-orchestrator evidence <task-id> --json
 across-orchestrator quality <task-id> --json
+across-orchestrator loop-start "Refactor checkout flow" --project . --json
+across-orchestrator loop-run <loop-id> --json
+across-orchestrator loop-status <loop-id> --json
+across-orchestrator loop-events <loop-id> --json
 across-orchestrator agent-card --json
 across-orchestrator plugin-manifest --json
 across-orchestrator plugin-status --json
@@ -171,6 +182,10 @@ Endpoints:
 - `GET /tasks/{task_id}/events/stream`
 - `GET /tasks/{task_id}/evidence-bundle`
 - `GET /tasks/{task_id}/quality-benchmark`
+- `POST /loops`
+- `POST /loops/{loop_id}/run`
+- `GET /loops/{loop_id}`
+- `GET /loops/{loop_id}/events`
 
 ## MCP Server
 
@@ -182,12 +197,17 @@ The MCP server exposes:
 - `get_task`
 - `get_evidence_bundle`
 - `get_agent_card`
+- `start_agent_loop`
+- `run_agent_loop`
+- `get_agent_loop`
+- `get_agent_loop_events`
 
 It also exposes resources:
 
 - `across-orchestrator://agent-card`
 - `across-orchestrator://plugin-manifest`
 - `across-orchestrator://plugin-status`
+- `across-orchestrator://agent-loop-schema`
 
 Run:
 

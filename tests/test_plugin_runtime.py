@@ -56,6 +56,10 @@ class PluginRuntimeTests(unittest.TestCase):
 
         self.assertEqual(manifest["pluginApiVersion"], "2026-06-10")
         self.assertTrue(manifest["capabilities"]["hostingPlatformAdapters"])
+        self.assertTrue(manifest["capabilities"]["agentLoopRuntime"])
+        self.assertTrue(manifest["capabilities"]["checkpoints"])
+        self.assertTrue(manifest["capabilities"]["humanApproval"])
+        self.assertTrue(manifest["capabilities"]["memoryHooks"])
         self.assertEqual(manifest["compatibility"]["requiredHostVersion"], ">=0.6.0")
         self.assertEqual(manifest["lifecycle"]["uninstall"]["args"][0], "plugin-uninstall")
         self.assertTrue(manifest["lifecycle"]["uninstall"]["preservesData"])
@@ -63,6 +67,8 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(manifest["entrypoints"]["sidecar"]["pluginManifestPath"], "/.well-known/across-plugin.json")
         self.assertIn("registered_agent_containers", manifest["hostingPlatform"]["hostProvides"])
         self.assertIn("evidence_bundles", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertIn("agent_loop_runtime", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertEqual(manifest["protocols"]["mcp"]["tools"]["startAgentLoop"], "start_agent_loop")
 
     def test_plugin_uninstall_removes_runtime_not_data(self):
         plugin_dir = self.home / "plugins" / "across-orchestrator"

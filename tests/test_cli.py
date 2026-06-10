@@ -85,8 +85,10 @@ class CliTests(unittest.TestCase):
         manifest = json.loads(result.stdout)
         self.assertEqual(manifest["id"], "across-orchestrator")
         self.assertEqual(manifest["kind"], "task-runtime")
+        self.assertTrue(manifest["capabilities"]["agentLoopRuntime"])
         self.assertEqual(manifest["entrypoints"]["sidecar"]["command"], "across-orchestrator")
         self.assertEqual(manifest["paths"]["data"], "~/.across/data/across-orchestrator")
+        self.assertEqual(manifest["protocols"]["http"]["loopStart"], "POST /loops")
 
     def test_cli_submit_release_e2e_uses_app_grade_engine(self):
         submit = self.run_cli(
@@ -110,6 +112,38 @@ class CliTests(unittest.TestCase):
         payload = json.loads(evidence.stdout)
         self.assertEqual(payload["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
         self.assertIn(payload["app_grade"]["delivery_quality"], {"passed", "partial"})
+
+    def test_cli_agent_loop_lifecycle(self):
+        start = self.run_cli(
+            "loop-start",
+            "Coordinate platform agents",
+            "--project",
+            str(self.project),
+            "--agent",
+            "owner",
+            "--max-turns",
+            "8",
+            "--json",
+        )
+        self.assertEqual(start.returncode, 0, start.stderr)
+        loop = json.loads(start.stdout)
+        self.assertTrue(loop["loop_id"].startswith("loop-"))
+        self.assertEqual(loop["status"], "pending")
+
+        run = self.run_cli("loop-run", loop["loop_id"], "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        completed = json.loads(run.stdout)
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["steps"][0]["action"]["type"], "memory_search")
+        self.assertEqual(completed["checkpoint_count"], 5)
+
+        status = self.run_cli("loop-status", loop["loop_id"], "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["final_output"], "Agent loop completed for: Coordinate platform agents")
+
+        events = self.run_cli("loop-events", loop["loop_id"], "--json")
+        self.assertEqual(events.returncode, 0, events.stderr)
+        self.assertIn("loop.completed", [event["type"] for event in json.loads(events.stdout)])
 
 
 if __name__ == "__main__":
