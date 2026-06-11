@@ -102,6 +102,18 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "approve_agent_loop_action",
+            "description": "Approve a pending durable agent loop action and execute the approved adapter step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "loopId": {"type": "string"},
+                    "actionId": {"type": "string"},
+                },
+                "required": ["loopId", "actionId"],
+            },
+        },
+        {
             "name": "get_agent_loop",
             "description": "Fetch durable agent loop state.",
             "inputSchema": {
@@ -164,10 +176,10 @@ def text_result(payload: Any) -> dict[str, Any]:
 
 def agent_loop_schema() -> dict[str, Any]:
     return {
-        "schemaVersion": "0.1",
+        "schemaVersion": "0.2",
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
         "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed"],
-        "actions": ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
+        "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
         "memoryPolicy": {
             "provider": "across-context",
             "read": "search active memory before planning",
@@ -215,6 +227,8 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         ).to_dict()
     if name == "run_agent_loop":
         return loop_runtime.run_loop(arguments["loopId"]).to_dict()
+    if name == "approve_agent_loop_action":
+        return loop_runtime.approve_action(arguments["loopId"], arguments["actionId"]).to_dict()
     if name == "get_agent_loop":
         return loop_runtime.get_loop(arguments["loopId"]).to_dict()
     if name == "get_agent_loop_events":

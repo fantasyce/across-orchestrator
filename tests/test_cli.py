@@ -145,6 +145,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events.returncode, 0, events.stderr)
         self.assertIn("loop.completed", [event["type"] for event in json.loads(events.stdout)])
 
+    def test_cli_agent_loop_approval_lifecycle(self):
+        start = self.run_cli(
+            "loop-start",
+            "Coordinate approval-gated platform agents",
+            "--project",
+            str(self.project),
+            "--agent",
+            "owner",
+            "--max-turns",
+            "8",
+            "--require-approval-for",
+            "task_dispatch",
+            "--json",
+        )
+        self.assertEqual(start.returncode, 0, start.stderr)
+        loop = json.loads(start.stdout)
+
+        waiting = self.run_cli("loop-run", loop["loop_id"], "--json")
+        self.assertEqual(waiting.returncode, 0, waiting.stderr)
+        waiting_payload = json.loads(waiting.stdout)
+        self.assertEqual(waiting_payload["status"], "awaiting_approval")
+        action_id = waiting_payload["steps"][-1]["action"]["action_id"]
+
+        approved = self.run_cli("loop-approve", loop["loop_id"], action_id, "--json")
+        self.assertEqual(approved.returncode, 0, approved.stderr)
+        self.assertEqual(json.loads(approved.stdout)["steps"][-1]["action"]["approval_status"], "approved")
+
+        completed = self.run_cli("loop-run", loop["loop_id"], "--json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -59,11 +59,13 @@ class McpTests(unittest.TestCase):
             tool_names = [tool["name"] for tool in responses[1]["result"]["tools"]]
             self.assertIn("submit_task", tool_names)
             self.assertIn("start_agent_loop", tool_names)
+            self.assertIn("approve_agent_loop_action", tool_names)
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
             manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
             self.assertEqual(manifest["id"], "across-orchestrator")
+            self.assertTrue(manifest["capabilities"]["agentLoopV2"])
             submit_text = responses[4]["result"]["content"][0]["text"]
             task_id = json.loads(submit_text)["task_id"]
 
@@ -151,6 +153,87 @@ class McpTests(unittest.TestCase):
             self.assertEqual(completed["status"], "completed")
             events = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertIn("loop.completed", [event["type"] for event in events])
+
+    def test_mcp_agent_loop_approval_tool(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            project = Path(tempdir) / "project"
+            home = Path(tempdir) / "home"
+            project.mkdir()
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "start_agent_loop",
+                    "arguments": {
+                        "goal": "MCP approval loop",
+                        "projectRoot": str(project),
+                        "approvalPolicy": {"requireApprovalFor": ["task_dispatch"]},
+                        "maxTurns": 8,
+                    },
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            loop = json.loads([json.loads(line) for line in process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
+
+            run_messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {"name": "run_agent_loop", "arguments": {"loopId": loop["loop_id"]}}),
+            ]
+            waiting_process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in run_messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(waiting_process.returncode, 0, waiting_process.stderr)
+            waiting = json.loads([json.loads(line) for line in waiting_process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
+            self.assertEqual(waiting["status"], "awaiting_approval")
+            action_id = waiting["steps"][-1]["action"]["action_id"]
+
+            approve_messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "approve_agent_loop_action",
+                    "arguments": {"loopId": loop["loop_id"], "actionId": action_id},
+                }),
+            ]
+            approved_process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in approve_messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(approved_process.returncode, 0, approved_process.stderr)
+            approved = json.loads([json.loads(line) for line in approved_process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
+            self.assertEqual(approved["steps"][-1]["action"]["approval_status"], "approved")
 
     def test_mcp_submit_release_e2e_task(self):
         with tempfile.TemporaryDirectory() as tempdir:

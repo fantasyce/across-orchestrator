@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+import os
 import time
 
 from .models import new_id
@@ -10,6 +11,112 @@ from .store import LocalStore
 
 
 TERMINAL_LOOP_STATUSES = {"completed", "failed", "stopped"}
+
+
+class MemoryProvider(Protocol):
+    def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
+        ...
+
+    def remember_candidate(self, *, text: str, project_root: str, tags: list[str] | None = None) -> dict[str, Any]:
+        ...
+
+
+class LoopDispatcher(Protocol):
+    def dispatch(self, *, loop: "LoopRun", action_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+
+class QualityGate(Protocol):
+    def evaluate(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+
+class Finalizer(Protocol):
+    def finalize(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+
+class NullMemoryProvider:
+    def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
+        return {
+            "provider": "across-context",
+            "query": query,
+            "project_root": project_root,
+            "result_count": 0,
+            "results": [],
+            "mode": "memory-provider-not-configured",
+        }
+
+    def remember_candidate(self, *, text: str, project_root: str, tags: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "provider": "across-context",
+            "memory": {
+                "id": None,
+                "text": text,
+                "project_root": project_root,
+                "tags": list(tags or []),
+                "status": "pending",
+            },
+            "mode": "memory-provider-not-configured",
+        }
+
+
+class HostLoopDispatcher:
+    def dispatch(self, *, loop: "LoopRun", action_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        if action_type == "remediation_dispatch":
+            return {
+                "dispatch": "completed",
+                "agent": loop.agent,
+                "adapter": "host",
+                "remediation": True,
+                "message": "Host remediation adapter accepted the loop action.",
+            }
+        return {
+            "dispatch": "completed",
+            "agent": loop.agent,
+            "adapter": "host",
+            "project_root": loop.project_root,
+            "message": "Host dispatch adapter accepted the loop action.",
+        }
+
+
+class DefaultQualityGate:
+    def evaluate(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
+        required = list((loop.metadata.get("quality_gates") or ["artifact_integrity", "evidence_bundle", "memory_policy"]))
+        return {
+            "quality": "passed",
+            "passed": True,
+            "gate_count": len(required),
+            "required": required,
+            "summary": "Default quality gate passed.",
+        }
+
+
+class DefaultFinalizer:
+    def finalize(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
+        quality_summary = ""
+        for step in reversed(loop.steps):
+            if step.action.type == "quality_gate":
+                summary = step.observation.payload.get("summary")
+                if summary and summary != "Default quality gate passed.":
+                    quality_summary = f" {summary}"
+                break
+        return {
+            "final_output": (
+                f"Agent loop completed for: {loop.goal}.{quality_summary}"
+                if quality_summary
+                else f"Agent loop completed for: {loop.goal}"
+            ),
+            "status": "completed",
+        }
+
+
+@dataclass
+class AgentLoopAdapters:
+    memory_provider: MemoryProvider = field(default_factory=NullMemoryProvider)
+    dispatcher: LoopDispatcher = field(default_factory=HostLoopDispatcher)
+    quality_gate: QualityGate = field(default_factory=DefaultQualityGate)
+    finalizer: Finalizer = field(default_factory=DefaultFinalizer)
 
 
 @dataclass
@@ -102,6 +209,9 @@ class LoopStep:
             updated_at=float(data.get("updated_at", time.time())),
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class LoopRun:
@@ -182,8 +292,9 @@ class LoopRun:
 class AgentLoopRuntime:
     """Durable agent-loop runtime used by CLI, HTTP, MCP, and host SDK adapters."""
 
-    def __init__(self, store: LocalStore | None = None):
+    def __init__(self, store: LocalStore | None = None, adapters: AgentLoopAdapters | None = None):
         self.store = store or LocalStore()
+        self.adapters = adapters or default_agent_loop_adapters()
 
     def start_loop(
         self,
@@ -230,7 +341,20 @@ class AgentLoopRuntime:
         loop.error = None
         self.store.save_loop(loop)
 
-        while len(loop.steps) < len(self._planned_action_types(loop)):
+        while True:
+            action_type = self._select_next_action(loop)
+            if action_type is None:
+                loop.status = "completed"
+                if loop.final_output is None:
+                    loop.final_output = f"Agent loop completed for: {loop.goal}"
+                self.store.save_loop(loop)
+                self.store.append_loop_event(loop.loop_id, "loop.completed", {
+                    "final_output": loop.final_output,
+                    "turn_count": loop.turn_count,
+                    "checkpoint_count": loop.checkpoint_count,
+                })
+                return loop
+
             if loop.turn_count >= loop.max_turns:
                 loop.status = "stopped"
                 loop.error = "max_turns_exceeded"
@@ -242,7 +366,11 @@ class AgentLoopRuntime:
                 })
                 return loop
 
-            action_type = self._planned_action_types(loop)[len(loop.steps)]
+            self.store.append_loop_event(loop.loop_id, "loop.next_action.selected", {
+                "action_type": action_type,
+                "turn": loop.turn_count + 1,
+                "reason": self._next_action_reason(loop, action_type),
+            })
             step = self._build_step(loop, action_type)
             loop.turn_count = step.turn
             loop.steps.append(step)
@@ -250,20 +378,10 @@ class AgentLoopRuntime:
             if step.status == "waiting_approval":
                 loop.status = "awaiting_approval"
                 self.store.save_loop(loop)
-                self.store.append_loop_event(loop.loop_id, "loop.approval_required", step.to_dict() if hasattr(step, "to_dict") else asdict(step))
+                self.store.append_loop_event(loop.loop_id, "loop.approval_required", step.to_dict())
                 return loop
             self.store.append_loop_event(loop.loop_id, "loop.step.completed", asdict(step))
             self.store.save_loop(loop)
-
-        loop.status = "completed"
-        loop.final_output = f"Agent loop completed for: {loop.goal}"
-        self.store.save_loop(loop)
-        self.store.append_loop_event(loop.loop_id, "loop.completed", {
-            "final_output": loop.final_output,
-            "turn_count": loop.turn_count,
-            "checkpoint_count": loop.checkpoint_count,
-        })
-        return loop
 
     def approve_action(self, loop_id: str, action_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
@@ -275,17 +393,57 @@ class AgentLoopRuntime:
             step.action.approval_status = "approved"
             step.status = "completed"
             step.observation = LoopObservation.new("approved", {
-                **self._observation_payload(loop, step.action.type),
+                **self._execute_action(loop, step.action.type),
                 "approval": "approved",
             })
             step.checkpoint = self._checkpoint(loop, step.action.type, step.turn)
             step.updated_at = time.time()
             loop.status = "running"
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+            if step.action.type == "final_output":
+                loop.final_output = step.observation.payload.get("final_output")
             self.store.save_loop(loop)
             self.store.append_loop_event(loop.loop_id, "loop.action.approved", asdict(step))
+            self.store.append_loop_event(loop.loop_id, "loop.step.completed", asdict(step))
             return loop
         raise KeyError(f"Action not found: {action_id}")
+
+    def _select_next_action(self, loop: LoopRun) -> str | None:
+        if bool(loop.memory_policy.get("read", True)) and not self._has_action(loop, "memory_search"):
+            return "memory_search"
+        if not self._has_action(loop, "task_dispatch"):
+            return "task_dispatch"
+        latest_quality = self._latest_step(loop, "quality_gate")
+        latest_dispatch_index = self._latest_action_index(loop, {"task_dispatch", "remediation_dispatch"})
+        latest_quality_index = self._latest_action_index(loop, {"quality_gate"})
+        if latest_quality_index < latest_dispatch_index:
+            return "quality_gate"
+        if latest_quality and self._quality_failed(latest_quality):
+            if self._action_count(loop, "remediation_dispatch") < self._max_remediation_turns(loop):
+                return "remediation_dispatch"
+            loop.status = "failed"
+            loop.error = "quality_gate_failed"
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.failed", {
+                "reason": loop.error,
+                "failed_quality": latest_quality.observation.payload,
+            })
+            return None
+        if bool(loop.memory_policy.get("writeCandidates", True)) and not self._has_action_after(loop, "memory_write_candidate", latest_quality_index):
+            return "memory_write_candidate"
+        if not self._has_action(loop, "final_output"):
+            return "final_output"
+        return None
+
+    def _next_action_reason(self, loop: LoopRun, action_type: str) -> str:
+        return {
+            "memory_search": "memory policy requires context before dispatch",
+            "task_dispatch": "no dispatch observation exists for this loop",
+            "quality_gate": "latest dispatch requires verification",
+            "remediation_dispatch": "latest quality gate failed and remediation budget remains",
+            "memory_write_candidate": "quality passed and memory policy allows pending summaries",
+            "final_output": "loop has enough evidence to produce final output",
+        }.get(action_type, "selected by loop policy")
 
     def _planned_action_types(self, loop: LoopRun) -> list[str]:
         actions: list[str] = []
@@ -316,13 +474,16 @@ class AgentLoopRuntime:
                 observation=LoopObservation.new("pending", {"approval": "required"}),
                 checkpoint={},
             )
+        observation_payload = self._execute_action(loop, action_type)
+        if action_type == "final_output":
+            loop.final_output = observation_payload.get("final_output")
         return LoopStep.new(
             loop_id=loop.loop_id,
             turn=turn,
             phase=self._phase_for(action_type),
             status="completed",
             action=action,
-            observation=LoopObservation.new("completed", self._observation_payload(loop, action_type)),
+            observation=LoopObservation.new("completed", observation_payload),
             checkpoint=self._checkpoint(loop, action_type, turn),
         )
 
@@ -330,6 +491,7 @@ class AgentLoopRuntime:
         return {
             "memory_search": "Search shared memory before planning",
             "task_dispatch": "Dispatch work through host adapter",
+            "remediation_dispatch": "Dispatch remediation through host adapter",
             "quality_gate": "Verify delivery quality",
             "memory_write_candidate": "Prepare pending memory candidate",
             "final_output": "Produce final output",
@@ -339,6 +501,7 @@ class AgentLoopRuntime:
         return {
             "memory_search": "context",
             "task_dispatch": "act",
+            "remediation_dispatch": "act",
             "quality_gate": "verify",
             "memory_write_candidate": "remember",
             "final_output": "final",
@@ -349,6 +512,8 @@ class AgentLoopRuntime:
             return {"query": loop.goal, "provider": loop.memory_policy.get("provider", "across-context")}
         if action_type == "task_dispatch":
             return {"agent": loop.agent, "project_root": loop.project_root, "host_adapter": "provided-by-host"}
+        if action_type == "remediation_dispatch":
+            return {"agent": loop.agent, "project_root": loop.project_root, "host_adapter": "provided-by-host", "mode": "remediation"}
         if action_type == "quality_gate":
             return {"required": ["artifact_integrity", "evidence_bundle", "memory_policy"]}
         if action_type == "memory_write_candidate":
@@ -357,31 +522,108 @@ class AgentLoopRuntime:
             return {"format": "summary"}
         return {}
 
-    def _observation_payload(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+    def _execute_action(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+        context = self._context(loop)
         if action_type == "memory_search":
-            return {
-                "provider": loop.memory_policy.get("provider", "across-context"),
-                "result_count": 0,
-                "mode": "active-memory-only",
-            }
-        if action_type == "task_dispatch":
-            return {"dispatch": "accepted", "agent": loop.agent, "adapter": "host"}
+            return self.adapters.memory_provider.search(
+                query=loop.goal,
+                project_root=loop.project_root,
+                limit=int(loop.memory_policy.get("limit") or 8),
+                status=str(loop.memory_policy.get("readStatus") or "active"),
+            )
+        if action_type in {"task_dispatch", "remediation_dispatch"}:
+            return self.adapters.dispatcher.dispatch(loop=loop, action_type=action_type, context=context)
         if action_type == "quality_gate":
-            return {"quality": "passed", "gate_count": 3}
+            return self.adapters.quality_gate.evaluate(loop=loop, context=context)
         if action_type == "memory_write_candidate":
-            return {
-                "provider": loop.memory_policy.get("provider", "across-context"),
-                "status": "pending",
-                "candidate": f"Loop summary for {loop.goal}",
-            }
+            return self.adapters.memory_provider.remember_candidate(
+                text=self._memory_candidate_text(loop),
+                project_root=loop.project_root,
+                tags=["agent-loop", loop.loop_id],
+            )
         if action_type == "final_output":
-            return {"final_output": f"Agent loop completed for: {loop.goal}"}
+            return self.adapters.finalizer.finalize(loop=loop, context=context)
         return {}
 
     def _checkpoint(self, loop: LoopRun, action_type: str, turn: int) -> dict[str, Any]:
+        latest = loop.steps[-1].observation.payload if loop.steps else {}
         return {
             "loop_id": loop.loop_id,
             "turn": turn,
             "action_type": action_type,
             "status": "completed",
+            "adapter": self._adapter_name(action_type),
+            "observation_status": latest.get("quality") or latest.get("dispatch") or latest.get("status") or "completed",
         }
+
+    def _context(self, loop: LoopRun) -> dict[str, Any]:
+        return {
+            "loop_id": loop.loop_id,
+            "goal": loop.goal,
+            "project_root": loop.project_root,
+            "steps": [step.to_dict() for step in loop.steps],
+            "memory": [step.observation.payload for step in loop.steps if step.action.type == "memory_search"],
+            "quality": [step.observation.payload for step in loop.steps if step.action.type == "quality_gate"],
+        }
+
+    def _memory_candidate_text(self, loop: LoopRun) -> str:
+        quality = self._latest_step(loop, "quality_gate")
+        quality_summary = ""
+        if quality:
+            quality_summary = str(quality.observation.payload.get("summary") or quality.observation.payload.get("quality") or "")
+        return f"Agent loop completed for {loop.goal}. {quality_summary}".strip()
+
+    def _adapter_name(self, action_type: str) -> str:
+        if action_type == "memory_search" or action_type == "memory_write_candidate":
+            return self.adapters.memory_provider.__class__.__name__
+        if action_type in {"task_dispatch", "remediation_dispatch"}:
+            return self.adapters.dispatcher.__class__.__name__
+        if action_type == "quality_gate":
+            return self.adapters.quality_gate.__class__.__name__
+        if action_type == "final_output":
+            return self.adapters.finalizer.__class__.__name__
+        return "unknown"
+
+    def _latest_step(self, loop: LoopRun, action_type: str) -> LoopStep | None:
+        for step in reversed(loop.steps):
+            if step.action.type == action_type:
+                return step
+        return None
+
+    def _has_action(self, loop: LoopRun, action_type: str) -> bool:
+        return any(step.action.type == action_type for step in loop.steps)
+
+    def _has_action_after(self, loop: LoopRun, action_type: str, index: int) -> bool:
+        return any(step.action.type == action_type for step in loop.steps[index + 1:])
+
+    def _action_count(self, loop: LoopRun, action_type: str) -> int:
+        return sum(1 for step in loop.steps if step.action.type == action_type)
+
+    def _latest_action_index(self, loop: LoopRun, action_types: set[str]) -> int:
+        for index in range(len(loop.steps) - 1, -1, -1):
+            if loop.steps[index].action.type in action_types:
+                return index
+        return -1
+
+    def _quality_failed(self, step: LoopStep) -> bool:
+        payload = step.observation.payload
+        if payload.get("passed") is False:
+            return True
+        return str(payload.get("quality") or "").lower() in {"failed", "error", "blocked"}
+
+    def _max_remediation_turns(self, loop: LoopRun) -> int:
+        value = loop.metadata.get("maxRemediationTurns", loop.metadata.get("max_remediation_turns", 1))
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 1
+
+
+def default_agent_loop_adapters(env: dict[str, str] | None = None) -> AgentLoopAdapters:
+    source = env or os.environ
+    provider = str(source.get("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER") or "").strip().lower()
+    if provider in {"across-context", "across_context"}:
+        from .across_context import AcrossContextMemoryProvider
+
+        return AgentLoopAdapters(memory_provider=AcrossContextMemoryProvider(env=source))
+    return AgentLoopAdapters()

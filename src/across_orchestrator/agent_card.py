@@ -12,9 +12,14 @@ def render_agent_card() -> dict:
         "capabilities": {
             "taskOrchestration": True,
             "agentLoopRuntime": True,
+            "agentLoopV2": True,
+            "dynamicLoopPlanning": True,
             "checkpoints": True,
             "humanApproval": True,
+            "actionApprovalResume": True,
+            "remediationDispatch": True,
             "memoryHooks": True,
+            "agentLoopMemoryHooksV2": True,
             "contracts": True,
             "artifacts": True,
             "evidenceBundles": True,
@@ -34,19 +39,21 @@ def render_agent_card() -> dict:
                 "command": "across-orchestrator",
                 "args": ["mcp"],
                 "tools": True,
+                "approveAgentLoopAction": True,
             },
             "http": {
                 "transport": "local-sidecar",
                 "command": "across-orchestrator",
                 "args": ["serve", "--host", "127.0.0.1"],
                 "health": "/health",
+                "loopApprove": "/loops/{loop_id}/actions/{action_id}/approve",
             },
         },
         "skills": [
             {
                 "id": "agent-loop-runtime",
-                "name": "Agent Loop Runtime",
-                "description": "Run durable goal-action-observation loops with checkpoints, approval gates, and memory hooks.",
+                "name": "Agent Loop Runtime v2",
+                "description": "Run durable goal-action-observation loops with dynamic planning, checkpoints, approval gates, remediation dispatch, and memory hooks.",
             },
             {
                 "id": "task-orchestration",

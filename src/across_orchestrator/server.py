@@ -115,6 +115,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 loop = self.loop_runtime.run_loop(parts[1])
                 self.respond(loop.to_dict())
                 return
+            if len(parts) == 5 and parts[0] == "loops" and parts[2] == "actions" and parts[4] == "approve":
+                loop = self.loop_runtime.approve_action(parts[1], parts[3])
+                self.respond(loop.to_dict())
+                return
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
