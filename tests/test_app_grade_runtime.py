@@ -44,6 +44,8 @@ class AppGradeRuntimeTests(unittest.TestCase):
             "tests/e2e-smoke.mjs",
         ])
         self.assertGreaterEqual(len(task.subtasks), 7)
+        self.assertEqual([subtask.wave for subtask in task.subtasks], [1, 2, 3, 4, 5, 6, 7])
+        self.assertTrue(task.subtasks[1].dependencies)
 
         completed = runtime.run_task(task.task_id)
         self.assertEqual(completed.status, "completed")

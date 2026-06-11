@@ -13,14 +13,14 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.5.0` adds a durable Agent Loop Runtime on top of the mature task
+`v0.5.1` refines the durable Agent Loop Runtime on top of the mature task
 orchestration core that was split out from Across Agents Assistant. The
 runtime keeps loop state, step checkpoints, approval gates, memory hooks, and
 final output evidence in the external plugin so hosts can stay thin.
 
 Validated in this repository:
 
-- 427 repository tests pass, including the transplanted Across Agents Assistant
+- 429 repository tests pass, including the transplanted Across Agents Assistant
   orchestration suite and the new Agent Loop Runtime protocol tests.
 - Sidecar-first host integration writes runtime metadata under
   `~/.across/run/across-orchestrator`.

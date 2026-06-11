@@ -23,6 +23,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "projectRoot": {"type": "string"},
                     "deliverables": {"type": "array", "items": {"type": "string"}},
                     "agent": {"type": "string", "default": "demo"},
+                    "subtasks": {"type": "array", "items": {"type": "object"}},
+                    "strictDependency": {"type": "boolean", "default": False},
+                    "strict_dependency": {"type": "boolean", "default": False},
+                    "taskTypes": {"type": "array", "items": {"type": "string"}},
+                    "task_types": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["goal", "projectRoot"],
             },
@@ -182,6 +187,9 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
             project_root=arguments.get("projectRoot") or arguments.get("project_root") or ".",
             deliverables=arguments.get("deliverables") or ["README.md"],
             agent=arguments.get("agent") or "demo",
+            subtasks=arguments.get("subtasks") or None,
+            strict_dependency=bool(arguments.get("strictDependency") or arguments.get("strict_dependency")),
+            task_types=arguments.get("taskTypes") or arguments.get("task_types") or None,
         ).to_dict()
     if name == "run_task":
         return runtime.run_task(arguments["taskId"]).to_dict()

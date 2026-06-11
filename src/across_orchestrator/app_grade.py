@@ -116,6 +116,7 @@ def run_release_e2e_payload(
                 "status": "completed",
                 "deliverables": item.get("deliverables", []),
                 "dependencies": item.get("dependencies", []),
+                "wave": item.get("wave") or item.get("wave_number") or 1,
             }
             for item in subtasks
         ],

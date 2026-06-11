@@ -109,6 +109,7 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "skipped_required_count, and gateResults or gate_results; camelCase-only metric keys do not pass."
             ),
             "agent": api_agent,
+            "wave": 1,
             "priority": 1,
             "dependencies": [],
             "deliverables": [
@@ -134,8 +135,9 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "Final Quality Score, Required Gate Failures, Manual Checks, Skipped Checks, and Final Verdict."
             ),
             "agent": html_agent,
-            "priority": 1,
-            "dependencies": [],
+            "wave": 2,
+            "priority": 2,
+            "dependencies": ["api_service"],
             "deliverables": [
                 {"artifact_type": "html_entrypoint", "path_hint": "web/index.html", "required": True},
             ],
@@ -151,7 +153,8 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "and delivery report metrics. Avoid external fonts, CDNs, and overlapping text."
             ),
             "agent": css_agent,
-            "priority": 2,
+            "wave": 3,
+            "priority": 3,
             "dependencies": ["web_html"],
             "deliverables": [
                 {"artifact_type": "stylesheet", "path_hint": "web/styles.css", "required": True},
@@ -171,8 +174,9 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "Use local fixture data for file:// mode and fetch only for http:/https: with caught failures."
             ),
             "agent": js_agent,
-            "priority": 3,
-            "dependencies": ["web_html", "web_styles", "api_service"],
+            "wave": 4,
+            "priority": 4,
+            "dependencies": ["api_service", "web_html", "web_styles"],
             "deliverables": [
                 {"artifact_type": "client_script", "path_hint": "web/app.js", "required": True},
             ],
@@ -188,8 +192,9 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "with passed true only when every check succeeds. Do not require package.json or node_modules."
             ),
             "agent": cli_agent,
-            "priority": 2,
-            "dependencies": ["api_service", "web_html"],
+            "wave": 5,
+            "priority": 5,
+            "dependencies": ["api_service", "web_html", "web_styles", "web_app"],
             "deliverables": [
                 {"artifact_type": "cli_source", "path_hint": "cli/quality-check.mjs", "required": True},
             ],
@@ -205,7 +210,8 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "and exit non-zero on failure. Use only Node built-ins."
             ),
             "agent": cli_agent,
-            "priority": 4,
+            "wave": 6,
+            "priority": 6,
             "dependencies": ["api_service", "cli_quality"],
             "deliverables": [
                 {"artifact_type": "test_source", "path_hint": "tests/e2e-smoke.mjs", "required": True},
@@ -224,7 +230,8 @@ def build_release_e2e_subtasks(available_agent_ids: Optional[List[str]] = None) 
                 "and dependency-free."
             ),
             "agent": readme_agent,
-            "priority": 5,
+            "wave": 7,
+            "priority": 7,
             "dependencies": ["web_app", "smoke_test"],
             "deliverables": [
                 {"artifact_type": "documentation", "path_hint": "README.md", "required": True},
