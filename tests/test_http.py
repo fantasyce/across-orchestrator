@@ -154,6 +154,27 @@ class HttpTests(unittest.TestCase):
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
 
+    def test_http_agent_loop_approval_lifecycle(self):
+        loop = self.post(
+            "/loops",
+            {
+                "goal": "Run approval-gated platform loop",
+                "projectRoot": str(self.project),
+                "agent": "owner",
+                "maxTurns": 8,
+                "approvalPolicy": {"requireApprovalFor": ["task_dispatch"]},
+            },
+        )
+        waiting = self.post(f"/loops/{loop['loop_id']}/run", {})
+        self.assertEqual(waiting["status"], "awaiting_approval")
+        action_id = waiting["steps"][-1]["action"]["action_id"]
+
+        approved = self.post(f"/loops/{loop['loop_id']}/actions/{action_id}/approve", {})
+        self.assertEqual(approved["steps"][-1]["action"]["approval_status"], "approved")
+
+        completed = self.post(f"/loops/{loop['loop_id']}/run", {})
+        self.assertEqual(completed["status"], "completed")
+
     def test_http_submit_release_e2e(self):
         task = self.post(
             "/release-e2e",

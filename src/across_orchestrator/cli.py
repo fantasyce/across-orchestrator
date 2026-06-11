@@ -67,11 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     loop_start.add_argument("--project", required=True)
     loop_start.add_argument("--agent", default="owner")
     loop_start.add_argument("--max-turns", type=int, default=8)
+    loop_start.add_argument("--require-approval-for", action="append", default=[])
     loop_start.add_argument("--json", action="store_true")
 
     loop_run = sub.add_parser("loop-run", help="Run or continue an agent loop")
     loop_run.add_argument("loop_id")
     loop_run.add_argument("--json", action="store_true")
+
+    loop_approve = sub.add_parser("loop-approve", help="Approve a pending agent loop action")
+    loop_approve.add_argument("loop_id")
+    loop_approve.add_argument("action_id")
+    loop_approve.add_argument("--json", action="store_true")
 
     loop_status = sub.add_parser("loop-status", help="Show agent loop status")
     loop_status.add_argument("loop_id")
@@ -164,12 +170,17 @@ def main(argv: list[str] | None = None) -> int:
             project_root=args.project,
             agent=args.agent,
             max_turns=args.max_turns,
+            approval_policy={"requireApprovalFor": args.require_approval_for or []},
         )
         _print(loop.to_dict(), args.json)
         return 0
 
     if args.command == "loop-run":
         _print(loop_runtime.run_loop(args.loop_id).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-approve":
+        _print(loop_runtime.approve_action(args.loop_id, args.action_id).to_dict(), args.json)
         return 0
 
     if args.command == "loop-status":

@@ -13,10 +13,11 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.5.1` refines the durable Agent Loop Runtime on top of the mature task
+`v0.6.0` upgrades the durable Agent Loop Runtime on top of the mature task
 orchestration core that was split out from Across Agents Assistant. The
-runtime keeps loop state, step checkpoints, approval gates, memory hooks, and
-final output evidence in the external plugin so hosts can stay thin.
+runtime now keeps loop state, step checkpoints, approval gates, adapter-backed
+memory hooks, dynamic remediation dispatch, and final output evidence in the
+external plugin so hosts can stay thin.
 
 Validated in this repository:
 
@@ -44,9 +45,12 @@ Validated in this repository:
   mature requirement, delivery contract, acceptance, quality gate, and evidence
   modules.
 - Agent loop runs produce explicit `memory_search`, `task_dispatch`,
-  `quality_gate`, `memory_write_candidate`, and `final_output` steps so hosting
-  platforms can attach memory providers, agent dispatchers, and human approval
-  UI without adopting Across Agents Assistant internals.
+  `quality_gate`, `remediation_dispatch`, `memory_write_candidate`, and
+  `final_output` steps so hosting platforms can attach memory providers, agent
+  dispatchers, quality gates, finalizers, and human approval UI without
+  adopting Across Agents Assistant internals.
+- Agent Loop v2 can call Across Context through a subprocess-backed memory
+  provider when hosts set `ACROSS_ORCHESTRATOR_MEMORY_PROVIDER=across-context`.
 
 Across Orchestrator still does not own model keys, macOS permissions, or local
 agent installation. Those remain host responsibilities by design.
@@ -138,6 +142,21 @@ It then runs mature quality gates for artifact integrity, workspace hygiene,
 security/privacy, agent mix, static web, browser E2E, API service, and generic
 CLI.
 
+## Agent Loop V2 Memory Provider
+
+Agent Loop v2 keeps memory access behind a host-selected provider. To use
+Across Context from the runtime, set:
+
+```bash
+export ACROSS_ORCHESTRATOR_MEMORY_PROVIDER=across-context
+export ACROSS_CONTEXT_COMMAND="$HOME/.across/bin/across-context"
+```
+
+The runtime then searches active global/project memory before dispatch and
+writes compact post-loop summaries as pending project memory candidates. Missing
+or failing memory providers are recorded in loop observations instead of
+silently aborting the task runtime.
+
 ## CLI
 
 ```bash
@@ -151,6 +170,7 @@ across-orchestrator evidence <task-id> --json
 across-orchestrator quality <task-id> --json
 across-orchestrator loop-start "Refactor checkout flow" --project . --json
 across-orchestrator loop-run <loop-id> --json
+across-orchestrator loop-approve <loop-id> <action-id> --json
 across-orchestrator loop-status <loop-id> --json
 across-orchestrator loop-events <loop-id> --json
 across-orchestrator agent-card --json
@@ -184,6 +204,7 @@ Endpoints:
 - `GET /tasks/{task_id}/quality-benchmark`
 - `POST /loops`
 - `POST /loops/{loop_id}/run`
+- `POST /loops/{loop_id}/actions/{action_id}/approve`
 - `GET /loops/{loop_id}`
 - `GET /loops/{loop_id}/events`
 
@@ -199,6 +220,7 @@ The MCP server exposes:
 - `get_agent_card`
 - `start_agent_loop`
 - `run_agent_loop`
+- `approve_agent_loop_action`
 - `get_agent_loop`
 - `get_agent_loop_events`
 
