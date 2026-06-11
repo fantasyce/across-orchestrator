@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 import time
@@ -19,12 +19,31 @@ class SubTask:
     agent: str = "demo"
     status: str = "pending"
     wave: int = 1
+    dependencies: list[str] = field(default_factory=list)
+    priority: int = 1
     attempts: int = 0
     error: str | None = None
 
     @classmethod
-    def new(cls, goal: str, path: str, agent: str = "demo") -> "SubTask":
-        return cls(subtask_id=new_id("subtask"), goal=goal, path=path, agent=agent)
+    def new(
+        cls,
+        goal: str,
+        path: str,
+        agent: str = "demo",
+        *,
+        wave: int = 1,
+        dependencies: list[str] | None = None,
+        priority: int = 1,
+    ) -> "SubTask":
+        return cls(
+            subtask_id=new_id("subtask"),
+            goal=goal,
+            path=path,
+            agent=agent,
+            wave=max(1, int(wave or 1)),
+            dependencies=list(dependencies or []),
+            priority=max(1, int(priority or 1)),
+        )
 
 
 @dataclass
@@ -68,12 +87,76 @@ class Task:
         }
         return task
 
+    @classmethod
+    def from_plan(
+        cls,
+        *,
+        goal: str,
+        project_root: str,
+        subtasks: list[dict[str, Any]],
+        deliverables: list[str] | None = None,
+        agent: str = "demo",
+    ) -> "Task":
+        resolved_root = str(Path(project_root).expanduser().resolve())
+        planned: list[SubTask] = []
+        required: list[str] = []
+        id_by_spec_id: dict[str, str] = {}
+
+        for index, spec in enumerate(subtasks, start=1):
+            path = _path_from_subtask_spec(spec)
+            required.append(path)
+            spec_id = str(spec.get("id") or spec.get("subtask_id") or f"stage-{index}")
+            subtask = SubTask.new(
+                goal=str(spec.get("goal") or spec.get("description") or f"Produce {path} for: {goal}"),
+                path=path,
+                agent=str(spec.get("agent") or agent or "demo"),
+                wave=int(spec.get("wave") or spec.get("wave_number") or index),
+                dependencies=[str(item) for item in spec.get("dependencies") or []],
+                priority=int(spec.get("priority") or index),
+            )
+            planned.append(subtask)
+            id_by_spec_id[spec_id] = subtask.subtask_id
+
+        for subtask in planned:
+            subtask.dependencies = [
+                id_by_spec_id.get(dep, dep)
+                for dep in subtask.dependencies
+            ]
+
+        for path in deliverables or []:
+            required.append(normalize_artifact_path(path))
+
+        clean_required = list(dict.fromkeys(required))
+        task = cls(
+            task_id=new_id("task"),
+            goal=goal,
+            project_root=resolved_root,
+            agent=agent,
+            subtasks=planned,
+        )
+        task.contract = {
+            "contractVersion": "0.2-plan",
+            "goal": goal,
+            "requiredArtifacts": clean_required,
+            "qualityGates": ["required_artifacts_present", "no_artifacts_outside_project", "serial_wave_dependencies"],
+            "serialPlan": True,
+        }
+        return task
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
-        subtasks = [SubTask(**item) for item in data.get("subtasks", [])]
+        subtask_fields = {item.name for item in fields(SubTask)}
+        subtasks = []
+        for raw in data.get("subtasks", []):
+            item = dict(raw)
+            if "wave_number" in item and "wave" not in item:
+                item["wave"] = item.pop("wave_number")
+            item.setdefault("dependencies", [])
+            item.setdefault("priority", 1)
+            subtasks.append(SubTask(**{key: value for key, value in item.items() if key in subtask_fields}))
         return cls(
             task_id=data["task_id"],
             goal=data["goal"],
@@ -96,3 +179,13 @@ def normalize_artifact_path(path: str) -> str:
     if any(part == ".." for part in parts):
         raise ValueError(f"deliverable path must stay inside project root: {path}")
     return "/".join(parts)
+
+
+def _path_from_subtask_spec(spec: dict[str, Any]) -> str:
+    path = spec.get("path") or spec.get("output_file") or spec.get("path_hint")
+    if not path:
+        for deliverable in spec.get("deliverables") or []:
+            path = deliverable.get("path_hint") or deliverable.get("path")
+            if path:
+                break
+    return normalize_artifact_path(str(path or "README.md"))

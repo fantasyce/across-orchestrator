@@ -81,6 +81,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     project_root=payload.get("projectRoot") or payload.get("project_root") or ".",
                     deliverables=payload.get("deliverables") or ["README.md"],
                     agent=payload.get("agent") or "demo",
+                    subtasks=payload.get("subtasks") or None,
+                    strict_dependency=bool(payload.get("strictDependency") or payload.get("strict_dependency")),
+                    task_types=payload.get("taskTypes") or payload.get("task_types") or None,
                 )
                 self.respond(task.to_dict(), status=201)
                 return

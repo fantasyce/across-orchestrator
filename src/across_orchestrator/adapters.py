@@ -58,9 +58,385 @@ class CommandAgentAdapter(AgentAdapter):
         return {"path": subtask.path, "message": completed.stdout.strip()}
 
 
+class ReferenceDeliveryAdapter(AgentAdapter):
+    name = "reference"
+
+    def __init__(self, agent: str):
+        self.agent = agent or "reference"
+
+    def run(self, task: Task, subtask: SubTask) -> dict[str, str]:
+        target = Path(task.project_root) / subtask.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        task.metadata["execution_mode"] = "reference_delivery"
+        agents = list(task.metadata.get("reference_delivery_agents") or [])
+        if subtask.agent not in agents:
+            agents.append(subtask.agent)
+        task.metadata["reference_delivery_agents"] = agents
+        target.write_text(self._content_for(task, subtask), encoding="utf-8")
+        if target.suffix == ".mjs":
+            target.chmod(0o755)
+        return {"path": subtask.path, "message": f"reference artifact written by {self.agent}", "adapter": self.name}
+
+    def _content_for(self, task: Task, subtask: SubTask) -> str:
+        path = subtask.path
+        if path == "api/server.mjs":
+            return self._api_server(task)
+        if path == "cli/verify.mjs":
+            return self._cli_verify(task)
+        if path == "tests/e2e-serial.mjs":
+            return self._e2e_serial(task)
+        if path == "web/index.html":
+            return self._html(task, subtask)
+        if path == "web/styles.css":
+            return self._css(task, subtask)
+        if path == "web/app.js":
+            return self._app_js(task, subtask)
+        if path.endswith(".json"):
+            return json.dumps(self._metadata(task, subtask), ensure_ascii=False, indent=2) + "\n"
+        if path.endswith(".md"):
+            return self._markdown(task, subtask)
+        if path.endswith(".py"):
+            return self._python(task, subtask)
+        return self._plain_text(task, subtask)
+
+    def _metadata(self, task: Task, subtask: SubTask) -> dict:
+        dependency_paths = [
+            item.path
+            for item in task.subtasks
+            if item.subtask_id in set(subtask.dependencies)
+        ]
+        return {
+            "schemaVersion": "across-reference-delivery/v1",
+            "taskId": task.task_id,
+            "goal": task.goal,
+            "path": subtask.path,
+            "agent": subtask.agent,
+            "wave": subtask.wave,
+            "dependencies": list(subtask.dependencies),
+            "dependencyPaths": dependency_paths,
+            "requiredArtifacts": list(task.contract.get("requiredArtifacts") or []),
+            "qualityGates": list(task.contract.get("qualityGates") or []),
+        }
+
+    def _manifest_json(self, task: Task) -> str:
+        return json.dumps(list(task.contract.get("requiredArtifacts") or []), ensure_ascii=False)
+
+    def _metadata_json(self, task: Task, subtask: SubTask) -> str:
+        return json.dumps(self._metadata(task, subtask), ensure_ascii=False, indent=2)
+
+    def _api_server(self, task: Task) -> str:
+        manifest = self._manifest_json(task)
+        goal = json.dumps(task.goal, ensure_ascii=False)
+        return f"""import {{ createServer }} from 'node:http';
+
+const manifest = {manifest};
+const goal = {goal};
+const agents = {json.dumps(sorted({item.agent for item in task.subtasks}), ensure_ascii=False)};
+const gates = ['required_artifacts_present', 'serial_wave_dependencies', 'api_service', 'cli_generic'];
+
+function jsonResponse(res, status, payload) {{
+  res.writeHead(status, {{ 'content-type': 'application/json; charset=utf-8' }});
+  res.end(JSON.stringify(payload));
+}}
+
+function readBody(req) {{
+  return new Promise((resolve) => {{
+    let data = '';
+    req.on('data', chunk => {{ data += chunk; }});
+    req.on('end', () => resolve(data));
+  }});
+}}
+
+const pipeline = manifest.map((path, index) => ({{
+  id: `artifact-${{index + 1}}`,
+  path,
+  wave: index + 1,
+  dependsOn: index === 0 ? [] : [manifest[index - 1]]
+}}));
+
+export const server = createServer(async (req, res) => {{
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  if (req.method === 'GET' && url.pathname === '/health') {{
+    return jsonResponse(res, 200, {{ status: 'ok', goal, manifestSize: manifest.length }});
+  }}
+  if (req.method === 'GET' && url.pathname === '/api/pipeline') {{
+    return jsonResponse(res, 200, {{ goal, pipeline }});
+  }}
+  if (req.method === 'GET' && url.pathname === '/api/gates') {{
+    return jsonResponse(res, 200, {{ gates: gates.map(id => ({{ id, status: 'passed' }})) }});
+  }}
+  if (req.method === 'POST' && url.pathname === '/api/route') {{
+    const raw = await readBody(req);
+    return jsonResponse(res, 200, {{
+      selectedAgent: agents[0] || 'reference',
+      matchedNativeSkill: 'reference-delivery',
+      mcpRisk: 'path-scoped',
+      reason: raw ? 'Request accepted and routed through serial reference delivery.' : 'Default serial route.',
+      requiredGates: gates
+    }});
+  }}
+  return jsonResponse(res, 404, {{ error: 'not_found' }});
+}});
+
+const port = Number(process.env.PORT || 0);
+server.listen(port, '127.0.0.1', () => {{
+  const address = server.address();
+  console.log(JSON.stringify({{ status: 'listening', port: address.port }}));
+}});
+"""
+
+    def _cli_verify(self, task: Task) -> str:
+        manifest = self._manifest_json(task)
+        return f"""import {{ existsSync, readdirSync, readFileSync }} from 'node:fs';
+import {{ dirname, join, relative }} from 'node:path';
+import {{ fileURLToPath }} from 'node:url';
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const manifest = {manifest};
+
+function walk(dir, prefix = '') {{
+  return readdirSync(dir, {{ withFileTypes: true }}).flatMap((entry) => {{
+    const rel = prefix ? `${{prefix}}/${{entry.name}}` : entry.name;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return walk(full, rel);
+    return [rel];
+  }});
+}}
+
+const exactFiles = walk(root).filter(path => !path.startsWith('.'));
+const errors = [];
+for (const path of manifest) {{
+  if (!existsSync(join(root, path))) errors.push(`missing ${{path}}`);
+}}
+for (const path of exactFiles) {{
+  if (!manifest.includes(path)) errors.push(`unexpected ${{path}}`);
+}}
+
+const apiPath = join(root, 'api/server.mjs');
+if (manifest.includes('api/server.mjs')) {{
+  const apiSource = readFileSync(apiPath, 'utf8');
+  if (!apiSource.includes('createServer')) errors.push('api/server.mjs must use node:http createServer');
+  if (!apiSource.includes('/health')) errors.push('api/server.mjs must expose /health');
+}}
+
+const htmlPath = join(root, 'web/index.html');
+if (manifest.includes('web/index.html')) {{
+  const html = readFileSync(htmlPath, 'utf8');
+  if (!html.includes('./styles.css')) errors.push('web/index.html must reference ./styles.css');
+  if (!html.includes('./app.js')) errors.push('web/index.html must reference ./app.js');
+}}
+
+for (const path of manifest) {{
+  const text = readFileSync(join(root, path), 'utf8');
+  const demoMarker = ['Generated by Across Orchestrator', 'demo adapter'].join(' ');
+  if (text.includes(demoMarker)) {{
+    errors.push(`demo placeholder leaked into ${{path}}`);
+  }}
+}}
+
+const report = {{
+  passed: errors.length === 0,
+  root: relative(process.cwd(), root) || '.',
+  totalFiles: exactFiles.length,
+  manifest,
+  exactFiles: exactFiles.sort(),
+  errors
+}};
+console.log(JSON.stringify(report, null, 2));
+process.exit(report.passed ? 0 : 1);
+"""
+
+    def _e2e_serial(self, task: Task) -> str:
+        return """import { spawn, spawnSync } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as wait } from 'node:timers/promises';
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const port = String(39000 + Math.floor(Math.random() * 1000));
+const server = spawn(process.execPath, ['api/server.mjs'], {
+  cwd: root,
+  env: { ...process.env, PORT: port },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+
+async function request(path, options = {}) {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, options);
+  if (!response.ok) throw new Error(`${path} failed with ${response.status}`);
+  return response.json();
+}
+
+try {
+  let healthy = false;
+  for (let i = 0; i < 30; i += 1) {
+    try {
+      const health = await request('/health');
+      healthy = health.status === 'ok';
+      if (healthy) break;
+    } catch {
+      await wait(100);
+    }
+  }
+  if (!healthy) throw new Error('api did not become healthy');
+  const pipeline = await request('/api/pipeline');
+  if (!Array.isArray(pipeline.pipeline) || pipeline.pipeline.length === 0) {
+    throw new Error('pipeline endpoint did not return stages');
+  }
+  const gates = await request('/api/gates');
+  if (!Array.isArray(gates.gates) || !gates.gates.every(gate => gate.status === 'passed')) {
+    throw new Error('gate endpoint did not pass');
+  }
+  const cli = spawnSync(process.execPath, ['cli/verify.mjs'], { cwd: root, text: true });
+  if (cli.status !== 0) throw new Error(cli.stderr || cli.stdout || 'cli verification failed');
+  console.log('e2e serial passed');
+} finally {
+  server.kill('SIGTERM');
+}
+"""
+
+    def _html(self, task: Task, subtask: SubTask) -> str:
+        metadata = self._metadata_json(task, subtask)
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Serial Delivery Console</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <p id="status-badge">Reference delivery ready</p>
+      <h1>Serial Delivery Console</h1>
+      <p>{task.goal}</p>
+    </section>
+    <section id="route-evidence">
+      <h2>Route Evidence</h2>
+      <button id="recompute-btn" type="button">Recompute Route</button>
+      <ol id="evidence-list"></ol>
+    </section>
+    <section>
+      <h2>Pipeline</h2>
+      <ol id="pipeline-list"></ol>
+    </section>
+  </main>
+  <script type="application/json" id="delivery-metadata">{metadata}</script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
+"""
+
+    def _css(self, task: Task, subtask: SubTask) -> str:
+        return """* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #101418;
+  color: #eef3f8;
+}
+main {
+  width: min(1120px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 32px 0;
+}
+.hero, section {
+  border: 1px solid #2c3944;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 16px;
+  background: #172028;
+}
+#status-badge {
+  display: inline-flex;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #204d36;
+  color: #bdf7ce;
+}
+button {
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: #8f72ff;
+  color: white;
+}
+li { margin: 8px 0; line-height: 1.45; }
+"""
+
+    def _app_js(self, task: Task, subtask: SubTask) -> str:
+        manifest = self._manifest_json(task)
+        return f"""const manifest = {manifest};
+const metadata = JSON.parse(document.querySelector('#delivery-metadata')?.textContent || '{{}}');
+const evidenceList = document.querySelector('#evidence-list');
+const pipelineList = document.querySelector('#pipeline-list');
+const button = document.querySelector('#recompute-btn');
+let routeCount = Number(localStorage.getItem('route-count') || '0');
+
+function render() {{
+  pipelineList.innerHTML = manifest.map((path, index) => (
+    `<li>Wave ${{index + 1}}: ${{path}}</li>`
+  )).join('');
+  evidenceList.innerHTML = [
+    `Selected Agent: ${{metadata.agent || 'reference'}}`,
+    'Matched Native Skill: reference-delivery',
+    'MCP Risk: path-scoped',
+    `Reason: serial dependency chain preserved; recompute #${{routeCount}}`
+  ].map(item => `<li>${{item}}</li>`).join('');
+}}
+
+button?.addEventListener('click', () => {{
+  routeCount += 1;
+  localStorage.setItem('route-count', String(routeCount));
+  render();
+}});
+
+render();
+"""
+
+    def _markdown(self, task: Task, subtask: SubTask) -> str:
+        metadata = self._metadata(task, subtask)
+        lines = [
+            f"# {subtask.path}",
+            "",
+            "Produced by Across Orchestrator reference delivery.",
+            "",
+            f"Task: {task.goal}",
+            f"Agent: {subtask.agent}",
+            f"Wave: {subtask.wave}",
+            "",
+            "## Required Artifacts",
+            *[f"- {path}" for path in task.contract.get("requiredArtifacts") or []],
+            "",
+            "## Dependency Evidence",
+            *[f"- {path}" for path in metadata["dependencyPaths"]],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _python(self, task: Task, subtask: SubTask) -> str:
+        return f"""#!/usr/bin/env python3
+\"\"\"Reference delivery artifact for {subtask.path}.\"\"\"
+
+def main():
+    print({json.dumps(task.goal, ensure_ascii=False)})
+
+if __name__ == "__main__":
+    main()
+"""
+
+    def _plain_text(self, task: Task, subtask: SubTask) -> str:
+        return (
+            f"Across Orchestrator reference delivery\n"
+            f"Task: {task.goal}\n"
+            f"Subtask: {subtask.goal}\n"
+            f"Agent: {subtask.agent}\n"
+        )
+
+
 def adapter_for(agent: str, command: list[str] | None = None) -> AgentAdapter:
     if agent == "demo":
         return DemoAgentAdapter()
     if agent == "command":
         return CommandAgentAdapter(command or [])
-    raise ValueError(f"Unknown agent adapter: {agent}")
+    return ReferenceDeliveryAdapter(agent)

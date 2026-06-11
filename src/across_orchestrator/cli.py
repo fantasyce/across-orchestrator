@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--project", required=True)
     submit.add_argument("--deliverable", action="append", default=[])
     submit.add_argument("--agent", default="demo")
+    submit.add_argument("--task-type", action="append", default=[])
     submit.add_argument("--json", action="store_true")
 
     release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade release E2E parity scenario")
@@ -122,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
             project_root=args.project,
             deliverables=args.deliverable or ["README.md"],
             agent=args.agent,
+            task_types=args.task_type or None,
         )
         _print(task.to_dict(), args.json)
         return 0

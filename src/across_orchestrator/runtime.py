@@ -22,13 +22,36 @@ class OrchestratorRuntime:
         project_root: str,
         deliverables: list[str] | None = None,
         agent: str = "demo",
+        subtasks: list[dict[str, Any]] | None = None,
+        strict_dependency: bool = False,
+        task_types: list[str] | None = None,
     ) -> Task:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
         root = Path(project_root).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
         paths = list(deliverables or ["README.md"])
-        task = Task.new(goal=goal.strip(), project_root=str(root), deliverables=paths, agent=agent)
+        if subtasks:
+            task = Task.from_plan(
+                goal=goal.strip(),
+                project_root=str(root),
+                subtasks=subtasks,
+                deliverables=paths,
+                agent=agent,
+            )
+        else:
+            task = Task.new(goal=goal.strip(), project_root=str(root), deliverables=paths, agent=agent)
+            if strict_dependency and len(task.subtasks) > 1:
+                previous_id: str | None = None
+                for index, subtask in enumerate(task.subtasks, start=1):
+                    subtask.wave = index
+                    subtask.priority = index
+                    subtask.dependencies = [previous_id] if previous_id else []
+                    previous_id = subtask.subtask_id
+        clean_task_types = _clean_task_types(task_types)
+        if clean_task_types:
+            task.metadata["task_types"] = clean_task_types
+            task.metadata["delivery_mode"] = _delivery_mode_for_task_types(clean_task_types)
         loop = self.loop_runtime.start_loop(
             goal=task.goal,
             project_root=str(root),
@@ -75,14 +98,20 @@ class OrchestratorRuntime:
             "qualityGates": list(payload["request"]["required_quality_gates"]),
             "requiredAgentMix": dict(payload["request"]["required_agent_mix"]),
         }
-        task.subtasks = [
-            SubTask.new(
+        task.subtasks = []
+        scenario_id_to_subtask_id: dict[str, str] = {}
+        for item in payload["subtasks"]:
+            subtask = SubTask.new(
                 goal=item["description"],
                 path=(item.get("deliverables") or [{}])[0].get("path_hint") or item["id"],
                 agent=item["agent"],
+                wave=int(item.get("wave") or item.get("wave_number") or 1),
+                dependencies=[str(dep) for dep in item.get("dependencies") or []],
+                priority=int(item.get("priority") or 1),
             )
-            for item in payload["subtasks"]
-        ]
+            task.subtasks.append(subtask)
+            scenario_id_to_subtask_id[str(item.get("id") or subtask.path)] = subtask.subtask_id
+        _resolve_subtask_dependency_ids(task.subtasks, scenario_id_to_subtask_id)
         task.metadata["app_grade_request"] = payload
         loop = self.loop_runtime.start_loop(
             goal=task.goal,
@@ -121,7 +150,7 @@ class OrchestratorRuntime:
         self.store.save_task(task)
         self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
         self._run_task_loop(task)
-        for subtask in task.subtasks:
+        for subtask in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id)):
             if subtask.status == "completed":
                 continue
             adapter = adapter_for(subtask.agent, command=command)
@@ -240,3 +269,30 @@ class OrchestratorRuntime:
             "final_output": loop.final_output,
             "events": self.loop_runtime.list_loop_events(loop.loop_id),
         }
+
+
+def _resolve_subtask_dependency_ids(subtasks: list[SubTask], stable_ids: dict[str, str] | None = None) -> None:
+    """Convert stable scenario ids in dependencies into persisted subtask ids."""
+    path_to_id = {subtask.path: subtask.subtask_id for subtask in subtasks}
+    stem_to_id = {Path(subtask.path).stem: subtask.subtask_id for subtask in subtasks}
+    known = {**stem_to_id, **path_to_id, **(stable_ids or {})}
+    for subtask in subtasks:
+        subtask.dependencies = [known.get(dep, dep) for dep in subtask.dependencies]
+
+
+def _clean_task_types(task_types: list[str] | None) -> list[str]:
+    clean: list[str] = []
+    seen: set[str] = set()
+    for item in task_types or []:
+        value = str(item or "").strip().lower()
+        if not value or value in seen:
+            continue
+        clean.append(value)
+        seen.add(value)
+    return clean
+
+
+def _delivery_mode_for_task_types(task_types: list[str]) -> str:
+    if len(task_types) > 1:
+        return "composite"
+    return task_types[0] if task_types else "artifact"
