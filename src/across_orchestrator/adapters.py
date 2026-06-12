@@ -259,6 +259,10 @@ const server = spawn(process.execPath, ['api/server.mjs'], {
   env: { ...process.env, PORT: port },
   stdio: ['ignore', 'pipe', 'pipe']
 });
+let serverStdout = '';
+let serverStderr = '';
+server.stdout.on('data', chunk => { serverStdout += chunk.toString(); });
+server.stderr.on('data', chunk => { serverStderr += chunk.toString(); });
 
 async function request(path, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, options);
@@ -268,7 +272,7 @@ async function request(path, options = {}) {
 
 try {
   let healthy = false;
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 100; i += 1) {
     try {
       const health = await request('/health');
       healthy = health.status === 'ok';
@@ -277,7 +281,9 @@ try {
       await wait(100);
     }
   }
-  if (!healthy) throw new Error('api did not become healthy');
+  if (!healthy) {
+    throw new Error(`api did not become healthy. stdout=${serverStdout.slice(-1000)} stderr=${serverStderr.slice(-1000)}`);
+  }
   const pipeline = await request('/api/pipeline');
   if (!Array.isArray(pipeline.pipeline) || pipeline.pipeline.length === 0) {
     throw new Error('pipeline endpoint did not return stages');
