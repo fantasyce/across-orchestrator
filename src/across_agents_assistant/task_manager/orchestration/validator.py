@@ -393,8 +393,8 @@ class ContractValidator:
         if "://" in candidate:
             return False
         basename = os.path.basename(candidate)
-        # Absolute project directories commonly contain dot-prefixed folders such
-        # as ``.across_agents``.  Those are directories, not file deliverables.
+        # Absolute project directories commonly contain dot-prefixed folders.
+        # Those are directories, not file deliverables.
         # Keep real dotfiles with extensions like ``.env.example`` eligible.
         if basename.startswith(".") and "." not in basename[1:]:
             return False

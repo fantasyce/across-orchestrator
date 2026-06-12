@@ -13,7 +13,8 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.0` upgrades the durable Agent Loop Runtime on top of the mature task
+`v0.6.1` is a runtime hygiene patch on top of the durable Agent Loop Runtime
+introduced in `v0.6.0`. The mature task
 orchestration core that was split out from Across Agents Assistant. The
 runtime now keeps loop state, step checkpoints, approval gates, adapter-backed
 memory hooks, dynamic remediation dispatch, and final output evidence in the
@@ -21,13 +22,15 @@ external plugin so hosts can stay thin.
 
 Validated in this repository:
 
-- 429 repository tests pass, including the transplanted Across Agents Assistant
+- 436 repository tests pass, including the transplanted Across Agents Assistant
   orchestration suite and the new Agent Loop Runtime protocol tests.
 - Sidecar-first host integration writes runtime metadata under
   `~/.across/run/across-orchestrator`.
 - Durable task state defaults to `~/.across/data/across-orchestrator`.
-- Existing legacy `~/.across-orchestrator` task/event files are backfilled into
-  `~/.across/data/across-orchestrator` without overwriting newer files.
+- Fresh installs and managed plugin runs use only the unified `~/.across`
+  ecosystem root. Old standalone `~/.across-orchestrator` task stores are not
+  read or copied automatically unless a host explicitly opts into a custom
+  `ACROSS_ORCHESTRATOR_HOME`.
 - The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
 - Hosts can inspect `plugin-status`, `health`, and
   `/.well-known/across-plugin.json` before routing work to the runtime.
