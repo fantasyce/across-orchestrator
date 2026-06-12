@@ -4,11 +4,10 @@ from pathlib import Path
 from typing import Any, Mapping
 import json
 import os
-import shutil
 import time
 
 from .models import Task
-from .paths import component_data_home, legacy_default_home
+from .paths import component_data_home
 
 
 def default_home(env: Mapping[str, str] | None = None) -> Path:
@@ -23,7 +22,6 @@ class LocalStore:
     def __init__(self, home: str | Path | None = None, env: Mapping[str, str] | None = None):
         self.env = env if env is not None else os.environ
         self.home = Path(home).expanduser().resolve() if home else default_home(self.env)
-        self.should_migrate_legacy = home is None and not (self.env.get("ACROSS_ORCHESTRATOR_HOME") or "").strip()
         self.tasks_dir = self.home / "tasks"
         self.events_dir = self.home / "events"
         self.loops_dir = self.home / "loops"
@@ -31,19 +29,10 @@ class LocalStore:
         self.init()
 
     def init(self) -> None:
-        self._migrate_legacy_default_home()
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.loops_dir.mkdir(parents=True, exist_ok=True)
         self.loop_events_dir.mkdir(parents=True, exist_ok=True)
-
-    def _migrate_legacy_default_home(self) -> None:
-        if not self.should_migrate_legacy:
-            return
-        legacy_home = legacy_default_home(self.env)
-        if legacy_home == self.home or not legacy_home.exists():
-            return
-        _copy_missing_regular_files(legacy_home, self.home)
 
     def save_task(self, task: Task) -> None:
         task.updated_at = time.time()
@@ -116,14 +105,3 @@ class LocalStore:
             if line.strip():
                 events.append(json.loads(line))
         return events
-
-
-def _copy_missing_regular_files(source: Path, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    for child in source.iterdir():
-        target = destination / child.name
-        if child.is_dir():
-            _copy_missing_regular_files(child, target)
-        elif child.is_file() and not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(child, target)

@@ -129,7 +129,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
         },
         "environment": {
             "ecosystemHome": "ACROSS_HOME",
-            "legacyDataOverride": "ACROSS_ORCHESTRATOR_HOME",
+            "dataOverride": "ACROSS_ORCHESTRATOR_HOME",
             "pluginRoot": "ACROSS_PLUGIN_HOME",
             "binHome": "ACROSS_BIN_HOME",
         },

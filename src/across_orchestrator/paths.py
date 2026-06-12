@@ -63,7 +63,3 @@ def logs_home(component_id: str = COMPONENT_ID, env: Mapping[str, str] | None = 
 
 def cache_home(component_id: str = COMPONENT_ID, env: Mapping[str, str] | None = None) -> Path:
     return component_home("cache", component_id, env)
-
-
-def legacy_default_home(env: Mapping[str, str] | None = None) -> Path:
-    return (_user_home(env) / ".across-orchestrator").resolve()

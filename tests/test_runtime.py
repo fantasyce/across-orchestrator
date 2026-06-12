@@ -239,7 +239,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(json.loads(task_file.read_text())["task_id"], task.task_id)
         self.assertGreaterEqual(len(event_file.read_text().splitlines()), 3)
 
-    def test_legacy_default_home_migrates_into_across_data_namespace(self):
+    def test_old_across_orchestrator_home_is_ignored(self):
         with tempfile.TemporaryDirectory() as tempdir:
             from across_orchestrator.store import LocalStore
 
@@ -269,9 +269,9 @@ class RuntimeTests(unittest.TestCase):
             store = LocalStore(env={"HOME": tempdir, "ACROSS_HOME": str(across_home)})
 
             self.assertEqual(store.home, across_home.resolve() / "data" / "across-orchestrator")
-            self.assertEqual(store.list_task_ids(), ["task-legacy"])
+            self.assertEqual(store.list_task_ids(), [])
 
-    def test_legacy_default_home_backfills_when_across_data_exists(self):
+    def test_old_across_orchestrator_home_does_not_backfill_when_across_data_exists(self):
         with tempfile.TemporaryDirectory() as tempdir:
             from across_orchestrator.store import LocalStore
 
@@ -323,8 +323,8 @@ class RuntimeTests(unittest.TestCase):
 
             store = LocalStore(env={"HOME": tempdir, "ACROSS_HOME": str(across_home)})
 
-            self.assertEqual(store.list_task_ids(), ["task-current", "task-legacy"])
-            self.assertTrue((new_home / "events" / "task-legacy.jsonl").exists())
+            self.assertEqual(store.list_task_ids(), ["task-current"])
+            self.assertFalse((new_home / "events" / "task-legacy.jsonl").exists())
 
 
 if __name__ == "__main__":
