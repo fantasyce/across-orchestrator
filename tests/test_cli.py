@@ -72,6 +72,53 @@ class CliTests(unittest.TestCase):
         event_types = [event["type"] for event in json.loads(events.stdout)]
         self.assertIn("task.completed", event_types)
 
+    def test_cli_submit_preserves_explicit_serial_plan(self):
+        subtasks = [
+            {
+                "id": "stage-design",
+                "description": "Create the release design note",
+                "path": "README.md",
+                "agent": "openclaw",
+                "wave": 1,
+                "priority": 1,
+            },
+            {
+                "id": "stage-implement",
+                "description": "Implement after the design note is complete",
+                "path": "web/index.html",
+                "agent": "hermes",
+                "wave": 2,
+                "priority": 2,
+                "dependencies": ["stage-design"],
+            },
+        ]
+
+        submit = self.run_cli(
+            "submit",
+            "Build a serial release validation chain",
+            "--project",
+            str(self.project),
+            "--deliverable",
+            "README.md",
+            "--deliverable",
+            "web/index.html",
+            "--agent",
+            "openclaw",
+            "--strict-dependency",
+            "--subtasks-json",
+            json.dumps(subtasks),
+            "--task-type",
+            "artifact",
+            "--json",
+        )
+
+        self.assertEqual(submit.returncode, 0, submit.stderr)
+        task = json.loads(submit.stdout)
+        self.assertEqual(task["metadata"]["task_types"], ["artifact"])
+        self.assertEqual(task["contract"]["serialPlan"], True)
+        self.assertEqual([item["wave"] for item in task["subtasks"]], [1, 2])
+        self.assertEqual(task["subtasks"][1]["dependencies"], [task["subtasks"][0]["subtask_id"]])
+
     def test_cli_agent_card_is_json(self):
         result = self.run_cli("agent-card", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
