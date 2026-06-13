@@ -63,6 +63,52 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertIn("development checkout", memory_provider["warnings"][0])
         self.assertEqual(memory_provider["recommendedCommand"], str(self.home / "bin" / "across-context"))
 
+    def test_plugin_status_warns_when_default_across_context_command_resolves_to_development_checkout(self):
+        dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
+        dev_command = dev_bin / "across-context"
+        dev_bin.mkdir(parents=True)
+        dev_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        dev_command.chmod(0o755)
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env.pop("ACROSS_CONTEXT_COMMAND", None)
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = str(dev_bin)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["provider"], "across-context")
+        self.assertEqual(memory_provider["status"], "warning")
+        self.assertEqual(memory_provider["resolvedCommand"], str(dev_command))
+        self.assertIn("development checkout", memory_provider["warnings"][0])
+
+    def test_plugin_status_prefers_managed_across_context_wrapper_over_path_lookup(self):
+        managed_command = self.home / "bin" / "across-context"
+        dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
+        dev_command = dev_bin / "across-context"
+        managed_command.parent.mkdir(parents=True)
+        dev_bin.mkdir(parents=True)
+        managed_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        dev_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        managed_command.chmod(0o755)
+        dev_command.chmod(0o755)
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env.pop("ACROSS_CONTEXT_COMMAND", None)
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = str(dev_bin)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["status"], "configured")
+        self.assertEqual(memory_provider["command"], [str(managed_command)])
+        self.assertEqual(memory_provider["resolvedCommand"], str(managed_command))
+        self.assertEqual(memory_provider["warnings"], [])
+
     def test_plugin_manifest_declares_hosting_platform_contract(self):
         result = self.run_cli("plugin-manifest", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
