@@ -8,6 +8,7 @@ from .adapters import adapter_for
 from .agent_loop import AgentLoopRuntime
 from .evidence import build_evidence_bundle, build_quality
 from .models import SubTask, Task
+from .planning import ensure_strict_dependency_chain
 from .store import LocalStore
 
 
@@ -42,7 +43,7 @@ class OrchestratorRuntime:
         else:
             task = Task.new(goal=goal.strip(), project_root=str(root), deliverables=paths, agent=agent)
         if strict_dependency and len(task.subtasks) > 1:
-            _ensure_strict_dependency_chain(task)
+            ensure_strict_dependency_chain(task)
         clean_task_types = _clean_task_types(task_types)
         if clean_task_types:
             task.metadata["task_types"] = clean_task_types
@@ -278,26 +279,6 @@ def _resolve_subtask_dependency_ids(subtasks: list[SubTask], stable_ids: dict[st
     known = {**stem_to_id, **path_to_id, **(stable_ids or {})}
     for subtask in subtasks:
         subtask.dependencies = [known.get(dep, dep) for dep in subtask.dependencies]
-
-
-def _ensure_strict_dependency_chain(task: Task) -> None:
-    """Fill missing dependency links so strict tasks form a real serial chain."""
-    task.contract["serialPlan"] = True
-    quality_gates = list(task.contract.get("qualityGates") or [])
-    if "serial_wave_dependencies" not in quality_gates:
-        quality_gates.append("serial_wave_dependencies")
-    task.contract["qualityGates"] = quality_gates
-
-    previous: SubTask | None = None
-    for index, subtask in enumerate(task.subtasks, start=1):
-        subtask.priority = max(1, int(subtask.priority or index))
-        if previous is None:
-            subtask.dependencies = []
-        elif not subtask.dependencies:
-            subtask.dependencies = [previous.subtask_id]
-            if subtask.wave <= previous.wave:
-                subtask.wave = previous.wave + 1
-        previous = subtask
 
 
 def _clean_task_types(task_types: list[str] | None) -> list[str]:
