@@ -209,6 +209,7 @@ def render_plugin_status(command: str = "across-orchestrator", env: Mapping[str,
         "manifestExists": manifest_exists,
         "dataPath": str(component_data_home(env=source)),
         "taskCount": len(store.list_task_ids()),
+        "memoryProvider": _memory_provider_status(source),
         "paths": {
             "home": str(home),
             "plugin": str(plugin_dir),
@@ -229,6 +230,22 @@ def render_plugin_status(command: str = "across-orchestrator", env: Mapping[str,
             "actions": ["install", "upgrade", "repair", "uninstall"],
             "preservesDataOnUninstall": True,
         },
+    }
+
+
+def _memory_provider_status(source: Mapping[str, str]) -> dict:
+    provider = str(source.get("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER") or "").strip().lower()
+    if provider in {"across-context", "across_context"}:
+        from .across_context import diagnose_across_context_command
+
+        return diagnose_across_context_command(
+            source,
+            recommended_command=str(ecosystem_bin_dir(source) / "across-context"),
+        )
+    return {
+        "provider": provider or "none",
+        "status": "disabled",
+        "warnings": [],
     }
 
 

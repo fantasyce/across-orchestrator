@@ -17,6 +17,7 @@ class SubTask:
     goal: str
     path: str
     agent: str = "demo"
+    capability_role: str | None = None
     status: str = "pending"
     wave: int = 1
     dependencies: list[str] = field(default_factory=list)
@@ -31,6 +32,7 @@ class SubTask:
         path: str,
         agent: str = "demo",
         *,
+        capability_role: str | None = None,
         wave: int = 1,
         dependencies: list[str] | None = None,
         priority: int = 1,
@@ -40,6 +42,7 @@ class SubTask:
             goal=goal,
             path=path,
             agent=agent,
+            capability_role=capability_role,
             wave=max(1, int(wave or 1)),
             dependencies=list(dependencies or []),
             priority=max(1, int(priority or 1)),
@@ -110,6 +113,7 @@ class Task:
                 goal=str(spec.get("goal") or spec.get("description") or f"Produce {path} for: {goal}"),
                 path=path,
                 agent=str(spec.get("agent") or agent or "demo"),
+                capability_role=str(spec.get("capability_role") or spec.get("role") or "") or None,
                 wave=int(spec.get("wave") or spec.get("wave_number") or index),
                 dependencies=[str(item) for item in spec.get("dependencies") or []],
                 priority=int(spec.get("priority") or index),
@@ -157,7 +161,7 @@ class Task:
             item.setdefault("dependencies", [])
             item.setdefault("priority", 1)
             subtasks.append(SubTask(**{key: value for key, value in item.items() if key in subtask_fields}))
-        return cls(
+        task = cls(
             task_id=data["task_id"],
             goal=data["goal"],
             project_root=data["project_root"],
@@ -169,6 +173,8 @@ class Task:
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
         )
+        _migrate_legacy_app_grade_agents(task)
+        return task
 
 
 def normalize_artifact_path(path: str) -> str:
@@ -189,3 +195,61 @@ def _path_from_subtask_spec(spec: dict[str, Any]) -> str:
             if path:
                 break
     return normalize_artifact_path(str(path or "README.md"))
+
+
+_APP_GRADE_ENGINE = "app_grade_release_e2e"
+_DEFAULT_APP_GRADE_EXECUTORS = ["openclaw", "hermes", "claude", "deepseek", "minimax"]
+
+
+def _migrate_legacy_app_grade_agents(task: Task) -> None:
+    if task.contract.get("engine") != _APP_GRADE_ENGINE:
+        return
+    executors = _legacy_app_grade_executors(task)
+    if task.agent == "app-grade" or task.agent.endswith("-agent"):
+        task.agent = executors[0]
+    for index, subtask in enumerate(task.subtasks):
+        role = _legacy_role_from_agent(subtask.agent)
+        if role:
+            subtask.capability_role = subtask.capability_role or role
+            subtask.agent = executors[index % len(executors)]
+    _migrate_legacy_app_grade_payload(task.metadata.get("app_grade_request"), executors)
+    _migrate_legacy_app_grade_payload(task.metadata.get("app_grade"), executors, agent_key="agent_id")
+
+
+def _legacy_app_grade_executors(task: Task) -> list[str]:
+    candidates: list[Any] = []
+    request = task.metadata.get("app_grade_request")
+    if isinstance(request, dict):
+        request_body = request.get("request")
+        if isinstance(request_body, dict):
+            candidates.extend(request_body.get("executor_agents") or [])
+    candidates.extend(task.contract.get("executor_agents") or [])
+    candidates.extend(subtask.agent for subtask in task.subtasks)
+    cleaned: list[str] = []
+    for item in candidates:
+        value = str(item or "").strip().lower()
+        if value and value not in cleaned and not value.endswith("-agent") and value != "app-grade":
+            cleaned.append(value)
+    return cleaned or list(_DEFAULT_APP_GRADE_EXECUTORS)
+
+
+def _legacy_role_from_agent(agent: str) -> str | None:
+    value = str(agent or "").strip().lower()
+    if value.endswith("-agent"):
+        return value.removesuffix("-agent")
+    return None
+
+
+def _migrate_legacy_app_grade_payload(payload: Any, executors: list[str], *, agent_key: str = "agent") -> None:
+    if not isinstance(payload, dict):
+        return
+    request = payload.get("request")
+    if isinstance(request, dict):
+        request["executor_agents"] = executors
+    for index, item in enumerate(payload.get("subtasks") or []):
+        if not isinstance(item, dict):
+            continue
+        role = _legacy_role_from_agent(str(item.get(agent_key) or item.get("agent") or ""))
+        if role:
+            item.setdefault("capability_role", role)
+            item[agent_key] = executors[index % len(executors)]

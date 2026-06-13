@@ -3,8 +3,11 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
+from pathlib import Path
 
 
 class AcrossContextMemoryProvider:
@@ -15,6 +18,7 @@ class AcrossContextMemoryProvider:
         configured = command or _command_from_env(source)
         self.command = [str(item) for item in configured]
         self.env = dict(source)
+        self.warnings = _command_warnings(self.command, self.env)
         self.timeout = timeout
 
     def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
@@ -124,4 +128,86 @@ def _command_from_env(env: Mapping[str, str]) -> list[str]:
     configured = str(env.get("ACROSS_CONTEXT_COMMAND") or "").strip()
     if configured:
         return shlex.split(configured)
+    managed = _managed_across_context_command(env)
+    if managed is not None:
+        return [str(managed)]
     return ["across-context"]
+
+
+def _managed_across_context_command(env: Mapping[str, str]) -> Path | None:
+    configured_bin = str(env.get("ACROSS_BIN_HOME") or "").strip()
+    if configured_bin:
+        bin_dir = Path(_expand_user(configured_bin, env))
+    else:
+        across_home = str(env.get("ACROSS_HOME") or "").strip()
+        if across_home:
+            bin_dir = Path(_expand_user(across_home, env)) / "bin"
+        else:
+            bin_dir = Path(_expand_user("~/.across", env)) / "bin"
+    candidate = bin_dir / "across-context"
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
+def _command_warnings(command: Sequence[str], env: Mapping[str, str] | None = None) -> list[str]:
+    source = env if env is not None else os.environ
+    expanded = " ".join(_expand_user(str(item), source) for item in command)
+    resolved = _resolved_command_path(command, source)
+    if _contains_protected_user_reference(expanded, source) or _contains_protected_user_reference(resolved or "", source):
+        return [
+            "Across Context command resolves to a development checkout; packaged hosts should use the managed "
+            "~/.across/bin/across-context wrapper."
+        ]
+    return []
+
+
+def _resolved_command_path(command: Sequence[str], env: Mapping[str, str]) -> str | None:
+    if not command:
+        return None
+    first = _expand_user(str(command[0]), env)
+    if os.path.isabs(first) or os.sep in first:
+        return first
+    return shutil.which(first, path=str(env.get("PATH") or "")) or None
+
+
+def _contains_protected_user_reference(value: str, env: Mapping[str, str]) -> bool:
+    if not value:
+        return False
+    expanded = _expand_user(value, env)
+    if "/Documents/projects/" in expanded:
+        return True
+    roots = _protected_user_reference_roots(env)
+    if any(str(root) in expanded for root in roots):
+        return True
+    user_home_pattern = r"/" + "Users" + r"/[^/]+"
+    return bool(re.search(rf"(?:~|{user_home_pattern})/(Documents|Desktop|Downloads)(?:/|$)", expanded))
+
+
+def _protected_user_reference_roots(env: Mapping[str, str]) -> list[Path]:
+    home = Path(_expand_user("~", env))
+    return [home / "Documents", home / "Desktop", home / "Downloads"]
+
+
+def _expand_user(value: str, env: Mapping[str, str]) -> str:
+    text = str(value)
+    home = str(env.get("HOME") or "").strip()
+    if home and (text == "~" or text.startswith("~/")):
+        suffix = text[2:] if text.startswith("~/") else ""
+        return str(Path(home).expanduser() / suffix)
+    return os.path.expanduser(text)
+
+
+def diagnose_across_context_command(
+    env: Mapping[str, str],
+    *,
+    recommended_command: str = "~/.across/bin/across-context",
+) -> dict[str, Any]:
+    command = _command_from_env(env)
+    warnings = _command_warnings(command, env)
+    return {
+        "provider": "across-context",
+        "status": "warning" if warnings else "configured",
+        "command": command,
+        "resolvedCommand": _resolved_command_path(command, env),
+        "warnings": warnings,
+        "recommendedCommand": recommended_command,
+    }

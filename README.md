@@ -13,12 +13,13 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.2` is a product-boundary patch on top of the durable Agent Loop Runtime
+`v0.6.3` is a runtime-boundary patch on top of the durable Agent Loop Runtime
 introduced in `v0.6.0`. The runtime keeps loop state, step checkpoints,
 approval gates, adapter-backed memory hooks, dynamic remediation dispatch, and
 final output evidence inside the plugin so hosts can stay thin. This release
-also removes vendored Across Agents Assistant host internals from the package
-and exposes an explicit host-conformance surface for independent hosts.
+also makes the Across Context memory-provider command prefer the managed
+`~/.across/bin/across-context` wrapper and surfaces diagnostics when default
+PATH resolution reaches a development checkout.
 
 Validated in this repository:
 
@@ -80,7 +81,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.2/across_orchestrator-0.6.2-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.3/across_orchestrator-0.6.3-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a

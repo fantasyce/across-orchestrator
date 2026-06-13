@@ -75,19 +75,22 @@ class OrchestratorRuntime:
         self,
         project_root: str,
         run_label: str | None = None,
+        allowed_agents: list[str] | None = None,
     ) -> Task:
         root = Path(project_root).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
+        executor_agents = _clean_release_e2e_agents(allowed_agents)
         task = Task.new(
             goal="Run host agent full delivery conformance scenario",
             project_root=str(root),
             deliverables=["README.md"],
-            agent="app-grade",
+            agent=executor_agents[0],
         )
         payload = build_release_e2e_payload(
             task_id=task.task_id,
             project_root=str(root),
             run_label=run_label,
+            allowed_agents=executor_agents,
         )
         task.goal = payload["request"]["description"]
         task.contract = {
@@ -105,6 +108,7 @@ class OrchestratorRuntime:
                 goal=item["description"],
                 path=(item.get("deliverables") or [{}])[0].get("path_hint") or item["id"],
                 agent=item["agent"],
+                capability_role=item.get("capability_role"),
                 wave=int(item.get("wave") or item.get("wave_number") or 1),
                 dependencies=[str(dep) for dep in item.get("dependencies") or []],
                 priority=int(item.get("priority") or 1),
@@ -204,6 +208,7 @@ class OrchestratorRuntime:
             payload = build_release_e2e_payload(
                 task_id=task.task_id,
                 project_root=task.project_root,
+                allowed_agents=[subtask.agent for subtask in task.subtasks],
             )
             task.metadata["app_grade_request"] = payload
         result = run_release_e2e_payload(
@@ -290,6 +295,18 @@ def _clean_task_types(task_types: list[str] | None) -> list[str]:
         clean.append(value)
         seen.add(value)
     return clean
+
+
+def _clean_release_e2e_agents(allowed_agents: list[str] | None) -> list[str]:
+    clean: list[str] = []
+    seen: set[str] = set()
+    for item in allowed_agents or []:
+        value = str(item or "").strip().lower()
+        if not value or value in seen or value.endswith("-agent"):
+            continue
+        clean.append(value)
+        seen.add(value)
+    return clean or ["openclaw", "hermes", "claude", "deepseek", "minimax"]
 
 
 def _delivery_mode_for_task_types(task_types: list[str]) -> str:

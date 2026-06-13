@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade host conformance scenario")
     release_e2e.add_argument("--project", required=True)
     release_e2e.add_argument("--run-label")
+    release_e2e.add_argument("--allowed-agent", action="append", default=[])
     release_e2e.add_argument("--json", action="store_true")
 
     run = sub.add_parser("run", help="Run a task")
@@ -143,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         task = runtime.submit_release_e2e_task(
             project_root=args.project,
             run_label=args.run_label,
+            allowed_agents=args.allowed_agent or None,
         )
         _print(task.to_dict(), args.json)
         return 0

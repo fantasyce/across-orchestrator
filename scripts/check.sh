@@ -4,12 +4,13 @@ set -euo pipefail
 if [ -d "node_modules" ]; then
   export NODE_PATH="${PWD}/node_modules${NODE_PATH:+:${NODE_PATH}}"
 fi
+export PYTHONDONTWRITEBYTECODE=1
 
 echo "== whitespace =="
 git diff --check
 
 echo "== tests =="
-PYTHONPATH=src python3 -m pytest tests -q
+PYTHONPATH=src python3 -m pytest -p no:cacheprovider tests -q
 
 echo "== cli smoke =="
 PYTHONPATH=src python3 -m across_orchestrator.cli --help >/dev/null
