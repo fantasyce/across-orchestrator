@@ -89,6 +89,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest["entrypoints"]["sidecar"]["command"], "across-orchestrator")
         self.assertEqual(manifest["paths"]["data"], "~/.across/data/across-orchestrator")
         self.assertEqual(manifest["protocols"]["http"]["loopStart"], "POST /loops")
+        self.assertEqual(manifest["protocols"]["http"]["hostConformance"], "POST /host-conformance")
+
+    def test_cli_host_conformance_validates_external_host_contract(self):
+        contract_path = self.project / "host-contract.json"
+        contract_path.write_text(
+            json.dumps(
+                {
+                    "platform_id": "generic-agent-host",
+                    "agents": [
+                        {
+                            "agent_id": "planner",
+                            "display_name": "Planner",
+                            "endpoint": "http://127.0.0.1:9910/agents/planner",
+                            "protocols": ["http", "mcp"],
+                            "capabilities": ["planning"],
+                            "tenant_id": "tenant-a",
+                        }
+                    ],
+                    "memory_provider": "across-context",
+                    "credentials_provider": "host-keychain",
+                    "permissions_provider": "host-policy",
+                    "project_context": {
+                        "project_id": "project-a",
+                        "workspace_root": "~/.across/workspaces/project-a",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_cli("host-conformance", "--contract", str(contract_path), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["host"]["platformId"], "generic-agent-host")
+        self.assertNotIn("Across Agents Assistant", result.stdout)
+        self.assertNotIn("Documents/projects", result.stdout)
 
     def test_cli_submit_release_e2e_uses_app_grade_engine(self):
         submit = self.run_cli(
@@ -110,7 +147,7 @@ class CliTests(unittest.TestCase):
         evidence = self.run_cli("evidence", task["task_id"], "--json")
         self.assertEqual(evidence.returncode, 0, evidence.stderr)
         payload = json.loads(evidence.stdout)
-        self.assertEqual(payload["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
+        self.assertEqual(payload["app_grade"]["scenario_id"], "host_agent_full_delivery_v1")
         self.assertIn(payload["app_grade"]["delivery_quality"], {"passed", "partial"})
 
     def test_cli_agent_loop_lifecycle(self):

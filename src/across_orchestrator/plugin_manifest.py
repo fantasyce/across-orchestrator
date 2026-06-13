@@ -140,6 +140,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "taskRun": "POST /tasks/{taskId}/run",
                 "taskStatus": "GET /tasks/{taskId}",
                 "events": "GET /tasks/{taskId}/events",
+                "hostConformance": "POST /host-conformance",
                 "loopStart": "POST /loops",
                 "loopRun": "POST /loops/{loopId}/run",
                 "loopApprove": "POST /loops/{loopId}/actions/{actionId}/approve",
@@ -160,6 +161,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             },
             "sdk": {
                 "language": "python",
+                "hostConformance": "across_orchestrator.host_conformance.evaluate_host_conformance",
             },
         },
         "hostingPlatform": {

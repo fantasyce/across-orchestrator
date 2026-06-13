@@ -55,14 +55,22 @@ class HostingPlatformContract:
     platform_id: str
     agents: tuple[HostAgentDescriptor, ...]
     memory_provider: str | None = None
+    credentials_provider: str | None = None
+    permissions_provider: str | None = None
+    project_context: dict[str, Any] | None = None
     approval_mode: str = "host-mediated"
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "platform_id": self.platform_id,
             "agents": [agent.to_dict() for agent in self.agents],
             "memory_provider": self.memory_provider,
+            "credentials_provider": self.credentials_provider,
+            "permissions_provider": self.permissions_provider,
+            "project_context": dict(self.project_context or {}),
             "approval_mode": self.approval_mode,
+            "metadata": dict(self.metadata or {}),
         }
 
 
@@ -71,7 +79,11 @@ def build_hosting_platform_contract(
     agents: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
     memory_provider: str | None = None,
+    credentials_provider: str | None = None,
+    permissions_provider: str | None = None,
+    project_context: dict[str, Any] | None = None,
     approval_mode: str = "host-mediated",
+    metadata: dict[str, Any] | None = None,
 ) -> HostingPlatformContract:
     descriptors = []
     for item in agents:
@@ -90,5 +102,9 @@ def build_hosting_platform_contract(
         platform_id=platform_id,
         agents=tuple(descriptors),
         memory_provider=memory_provider,
+        credentials_provider=credentials_provider,
+        permissions_provider=permissions_provider,
+        project_context=dict(project_context or {}),
         approval_mode=approval_mode,
+        metadata=dict(metadata or {}),
     )

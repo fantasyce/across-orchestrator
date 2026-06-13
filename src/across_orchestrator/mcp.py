@@ -43,7 +43,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "submit_release_e2e_task",
-            "description": "Submit the app-grade Across Agents Assistant release E2E parity scenario.",
+            "description": "Submit the app-grade host agent full delivery conformance scenario.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

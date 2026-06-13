@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,32 +31,12 @@ class PathTests(unittest.TestCase):
 
             self.assertEqual(default_home(env), override.resolve())
 
-    def test_app_grade_compat_paths_do_not_use_legacy_across_agents_home(self):
+    def test_product_source_tree_does_not_contain_aaa_namespace(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            from across_agents_assistant.paths import app_home
-
-            old_across_home = os.environ.get("ACROSS_HOME")
-            old_agents_home = os.environ.get("ACROSS_AGENTS_HOME")
-            os.environ["ACROSS_HOME"] = tempdir
-            os.environ.pop("ACROSS_AGENTS_HOME", None)
-            try:
-                self.assertEqual(
-                    app_home(),
-                    Path(tempdir).resolve()
-                    / "data"
-                    / "across-orchestrator"
-                    / "compat"
-                    / "across-agents-assistant",
-                )
-            finally:
-                if old_across_home is None:
-                    os.environ.pop("ACROSS_HOME", None)
-                else:
-                    os.environ["ACROSS_HOME"] = old_across_home
-                if old_agents_home is None:
-                    os.environ.pop("ACROSS_AGENTS_HOME", None)
-                else:
-                    os.environ["ACROSS_AGENTS_HOME"] = old_agents_home
+            root = Path(__file__).resolve().parents[1]
+            self.assertFalse((root / "src" / "across_agents_assistant").exists())
+            self.assertFalse((root / "tests" / "parity_fixtures" / "across_agents_assistant").exists())
+            self.assertFalse((root / "tests" / "parity").exists())
 
 
 if __name__ == "__main__":

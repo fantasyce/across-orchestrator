@@ -10,6 +10,7 @@ import time
 
 from .agent_card import render_agent_card
 from .agent_loop import AgentLoopRuntime
+from .host_conformance import evaluate_host_conformance
 from .paths import COMPONENT_ID, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
@@ -93,6 +94,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     run_label=payload.get("runLabel") or payload.get("run_label"),
                 )
                 self.respond(task.to_dict(), status=201)
+                return
+            if path == "/host-conformance":
+                report = evaluate_host_conformance(payload)
+                self.respond(report, status=200 if report["passed"] else 422)
                 return
             if path == "/loops":
                 loop = self.loop_runtime.start_loop(
