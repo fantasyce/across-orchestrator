@@ -103,6 +103,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue((self.project / "api/server.mjs").exists())
         self.assertTrue((self.project / "README.md").exists())
 
+    def test_strict_dependency_fills_missing_explicit_subtask_dependencies(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Build a serial pipeline from an explicit plan",
+            project_root=str(self.project),
+            deliverables=["docs/contract.json", "api/server.mjs", "README.md"],
+            agent="demo",
+            strict_dependency=True,
+            subtasks=[
+                {"id": "contract", "description": "Wave 1 contract", "path": "docs/contract.json", "wave": 1},
+                {"id": "api", "description": "Wave 2 API", "path": "api/server.mjs", "wave": 2},
+                {"id": "readme", "description": "Wave 3 evidence", "path": "README.md", "wave": 3},
+            ],
+        )
+
+        self.assertEqual(task.contract["serialPlan"], True)
+        self.assertEqual(task.subtasks[0].dependencies, [])
+        self.assertEqual(task.subtasks[1].dependencies, [task.subtasks[0].subtask_id])
+        self.assertEqual(task.subtasks[2].dependencies, [task.subtasks[1].subtask_id])
+
     def test_generic_serial_task_produces_runnable_reference_delivery(self):
         import subprocess
 
