@@ -49,6 +49,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "projectRoot": {"type": "string"},
                     "runLabel": {"type": "string"},
+                    "allowedSubtaskAgents": {"type": "array", "items": {"type": "string"}},
+                    "allowed_subtask_agents": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["projectRoot"],
             },
@@ -209,6 +211,7 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return runtime.submit_release_e2e_task(
             project_root=arguments.get("projectRoot") or arguments.get("project_root") or ".",
             run_label=arguments.get("runLabel") or arguments.get("run_label"),
+            allowed_agents=arguments.get("allowedSubtaskAgents") or arguments.get("allowed_subtask_agents"),
         ).to_dict()
     if name == "get_task":
         return runtime.get_task(arguments["taskId"]).to_dict()

@@ -32,14 +32,22 @@ REQUIRED_QUALITY_GATES = [
     "agent_mix",
 ]
 
-HOST_AGENT_ROLES = [
-    "api-agent",
-    "html-agent",
-    "style-agent",
-    "client-agent",
-    "quality-agent",
-    "smoke-agent",
-    "docs-agent",
+DEFAULT_EXECUTOR_AGENTS = [
+    "openclaw",
+    "hermes",
+    "claude",
+    "deepseek",
+    "minimax",
+]
+
+CAPABILITY_ROLES = [
+    "api",
+    "html",
+    "style",
+    "client",
+    "quality",
+    "smoke",
+    "docs",
 ]
 
 
@@ -48,10 +56,12 @@ def build_release_e2e_payload(
     task_id: str,
     project_root: str,
     run_label: str | None = None,
+    allowed_agents: list[str] | None = None,
 ) -> dict[str, Any]:
     root = str(Path(project_root).expanduser().resolve())
     description = _scenario_description(root, run_label)
-    subtasks = _scenario_subtasks()
+    executor_agents = _clean_executor_agents(allowed_agents)
+    subtasks = _scenario_subtasks(executor_agents)
     return {
         "engine": APP_GRADE_RELEASE_E2E_ENGINE,
         "scenario_id": HOST_CONFORMANCE_SCENARIO_ID,
@@ -68,6 +78,7 @@ def build_release_e2e_payload(
                 "min_distinct_agents": 3,
                 "min_host_agents": 3,
             },
+            "executor_agents": executor_agents,
             "task_types": ["functional", "artifact"],
             "strict_dependency": True,
             "enable_wave_gate": True,
@@ -128,6 +139,7 @@ def run_release_e2e_payload(
             {
                 "subtask_id": f"st-{item['id']}",
                 "agent_id": item["agent"],
+                "capability_role": item["capability_role"],
                 "status": "completed",
                 "deliverables": item.get("deliverables", []),
                 "dependencies": item.get("dependencies", []),
@@ -178,7 +190,16 @@ def _scenario_description(project_root: str, run_label: str | None) -> str:
     )
 
 
-def _scenario_subtasks() -> list[dict[str, Any]]:
+def _clean_executor_agents(allowed_agents: list[str] | None) -> list[str]:
+    cleaned: list[str] = []
+    for item in allowed_agents or []:
+        value = str(item or "").strip().lower()
+        if value and value not in cleaned and not value.endswith("-agent"):
+            cleaned.append(value)
+    return cleaned or list(DEFAULT_EXECUTOR_AGENTS)
+
+
+def _scenario_subtasks(executor_agents: list[str] | None = None) -> list[dict[str, Any]]:
     descriptions = [
         ("api_service", "Create the local Node.js API service.", "api/server.mjs", []),
         ("web_html", "Create the static host conformance dashboard HTML.", "web/index.html", ["api_service"]),
@@ -188,11 +209,13 @@ def _scenario_subtasks() -> list[dict[str, Any]]:
         ("smoke_test", "Create the API and CLI smoke test.", "tests/e2e-smoke.mjs", ["api_service", "cli_quality"]),
         ("readme", "Document local run and quality commands.", "README.md", ["web_app", "smoke_test"]),
     ]
+    agents = _clean_executor_agents(executor_agents)
     return [
         {
             "id": item_id,
             "description": description,
-            "agent": HOST_AGENT_ROLES[index],
+            "agent": agents[index % len(agents)],
+            "capability_role": CAPABILITY_ROLES[index],
             "wave": index + 1,
             "priority": index + 1,
             "dependencies": dependencies,

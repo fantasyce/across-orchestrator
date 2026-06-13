@@ -49,6 +49,20 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(health["pluginId"], "across-orchestrator")
         self.assertEqual(health["home"], str(self.home / "data" / "across-orchestrator"))
 
+    def test_plugin_status_warns_when_across_context_command_uses_development_checkout(self):
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env["ACROSS_CONTEXT_COMMAND"] = "node /tmp/Documents/projects/across-context/src/cli.js"
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["provider"], "across-context")
+        self.assertEqual(memory_provider["status"], "warning")
+        self.assertIn("development checkout", memory_provider["warnings"][0])
+        self.assertEqual(memory_provider["recommendedCommand"], str(self.home / "bin" / "across-context"))
+
     def test_plugin_manifest_declares_hosting_platform_contract(self):
         result = self.run_cli("plugin-manifest", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)

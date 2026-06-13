@@ -28,12 +28,15 @@ class AppGradeRuntimeTests(unittest.TestCase):
         from across_orchestrator.runtime import OrchestratorRuntime
 
         runtime = OrchestratorRuntime()
+        allowed_agents = ["openclaw", "hermes", "claude", "deepseek", "minimax"]
         task = runtime.submit_release_e2e_task(
             project_root=str(self.project),
             run_label="runtime-test",
+            allowed_agents=allowed_agents,
         )
 
         self.assertEqual(task.contract["engine"], "app_grade_release_e2e")
+        self.assertIn(task.agent, allowed_agents)
         self.assertEqual(task.contract["requiredArtifacts"], [
             "README.md",
             "web/index.html",
@@ -46,6 +49,12 @@ class AppGradeRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(len(task.subtasks), 7)
         self.assertEqual([subtask.wave for subtask in task.subtasks], [1, 2, 3, 4, 5, 6, 7])
         self.assertTrue(task.subtasks[1].dependencies)
+        self.assertTrue(all(subtask.agent in allowed_agents for subtask in task.subtasks))
+        self.assertTrue(all(not subtask.agent.endswith("-agent") for subtask in task.subtasks))
+        self.assertEqual(
+            [subtask.capability_role for subtask in task.subtasks],
+            ["api", "html", "style", "client", "quality", "smoke", "docs"],
+        )
 
         completed = runtime.run_task(task.task_id)
         self.assertEqual(completed.status, "completed")
@@ -81,6 +90,11 @@ class AppGradeRuntimeTests(unittest.TestCase):
         evidence = runtime.evidence_bundle(task.task_id)
         app_grade = evidence["app_grade"]
         self.assertEqual(app_grade["scenario_id"], "host_agent_full_delivery_v1")
+        self.assertTrue(all(item["agent_id"] in allowed_agents for item in app_grade["subtasks"]))
+        self.assertEqual(
+            [item["capability_role"] for item in app_grade["subtasks"]],
+            ["api", "html", "style", "client", "quality", "smoke", "docs"],
+        )
         self.assertIn(app_grade["delivery_quality"], {"passed", "partial"})
         self.assertEqual(app_grade["quality_report"]["task_id"], task.task_id)
         gate_ids = {
@@ -120,6 +134,42 @@ class AppGradeRuntimeTests(unittest.TestCase):
         self.assertEqual(evidence["app_grade"]["exact_files"], sorted(task.contract["requiredArtifacts"]))
         self.assertNotIn("unexpected.log", evidence["app_grade"]["exact_files"])
         self.assertEqual(evidence["app_grade"]["quality_report"]["required_failed_count"], 0)
+
+    def test_app_grade_payload_rejects_role_names_as_executor_agents(self):
+        from across_orchestrator.app_grade import build_release_e2e_payload
+
+        payload = build_release_e2e_payload(
+            task_id="task-role-filter",
+            project_root=str(self.project),
+            allowed_agents=["api-agent", "deepseek"],
+        )
+
+        self.assertEqual(payload["request"]["executor_agents"], ["deepseek"])
+        self.assertTrue(all(item["agent"] == "deepseek" for item in payload["subtasks"]))
+        self.assertEqual(
+            [item["capability_role"] for item in payload["subtasks"]],
+            ["api", "html", "style", "client", "quality", "smoke", "docs"],
+        )
+
+    def test_legacy_app_grade_role_agents_are_migrated_on_load(self):
+        from across_orchestrator.models import Task
+
+        task = Task.from_dict({
+            "task_id": "task-legacy-role-agents",
+            "goal": "legacy app-grade task",
+            "project_root": str(self.project),
+            "agent": "app-grade",
+            "contract": {"engine": "app_grade_release_e2e"},
+            "subtasks": [
+                {"subtask_id": "subtask-api", "goal": "api", "path": "api/server.mjs", "agent": "api-agent"},
+                {"subtask_id": "subtask-html", "goal": "html", "path": "web/index.html", "agent": "html-agent"},
+                {"subtask_id": "subtask-style", "goal": "style", "path": "web/styles.css", "agent": "style-agent"},
+            ],
+        })
+
+        self.assertEqual(task.agent, "openclaw")
+        self.assertEqual([subtask.agent for subtask in task.subtasks], ["openclaw", "hermes", "claude"])
+        self.assertEqual([subtask.capability_role for subtask in task.subtasks], ["api", "html", "style"])
 
     def test_browser_gate_has_self_contained_dom_shim_fallback(self):
         from across_orchestrator.app_grade import _browserless_dom_gate, write_release_e2e_reference_artifact

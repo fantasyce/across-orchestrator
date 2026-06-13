@@ -14,6 +14,7 @@ class AcrossContextMemoryProvider:
         source = env if env is not None else os.environ
         configured = command or _command_from_env(source)
         self.command = [str(item) for item in configured]
+        self.warnings = _command_warnings(self.command)
         self.env = dict(source)
         self.timeout = timeout
 
@@ -125,3 +126,29 @@ def _command_from_env(env: Mapping[str, str]) -> list[str]:
     if configured:
         return shlex.split(configured)
     return ["across-context"]
+
+
+def _command_warnings(command: Sequence[str]) -> list[str]:
+    expanded = " ".join(os.path.expanduser(str(item)) for item in command)
+    if "/Documents/projects/" in expanded:
+        return [
+            "ACROSS_CONTEXT_COMMAND points at a development checkout; packaged hosts should use the managed "
+            "~/.across/bin/across-context wrapper."
+        ]
+    return []
+
+
+def diagnose_across_context_command(
+    env: Mapping[str, str],
+    *,
+    recommended_command: str = "~/.across/bin/across-context",
+) -> dict[str, Any]:
+    command = _command_from_env(env)
+    warnings = _command_warnings(command)
+    return {
+        "provider": "across-context",
+        "status": "warning" if warnings else "configured",
+        "command": command,
+        "warnings": warnings,
+        "recommendedCommand": recommended_command,
+    }

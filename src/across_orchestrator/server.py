@@ -92,6 +92,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 task = self.runtime.submit_release_e2e_task(
                     project_root=payload.get("projectRoot") or payload.get("project_root") or ".",
                     run_label=payload.get("runLabel") or payload.get("run_label"),
+                    allowed_agents=payload.get("allowedSubtaskAgents")
+                    or payload.get("allowed_subtask_agents")
+                    or payload.get("agents"),
                 )
                 self.respond(task.to_dict(), status=201)
                 return
