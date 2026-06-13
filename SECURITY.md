@@ -19,6 +19,13 @@ The package does not own model credentials, host UI approvals, local agent
 installation, or macOS privacy permissions. Host applications must keep those
 surfaces explicit and observable.
 
+Packaged hosts should install Across Orchestrator from a release wheel, source
+archive, or pinned Git tag into `~/.across/plugins/across-orchestrator` and
+expose `~/.across/bin/across-orchestrator`. Product paths should not execute an
+editable install, `pip install -e` checkout, or wrapper under
+`~/Documents/projects/...` unless the user explicitly selected a developer
+install source for that run.
+
 ## Sensitive Data
 
 Tasks, evidence bundles, and quality reports can describe generated files,

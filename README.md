@@ -77,6 +77,16 @@ cd across-orchestrator
 python3 -m pip install -e .
 ```
 
+Or install the current release wheel directly from GitHub Releases:
+
+```bash
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.2/across_orchestrator-0.6.2-py3-none-any.whl
+```
+
+Packaged hosts should install the released wheel or pinned Git tag into a
+managed runtime under `~/.across/plugins/across-orchestrator` and expose the
+wrapper at `~/.across/bin/across-orchestrator`.
+
 For development:
 
 ```bash
@@ -85,9 +95,10 @@ npm install
 bash scripts/check.sh
 ```
 
-`npm install` is only needed for the strict browser E2E probe. Without the Node
-Playwright dev dependency, the mature quality report records the browser gate as
-environment-blocked instead of silently passing it.
+`npm install` is used by the strict Playwright browser probe. When Playwright is
+not installed, the release E2E path falls back to a self-contained Node DOM-shim
+probe. If Node itself is unavailable, the mature quality report records the
+browser gate as environment-blocked instead of silently passing it.
 
 ## Quick Demo Task
 
@@ -111,7 +122,10 @@ PYTHONPATH=src python3 -m across_orchestrator.cli quality "$TASK_ID" --json
 
 ## App-Grade Release E2E
 
-This path exercises the host-agent full delivery conformance scenario.
+This path exercises the host-agent full delivery conformance scenario. It
+builds a serial dependency chain where planning and data decisions affect later
+UI, API, CLI, browser, and documentation artifacts, then records quality gates,
+remediation behavior, and final evidence for a host to inspect.
 
 ```bash
 export ACROSS_ORCHESTRATOR_HOME="$(mktemp -d)"
@@ -251,6 +265,14 @@ standalone runtime. Hosts provide:
 Across Orchestrator keeps the contracts, waves, task state, acceptance,
 remediation, and quality logic in the plugin.
 
+The distribution boundary is enforced in tests and packaging:
+
+- `pyproject.toml` includes only the `across_orchestrator*` namespace.
+- Production code must not import `across_agents_assistant`.
+- Vendored AAA source trees and parity fixture copies are not allowed.
+- Host compatibility is expressed through serializable host descriptors,
+  plugin manifests, CLI, HTTP, MCP, and Python SDK contracts.
+
 For a hosting platform that exposes many user-owned agent containers, the
 platform remains the A2A-facing host. Across Orchestrator mounts inside the
 platform as a task-runtime plugin: it receives agent descriptors, creates the
@@ -286,7 +308,8 @@ bash scripts/check.sh
 ```
 
 The Python package has no runtime dependencies. `pytest` and Node Playwright are
-development/test dependencies only.
+development/test dependencies only; the browser E2E gate can also pass through
+the built-in Node DOM-shim fallback when Playwright is unavailable.
 
 GitHub Quality and Security workflows run the same repository checks, CodeQL for
 the Python source, and npm audit for the development-only browser probe

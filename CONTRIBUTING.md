@@ -20,6 +20,12 @@ development-only and are used by strict browser E2E probes.
 - Preserve the host/plugin boundary: hosts own credentials, agent processes,
   approvals, and UI; Across Orchestrator owns task lifecycle, contracts,
   quality gates, evidence, and protocol surfaces.
+- Do not reintroduce `src/across_agents_assistant`, AAA parity fixtures, or
+  imports of host internals. Update the product-boundary and host-conformance
+  tests when changing host contracts.
+- Keep managed host install guidance pointed at releases, pinned Git tags, or
+  the `~/.across/plugins/across-orchestrator` runtime. Development checkouts
+  are for explicit local testing only.
 - Do not commit private paths, tokens, credentials, screenshots, task scratch
   directories, generated evidence bundles, or local runtime state.
 - Run `bash scripts/check.sh` before opening a PR.
