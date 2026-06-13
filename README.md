@@ -13,12 +13,13 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.4` is a boundary and strict-dependency patch on top of the durable Agent Loop Runtime
+`v0.6.5` is a structural boundary split on top of the durable Agent Loop Runtime
 introduced in `v0.6.0`. The runtime keeps loop state, step checkpoints,
 approval gates, adapter-backed memory hooks, dynamic remediation dispatch, and
 final output evidence inside the plugin so hosts can stay thin. This release
-also preserves explicit serial plans submitted by hosts through CLI and HTTP,
-including missing dependency repair when `strict_dependency` is enabled.
+keeps explicit serial-plan repair in the planning boundary instead of the
+runtime entrypoint, while preserving missing dependency repair when
+`strict_dependency` is enabled.
 
 Validated in this repository:
 
@@ -80,7 +81,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.4/across_orchestrator-0.6.4-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.5/across_orchestrator-0.6.5-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
