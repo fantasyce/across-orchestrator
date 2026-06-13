@@ -79,7 +79,7 @@ class OrchestratorRuntime:
         root = Path(project_root).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
         task = Task.new(
-            goal="Run Across Agents Assistant release E2E parity scenario",
+            goal="Run host agent full delivery conformance scenario",
             project_root=str(root),
             deliverables=["README.md"],
             agent="app-grade",
@@ -117,7 +117,7 @@ class OrchestratorRuntime:
             goal=task.goal,
             project_root=str(root),
             agent=task.agent,
-            metadata={"task_id": task.task_id, "task_kind": "release_e2e"},
+            metadata={"task_id": task.task_id, "task_kind": "host_conformance"},
         )
         task.metadata["agent_loop"] = {
             "loop_id": loop.loop_id,
@@ -128,7 +128,7 @@ class OrchestratorRuntime:
         self.store.append_event(task.task_id, "task.created", {"goal": task.goal, "agent": task.agent})
         self.store.append_event(task.task_id, "contract.created", task.contract)
         self.store.append_event(task.task_id, "agent_loop.created", task.metadata["agent_loop"])
-        self.store.append_event(task.task_id, "app_grade.release_e2e.created", {
+        self.store.append_event(task.task_id, "app_grade.host_conformance.created", {
             "scenario_id": payload["scenario_id"],
             "required_files": task.contract["requiredArtifacts"],
         })
@@ -217,7 +217,7 @@ class OrchestratorRuntime:
         task.metadata["app_grade"] = result
         task.status = "completed"
         self.store.save_task(task)
-        self.store.append_event(task.task_id, "app_grade.release_e2e.completed", {
+        self.store.append_event(task.task_id, "app_grade.host_conformance.completed", {
             "delivery_quality": result["delivery_quality"],
             "exact_files": result["exact_files"],
         })

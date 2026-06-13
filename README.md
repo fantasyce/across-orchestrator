@@ -13,17 +13,17 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.1` is a runtime hygiene patch on top of the durable Agent Loop Runtime
-introduced in `v0.6.0`. The mature task
-orchestration core that was split out from Across Agents Assistant. The
-runtime now keeps loop state, step checkpoints, approval gates, adapter-backed
-memory hooks, dynamic remediation dispatch, and final output evidence in the
-external plugin so hosts can stay thin.
+`v0.6.2` is a product-boundary patch on top of the durable Agent Loop Runtime
+introduced in `v0.6.0`. The runtime keeps loop state, step checkpoints,
+approval gates, adapter-backed memory hooks, dynamic remediation dispatch, and
+final output evidence inside the plugin so hosts can stay thin. This release
+also removes vendored Across Agents Assistant host internals from the package
+and exposes an explicit host-conformance surface for independent hosts.
 
 Validated in this repository:
 
-- 436 repository tests pass, including the transplanted Across Agents Assistant
-  orchestration suite and the new Agent Loop Runtime protocol tests.
+- Repository checks cover the standalone task runtime, protocol surfaces,
+  plugin manifest, host conformance scenario, and Agent Loop Runtime.
 - Sidecar-first host integration writes runtime metadata under
   `~/.across/run/across-orchestrator`.
 - Durable task state defaults to `~/.across/data/across-orchestrator`.
@@ -37,12 +37,11 @@ Validated in this repository:
 - Hosts can start, resume, inspect, and audit durable agent loops through CLI,
   HTTP, MCP, or the Python runtime boundary.
 - Hosting platforms can pass registered agent-container descriptors through the
-  Python SDK boundary without adopting Across Agents Assistant internals.
+  Python SDK boundary without adopting host application internals.
 - Hosts can run explicit plugin lifecycle actions, including uninstalling the
   runtime wrapper while preserving durable task data.
-- The public `MatureOrchestrationEngine` wraps the transplanted `TaskState` and
-  `TaskOrchestrator` for host-provided dispatch, validation, and owner-agent
-  adapters.
+- The public `MatureOrchestrationEngine` wraps the standalone runtime for
+  host-provided dispatch, validation, and owner-agent adapters.
 - CLI, HTTP, and MCP expose the same deterministic demo task path as `v0.1.0`.
 - CLI, HTTP, and MCP also expose an app-grade Release E2E scenario that uses the
   mature requirement, delivery contract, acceptance, quality gate, and evidence
@@ -51,7 +50,7 @@ Validated in this repository:
   `quality_gate`, `remediation_dispatch`, `memory_write_candidate`, and
   `final_output` steps so hosting platforms can attach memory providers, agent
   dispatchers, quality gates, finalizers, and human approval UI without
-  adopting Across Agents Assistant internals.
+  adopting host application internals.
 - Agent Loop v2 can call Across Context through a subprocess-backed memory
   provider when hosts set `ACROSS_ORCHESTRATOR_MEMORY_PROVIDER=across-context`.
 
@@ -60,9 +59,8 @@ agent installation. Those remain host responsibilities by design.
 
 ## Why It Exists
 
-Across Agents Assistant started as a macOS control panel with chat, local
-agents, cloud LLMs, shared memory, and task orchestration in one app. The
-long-term product shape is an ecosystem of independent modules:
+The Across ecosystem is organized as independent modules with explicit host
+boundaries:
 
 - Across Agents Assistant: host app and control panel
 - Across Context: shared memory plugin
@@ -113,8 +111,7 @@ PYTHONPATH=src python3 -m across_orchestrator.cli quality "$TASK_ID" --json
 
 ## App-Grade Release E2E
 
-This path exercises the transplanted Across Agents Assistant release-quality
-contract and acceptance stack.
+This path exercises the host-agent full delivery conformance scenario.
 
 ```bash
 export ACROSS_ORCHESTRATOR_HOME="$(mktemp -d)"
@@ -243,7 +240,7 @@ across-orchestrator mcp
 ## Host Boundary And Hosting Platforms
 
 The public `across_orchestrator.engine.MatureOrchestrationEngine` wraps the
-transplanted mature engine. Hosts provide:
+standalone runtime. Hosts provide:
 
 - dispatcher adapter for local/cloud agent execution
 - validator adapter

@@ -80,7 +80,7 @@ class AppGradeRuntimeTests(unittest.TestCase):
 
         evidence = runtime.evidence_bundle(task.task_id)
         app_grade = evidence["app_grade"]
-        self.assertEqual(app_grade["scenario_id"], "cross_agent_full_delivery_v1")
+        self.assertEqual(app_grade["scenario_id"], "host_agent_full_delivery_v1")
         self.assertIn(app_grade["delivery_quality"], {"passed", "partial"})
         self.assertEqual(app_grade["quality_report"]["task_id"], task.task_id)
         gate_ids = {
@@ -92,10 +92,14 @@ class AppGradeRuntimeTests(unittest.TestCase):
         self.assertEqual(gate_ids["cli_generic"], "passed")
         self.assertIn("browser_e2e", gate_ids)
         self.assertEqual(gate_ids["agent_mix"], "passed")
-        if _node_playwright_available():
-            self.assertEqual(gate_ids["browser_e2e"], "passed")
+        if gate_ids["browser_e2e"] == "passed":
+            self.assertIn(
+                _browser_gate_mode(app_grade),
+                {"playwright", "node-dom-shim"},
+            )
             self.assertEqual(app_grade["delivery_quality"], "passed")
         else:
+            self.assertFalse(_node_playwright_available())
             self.assertIn(gate_ids["browser_e2e"], {"partial", "failed", "skipped"})
 
     def test_release_e2e_repairs_dirty_workspace_to_exact_manifest(self):
@@ -117,6 +121,17 @@ class AppGradeRuntimeTests(unittest.TestCase):
         self.assertNotIn("unexpected.log", evidence["app_grade"]["exact_files"])
         self.assertEqual(evidence["app_grade"]["quality_report"]["required_failed_count"], 0)
 
+    def test_browser_gate_has_self_contained_dom_shim_fallback(self):
+        from across_orchestrator.app_grade import _browserless_dom_gate, write_release_e2e_reference_artifact
+
+        write_release_e2e_reference_artifact(str(self.project))
+
+        gate = _browserless_dom_gate(self.project)
+
+        self.assertEqual(gate["adapter_id"], "browser_e2e")
+        self.assertEqual(gate["status"], "passed")
+        self.assertEqual(gate["evidence"]["mode"], "node-dom-shim")
+
 
 def _node_playwright_available() -> bool:
     probe = subprocess.run(
@@ -135,3 +150,10 @@ def _node_playwright_available() -> bool:
         check=False,
     )
     return probe.returncode == 0
+
+
+def _browser_gate_mode(app_grade: dict) -> str:
+    for gate in app_grade["quality_report"]["gate_results"]:
+        if gate["adapter_id"] == "browser_e2e":
+            return str(gate.get("evidence", {}).get("mode") or "")
+    return ""

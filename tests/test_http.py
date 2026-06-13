@@ -93,6 +93,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(plugin_manifest["id"], "across-orchestrator")
         self.assertEqual(plugin_manifest["entrypoints"]["sidecar"]["healthPath"], "/health")
         self.assertTrue(plugin_manifest["capabilities"]["agentLoopRuntime"])
+        self.assertEqual(plugin_manifest["protocols"]["http"]["hostConformance"], "POST /host-conformance")
 
         card = self.get("/.well-known/agent-card.json")
         self.assertEqual(card["name"], "Across Orchestrator")
@@ -154,6 +155,34 @@ class HttpTests(unittest.TestCase):
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
 
+    def test_http_host_conformance_validates_external_host_contract(self):
+        report = self.post(
+            "/host-conformance",
+            {
+                "platform_id": "generic-agent-host",
+                "agents": [
+                    {
+                        "agent_id": "planner",
+                        "display_name": "Planner",
+                        "endpoint": "http://127.0.0.1:9910/agents/planner",
+                        "protocols": ["http", "mcp"],
+                        "capabilities": ["planning"],
+                        "tenant_id": "tenant-a",
+                    }
+                ],
+                "memory_provider": "across-context",
+                "credentials_provider": "host-keychain",
+                "permissions_provider": "host-policy",
+                "project_context": {
+                    "project_id": "project-a",
+                    "workspace_root": "~/.across/workspaces/project-a",
+                },
+            },
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["host"]["platformId"], "generic-agent-host")
+        self.assertEqual(report["missingHostProvides"], [])
+
     def test_http_agent_loop_approval_lifecycle(self):
         loop = self.post(
             "/loops",
@@ -189,7 +218,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
 
         evidence = self.get(f"/tasks/{task['task_id']}/evidence-bundle")
-        self.assertEqual(evidence["app_grade"]["scenario_id"], "cross_agent_full_delivery_v1")
+        self.assertEqual(evidence["app_grade"]["scenario_id"], "host_agent_full_delivery_v1")
         self.assertIn(evidence["app_grade"]["delivery_quality"], {"passed", "partial"})
 
     def test_sidecar_runtime_info_is_written_under_across_run_home(self):

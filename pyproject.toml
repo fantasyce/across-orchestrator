@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "across-orchestrator"
-version = "0.6.1"
+version = "0.6.2"
 description = "Local-first task orchestration runtime for agent-to-agent delivery work."
 requires-python = ">=3.11"
 dependencies = []
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "Across Orchestrator contributors" }
 ]
@@ -25,3 +26,4 @@ across-tasks = "across_orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["across_orchestrator*"]

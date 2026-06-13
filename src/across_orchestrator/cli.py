@@ -7,6 +7,7 @@ from typing import Any
 
 from .agent_card import render_agent_card
 from .agent_loop import AgentLoopRuntime
+from .host_conformance import evaluate_host_conformance, load_host_contract
 from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
@@ -37,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--task-type", action="append", default=[])
     submit.add_argument("--json", action="store_true")
 
-    release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade release E2E parity scenario")
+    release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade host conformance scenario")
     release_e2e.add_argument("--project", required=True)
     release_e2e.add_argument("--run-label")
     release_e2e.add_argument("--json", action="store_true")
@@ -92,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     manifest = sub.add_parser("plugin-manifest", help="Print the Across plugin manifest")
     manifest.add_argument("--json", action="store_true")
+
+    host_conformance = sub.add_parser("host-conformance", help="Validate an external host contract against this plugin")
+    host_conformance.add_argument("--contract", required=True, help="Path to a host contract JSON file")
+    host_conformance.add_argument("--json", action="store_true")
 
     plugin_status = sub.add_parser("plugin-status", help="Print Across plugin install and runtime status")
     plugin_status.add_argument("--json", action="store_true")
@@ -198,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "plugin-manifest":
         _print(render_plugin_manifest(), args.json)
         return 0
+
+    if args.command == "host-conformance":
+        report = evaluate_host_conformance(load_host_contract(args.contract))
+        _print(report, args.json)
+        return 0 if report["passed"] else 1
 
     if args.command == "plugin-status":
         _print(render_plugin_status(), args.json)

@@ -1,29 +1,22 @@
 from unittest.mock import MagicMock
 
 
-def test_mature_engine_exposes_transplanted_task_orchestrator():
-    from across_agents_assistant.task_manager.models import SubTask
+def test_mature_engine_accepts_host_planning_adapter_without_aaa_imports():
     from across_orchestrator.engine import MatureOrchestrationEngine
 
     dispatcher = MagicMock()
-    dispatcher.add_progress_callback = MagicMock()
     validator = MagicMock()
     owner_agent = MagicMock()
 
     def decompose(task, context=None):
-        task.subtasks.append(
-            SubTask(
-                subtask_id="st-readme",
-                task_id=task.task_id,
-                description="Create README.md",
-                agent_id="openclaw",
-            )
-        )
+        task.subtasks.append({
+            "subtask_id": "st-readme",
+            "description": "Create README.md",
+            "agent_id": "openclaw",
+            "path": "README.md",
+        })
 
     owner_agent.decompose_and_assign.side_effect = decompose
-    owner_agent.assign_waves.return_value = None
-    owner_agent.refresh_decomposition_coverage.return_value = None
-    dispatcher._get_valid_agents.return_value = ["openclaw"]
 
     engine = MatureOrchestrationEngine(
         dispatcher=dispatcher,
@@ -41,6 +34,6 @@ def test_mature_engine_exposes_transplanted_task_orchestrator():
 
     task = engine.state.get_task(task_id)
     assert task is not None
-    assert task.status.value in {"pending", "running"}
-    assert any(st.subtask_id == "st-readme" for st in task.subtasks)
-    dispatcher.add_progress_callback.assert_called_once()
+    assert task.status in {"pending", "running"}
+    assert any(st.path == "README.md" and st.agent == "openclaw" for st in task.subtasks)
+    owner_agent.decompose_and_assign.assert_called_once()
