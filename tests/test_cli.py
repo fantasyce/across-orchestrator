@@ -260,6 +260,110 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["status"], "completed")
 
+    def test_cli_agent_loop_accepts_memory_policy_and_metadata_json(self):
+        start = self.run_cli(
+            "loop-start",
+            "Coordinate metadata-aware loop",
+            "--project",
+            str(self.project),
+            "--memory-policy-json",
+            json.dumps({"read": False, "writeCandidates": False, "limit": 3}),
+            "--metadata-json",
+            json.dumps({"maxRemediationTurns": 2, "scenario": "cli-json"}),
+            "--json",
+        )
+
+        self.assertEqual(start.returncode, 0, start.stderr)
+        loop = json.loads(start.stdout)
+        self.assertEqual(loop["memory_policy"]["read"], False)
+        self.assertEqual(loop["memory_policy"]["writeCandidates"], False)
+        self.assertEqual(loop["memory_policy"]["limit"], 3)
+        self.assertEqual(loop["metadata"]["scenario"], "cli-json")
+
+        run = self.run_cli("loop-run", loop["loop_id"], "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        completed = json.loads(run.stdout)
+        self.assertEqual(
+            [step["action"]["type"] for step in completed["steps"]],
+            ["task_dispatch", "quality_gate", "final_output"],
+        )
+
+    def test_cli_agent_loop_control_actions(self):
+        cancel_start = self.run_cli(
+            "loop-start",
+            "Cancel from CLI",
+            "--project",
+            str(self.project),
+            "--json",
+        )
+        self.assertEqual(cancel_start.returncode, 0, cancel_start.stderr)
+        cancel_loop = json.loads(cancel_start.stdout)
+
+        cancelled = self.run_cli(
+            "loop-cancel",
+            cancel_loop["loop_id"],
+            "--reason",
+            "no longer needed",
+            "--json",
+        )
+
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+        self.assertEqual(json.loads(cancelled.stdout)["status"], "cancelled")
+
+        reject_start = self.run_cli(
+            "loop-start",
+            "Reject from CLI",
+            "--project",
+            str(self.project),
+            "--approval-policy-json",
+            json.dumps({"requireApprovalFor": ["task_dispatch"]}),
+            "--json",
+        )
+        self.assertEqual(reject_start.returncode, 0, reject_start.stderr)
+        reject_loop = json.loads(reject_start.stdout)
+        waiting = self.run_cli("loop-run", reject_loop["loop_id"], "--json")
+        self.assertEqual(waiting.returncode, 0, waiting.stderr)
+        action_id = json.loads(waiting.stdout)["steps"][-1]["action"]["action_id"]
+
+        rejected = self.run_cli(
+            "loop-reject",
+            reject_loop["loop_id"],
+            action_id,
+            "--reason",
+            "needs review",
+            "--json",
+        )
+
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+        rejected_loop = json.loads(rejected.stdout)
+        self.assertEqual(rejected_loop["status"], "stopped")
+        self.assertEqual(rejected_loop["steps"][-1]["action"]["approval_status"], "rejected")
+
+        retry_start = self.run_cli(
+            "loop-start",
+            "Retry from CLI",
+            "--project",
+            str(self.project),
+            "--memory-policy-json",
+            json.dumps({"read": False, "writeCandidates": False}),
+            "--json",
+        )
+        self.assertEqual(retry_start.returncode, 0, retry_start.stderr)
+        retry_loop = json.loads(retry_start.stdout)
+        completed = self.run_cli("loop-run", retry_loop["loop_id"], "--json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        completed_loop = json.loads(completed.stdout)
+        quality_step = next(step for step in completed_loop["steps"] if step["action"]["type"] == "quality_gate")
+
+        rewound = self.run_cli("loop-retry", retry_loop["loop_id"], quality_step["step_id"], "--json")
+
+        self.assertEqual(rewound.returncode, 0, rewound.stderr)
+        self.assertEqual(json.loads(rewound.stdout)["status"], "running")
+        self.assertEqual(
+            [step["action"]["type"] for step in json.loads(rewound.stdout)["steps"]],
+            ["task_dispatch"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

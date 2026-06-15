@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class PluginRuntimeTests(unittest.TestCase):
@@ -49,6 +50,22 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(health["pluginId"], "across-orchestrator")
         self.assertEqual(health["home"], str(self.home / "data" / "across-orchestrator"))
 
+    def test_plugin_status_expands_tilde_path_with_env_home(self):
+        bin_dir = self.home / "tools"
+        command = bin_dir / "across-orchestrator"
+        bin_dir.mkdir(parents=True)
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o755)
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = "~/tools"
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        self.assertEqual(status["command"], str(command))
+        self.assertTrue(status["available"])
+
     def test_plugin_status_warns_when_across_context_command_uses_development_checkout(self):
         self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
         self.env["ACROSS_CONTEXT_COMMAND"] = "node /tmp/Documents/projects/across-context/src/cli.js"
@@ -62,6 +79,44 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(memory_provider["status"], "warning")
         self.assertIn("development checkout", memory_provider["warnings"][0])
         self.assertEqual(memory_provider["recommendedCommand"], str(self.home / "bin" / "across-context"))
+
+    def test_product_plugin_status_blocks_across_context_development_command(self):
+        self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env["ACROSS_CONTEXT_COMMAND"] = "node /tmp/Documents/projects/across-context/src/cli.js"
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["provider"], "across-context")
+        self.assertEqual(memory_provider["status"], "needs_repair")
+        self.assertEqual(memory_provider["command"], ["node", "<protected-user-path>"])
+        self.assertIn("development checkout", memory_provider["warnings"][0])
+        self.assertEqual(memory_provider["recommendedCommand"], str(self.home / "bin" / "across-context"))
+        self.assertNotIn("Documents", json.dumps(memory_provider))
+
+    def test_product_plugin_status_allows_similarly_named_context_command_directory(self):
+        self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env["HOME"] = str(self.home)
+        adjacent_bin = self.home / "DocumentsArchive" / "across-context" / "bin"
+        command = adjacent_bin / "across-context"
+        adjacent_bin.mkdir(parents=True)
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o755)
+        self.env["ACROSS_CONTEXT_COMMAND"] = str(command)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["status"], "configured")
+        self.assertEqual(memory_provider["command"], [str(command)])
+        self.assertEqual(memory_provider["resolvedCommand"], str(command))
+        self.assertEqual(memory_provider["warnings"], [])
 
     def test_plugin_status_warns_when_default_across_context_command_resolves_to_development_checkout(self):
         dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
@@ -108,6 +163,116 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(memory_provider["command"], [str(managed_command)])
         self.assertEqual(memory_provider["resolvedCommand"], str(managed_command))
         self.assertEqual(memory_provider["warnings"], [])
+
+    def test_product_plugin_status_ignores_protected_bin_home_for_managed_context_wrapper(self):
+        managed_command = self.home / "bin" / "across-context"
+        dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
+        dev_command = dev_bin / "across-context"
+        managed_command.parent.mkdir(parents=True)
+        dev_bin.mkdir(parents=True)
+        managed_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        dev_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        managed_command.chmod(0o755)
+        dev_command.chmod(0o755)
+        self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env.pop("ACROSS_CONTEXT_COMMAND", None)
+        self.env["HOME"] = str(self.home)
+        self.env["ACROSS_BIN_HOME"] = str(dev_bin)
+        self.env["PATH"] = str(dev_bin)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["status"], "configured")
+        self.assertEqual(memory_provider["command"], [str(managed_command)])
+        self.assertEqual(memory_provider["resolvedCommand"], str(managed_command))
+        self.assertEqual(memory_provider["warnings"], [])
+
+    def test_product_plugin_status_redacts_protected_context_command_on_path(self):
+        dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
+        dev_command = dev_bin / "across-context"
+        dev_bin.mkdir(parents=True)
+        dev_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        dev_command.chmod(0o755)
+        self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+        self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"
+        self.env.pop("ACROSS_CONTEXT_COMMAND", None)
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = str(dev_bin)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["status"], "needs_repair")
+        self.assertEqual(memory_provider["command"], ["across-context"])
+        self.assertIsNone(memory_provider["resolvedCommand"])
+        self.assertNotIn("Documents", json.dumps(memory_provider))
+
+    def test_context_diagnostics_skip_protected_path_before_file_probe(self):
+        from across_orchestrator.across_context import diagnose_across_context_command
+
+        dev_bin = self.home / "Documents" / "projects" / "across-context" / "bin"
+        env = {
+            **self.env,
+            "HOME": str(self.home),
+            "ACROSS_ORCHESTRATOR_PRODUCT_MODE": "1",
+            "PATH": str(dev_bin),
+        }
+
+        def guarded_is_file(path):
+            if "Documents" in str(path):
+                raise AssertionError("protected Context PATH was probed")
+            return False
+
+        with patch("across_orchestrator.across_context.Path.is_file", guarded_is_file):
+            diagnostic = diagnose_across_context_command(env)
+
+        self.assertEqual(diagnostic["status"], "needs_repair")
+        self.assertIsNone(diagnostic["resolvedCommand"])
+
+    def test_orchestrator_status_skips_protected_path_before_file_probe(self):
+        from across_orchestrator.plugin_manifest import _resolve_status_command
+
+        dev_bin = self.home / "Documents" / "projects" / "across-orchestrator" / "bin"
+        env = {
+            **self.env,
+            "HOME": str(self.home),
+            "ACROSS_ORCHESTRATOR_PRODUCT_MODE": "1",
+            "PATH": str(dev_bin),
+        }
+
+        def guarded_is_file(path):
+            if "Documents" in str(path):
+                raise AssertionError("protected Orchestrator PATH was probed")
+            return False
+
+        with patch("across_orchestrator.plugin_manifest.Path.is_file", guarded_is_file):
+            command = _resolve_status_command("across-orchestrator", env)
+
+        self.assertEqual(command, str(self.home / "bin" / "across-orchestrator"))
+
+    def test_product_plugin_status_ignores_protected_orchestrator_command_on_path(self):
+        dev_bin = self.home / "Documents" / "projects" / "across-orchestrator" / "bin"
+        dev_command = dev_bin / "across-orchestrator"
+        dev_bin.mkdir(parents=True)
+        dev_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        dev_command.chmod(0o755)
+        self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = str(dev_bin)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        self.assertEqual(status["available"], False)
+        self.assertEqual(status["command"], str(self.home / "bin" / "across-orchestrator"))
+        self.assertNotIn("Documents", json.dumps(status))
 
     def test_plugin_manifest_declares_hosting_platform_contract(self):
         result = self.run_cli("plugin-manifest", "--json")

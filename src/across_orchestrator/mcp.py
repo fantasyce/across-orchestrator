@@ -90,6 +90,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "maxTurns": {"type": "integer", "default": 8},
                     "memoryPolicy": {"type": "object"},
                     "approvalPolicy": {"type": "object"},
+                    "metadata": {"type": "object"},
                 },
                 "required": ["goal", "projectRoot"],
             },
@@ -113,6 +114,43 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "actionId": {"type": "string"},
                 },
                 "required": ["loopId", "actionId"],
+            },
+        },
+        {
+            "name": "reject_agent_loop_action",
+            "description": "Reject a pending durable agent loop action and stop the loop safely.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "loopId": {"type": "string"},
+                    "actionId": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["loopId", "actionId"],
+            },
+        },
+        {
+            "name": "cancel_agent_loop",
+            "description": "Cancel a pending or running durable agent loop.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "loopId": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["loopId"],
+            },
+        },
+        {
+            "name": "retry_agent_loop_step",
+            "description": "Retry an agent loop by rewinding from a selected step.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "loopId": {"type": "string"},
+                    "stepId": {"type": "string"},
+                },
+                "required": ["loopId", "stepId"],
             },
         },
         {
@@ -182,6 +220,7 @@ def agent_loop_schema() -> dict[str, Any]:
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
         "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed"],
         "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
+        "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
         "memoryPolicy": {
             "provider": "across-context",
             "read": "search active memory before planning",
@@ -227,11 +266,22 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
             max_turns=arguments.get("maxTurns") or arguments.get("max_turns") or 8,
             memory_policy=arguments.get("memoryPolicy") or arguments.get("memory_policy"),
             approval_policy=arguments.get("approvalPolicy") or arguments.get("approval_policy"),
+            metadata=arguments.get("metadata"),
         ).to_dict()
     if name == "run_agent_loop":
         return loop_runtime.run_loop(arguments["loopId"]).to_dict()
     if name == "approve_agent_loop_action":
         return loop_runtime.approve_action(arguments["loopId"], arguments["actionId"]).to_dict()
+    if name == "reject_agent_loop_action":
+        return loop_runtime.reject_action(
+            arguments["loopId"],
+            arguments["actionId"],
+            reason=arguments.get("reason"),
+        ).to_dict()
+    if name == "cancel_agent_loop":
+        return loop_runtime.cancel_loop(arguments["loopId"], reason=arguments.get("reason")).to_dict()
+    if name == "retry_agent_loop_step":
+        return loop_runtime.retry_step(arguments["loopId"], arguments["stepId"]).to_dict()
     if name == "get_agent_loop":
         return loop_runtime.get_loop(arguments["loopId"]).to_dict()
     if name == "get_agent_loop_events":

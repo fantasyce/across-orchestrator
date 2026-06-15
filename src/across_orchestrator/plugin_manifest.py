@@ -11,9 +11,13 @@ from .paths import (
     COMPONENT_ID,
     cache_home,
     component_data_home,
+    contains_protected_user_reference,
     config_home,
     ecosystem_bin_dir,
     ecosystem_home,
+    expand_user,
+    is_developer_mode,
+    is_product_mode,
     logs_home,
     plugin_root,
     run_home,
@@ -144,6 +148,9 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "loopStart": "POST /loops",
                 "loopRun": "POST /loops/{loopId}/run",
                 "loopApprove": "POST /loops/{loopId}/actions/{actionId}/approve",
+                "loopReject": "POST /loops/{loopId}/actions/{actionId}/reject",
+                "loopCancel": "POST /loops/{loopId}/cancel",
+                "loopRetryStep": "POST /loops/{loopId}/steps/{stepId}/retry",
                 "loopStatus": "GET /loops/{loopId}",
                 "loopEvents": "GET /loops/{loopId}/events",
             },
@@ -155,6 +162,9 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                     "startAgentLoop": "start_agent_loop",
                     "runAgentLoop": "run_agent_loop",
                     "approveAgentLoopAction": "approve_agent_loop_action",
+                    "rejectAgentLoopAction": "reject_agent_loop_action",
+                    "cancelAgentLoop": "cancel_agent_loop",
+                    "retryAgentLoopStep": "retry_agent_loop_step",
                     "getAgentLoop": "get_agent_loop",
                     "getAgentLoopEvents": "get_agent_loop_events",
                 },
@@ -193,8 +203,8 @@ def render_plugin_status(command: str = "across-orchestrator", env: Mapping[str,
     home = ecosystem_home(source)
     plugin_dir = plugin_root(source) / COMPONENT_ID
     manifest_path = plugin_dir / "manifest.json"
-    command_path = shutil.which(command, path=source.get("PATH")) or str(ecosystem_bin_dir(source) / command)
-    command_available = Path(command_path).is_file() or shutil.which(command, path=source.get("PATH")) is not None
+    command_path = _resolve_status_command(command, source)
+    command_available = Path(command_path).is_file()
     manifest_exists = manifest_path.is_file()
     installed = manifest_exists or command_available
     store = LocalStore(env=source)
@@ -231,6 +241,31 @@ def render_plugin_status(command: str = "across-orchestrator", env: Mapping[str,
             "preservesDataOnUninstall": True,
         },
     }
+
+
+def _resolve_status_command(command: str, source: Mapping[str, str]) -> str:
+    if os.path.isabs(command) or os.sep in command:
+        if (
+            is_product_mode(source)
+            and not is_developer_mode(source)
+            and contains_protected_user_reference(command, source)
+        ):
+            return str(ecosystem_bin_dir(source) / Path(command).name)
+        candidate = Path(expand_user(command, source))
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else str(ecosystem_bin_dir(source) / Path(command).name)
+    for item in str(source.get("PATH") or "").split(os.pathsep):
+        if not item:
+            continue
+        candidate = Path(expand_user(item, source)) / command
+        if (
+            is_product_mode(source)
+            and not is_developer_mode(source)
+            and contains_protected_user_reference(str(candidate), source)
+        ):
+            continue
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return str(ecosystem_bin_dir(source) / command)
 
 
 def _memory_provider_status(source: Mapping[str, str]) -> dict:

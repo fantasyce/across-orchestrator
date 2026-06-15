@@ -5,9 +5,10 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
+
+from .paths import ecosystem_bin_dir
 
 
 class AcrossContextMemoryProvider:
@@ -18,7 +19,12 @@ class AcrossContextMemoryProvider:
         configured = command or _command_from_env(source)
         self.command = [str(item) for item in configured]
         self.env = dict(source)
+        if _is_product_mode(self.env):
+            self.env.setdefault("ACROSS_CONTEXT_PRODUCT_MODE", "1")
+        if _is_developer_mode(self.env):
+            self.env.setdefault("ACROSS_CONTEXT_DEVELOPER_MODE", "1")
         self.warnings = _command_warnings(self.command, self.env)
+        self.disabled_reason = _disabled_reason(self.warnings, self.env)
         self.timeout = timeout
 
     def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
@@ -85,6 +91,13 @@ class AcrossContextMemoryProvider:
         }
 
     def _run(self, args: list[str]) -> dict[str, Any]:
+        if self.disabled_reason:
+            return {
+                "status": "blocked",
+                "error": self.disabled_reason,
+                "command": _diagnostic_command(self.command, self.env),
+                "warnings": self.warnings,
+            }
         try:
             completed = subprocess.run(
                 [*self.command, *args],
@@ -135,15 +148,7 @@ def _command_from_env(env: Mapping[str, str]) -> list[str]:
 
 
 def _managed_across_context_command(env: Mapping[str, str]) -> Path | None:
-    configured_bin = str(env.get("ACROSS_BIN_HOME") or "").strip()
-    if configured_bin:
-        bin_dir = Path(_expand_user(configured_bin, env))
-    else:
-        across_home = str(env.get("ACROSS_HOME") or "").strip()
-        if across_home:
-            bin_dir = Path(_expand_user(across_home, env)) / "bin"
-        else:
-            bin_dir = Path(_expand_user("~/.across", env)) / "bin"
+    bin_dir = ecosystem_bin_dir(env)
     candidate = bin_dir / "across-context"
     return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
 
@@ -152,12 +157,22 @@ def _command_warnings(command: Sequence[str], env: Mapping[str, str] | None = No
     source = env if env is not None else os.environ
     expanded = " ".join(_expand_user(str(item), source) for item in command)
     resolved = _resolved_command_path(command, source)
-    if _contains_protected_user_reference(expanded, source) or _contains_protected_user_reference(resolved or "", source):
+    if (
+        _contains_protected_user_reference(expanded, source)
+        or _contains_protected_user_reference(resolved or "", source)
+        or _protected_path_lookup_candidate(command, source) is not None
+    ):
         return [
             "Across Context command resolves to a development checkout; packaged hosts should use the managed "
             "~/.across/bin/across-context wrapper."
         ]
     return []
+
+
+def _disabled_reason(warnings: Sequence[str], env: Mapping[str, str]) -> str | None:
+    if warnings and _is_product_mode(env) and not _is_developer_mode(env):
+        return "Across Context command resolves to a development checkout; repair the managed ~/.across/bin/across-context wrapper."
+    return None
 
 
 def _resolved_command_path(command: Sequence[str], env: Mapping[str, str]) -> str | None:
@@ -166,7 +181,30 @@ def _resolved_command_path(command: Sequence[str], env: Mapping[str, str]) -> st
     first = _expand_user(str(command[0]), env)
     if os.path.isabs(first) or os.sep in first:
         return first
-    return shutil.which(first, path=str(env.get("PATH") or "")) or None
+    for item in str(env.get("PATH") or "").split(os.pathsep):
+        if not item:
+            continue
+        candidate = str(Path(_expand_user(item, env)) / first)
+        if _is_product_mode(env) and not _is_developer_mode(env) and _contains_protected_user_reference(candidate, env):
+            continue
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _protected_path_lookup_candidate(command: Sequence[str], env: Mapping[str, str]) -> str | None:
+    if not command or not (_is_product_mode(env) and not _is_developer_mode(env)):
+        return None
+    first = _expand_user(str(command[0]), env)
+    if os.path.isabs(first) or os.sep in first:
+        return first if _contains_protected_user_reference(first, env) else None
+    for item in str(env.get("PATH") or "").split(os.pathsep):
+        if not item:
+            continue
+        candidate = str(Path(_expand_user(item, env)) / first)
+        if _contains_protected_user_reference(candidate, env):
+            return candidate
+    return None
 
 
 def _contains_protected_user_reference(value: str, env: Mapping[str, str]) -> bool:
@@ -176,10 +214,17 @@ def _contains_protected_user_reference(value: str, env: Mapping[str, str]) -> bo
     if "/Documents/projects/" in expanded:
         return True
     roots = _protected_user_reference_roots(env)
-    if any(str(root) in expanded for root in roots):
+    if any(_references_path_root(expanded, root) for root in roots):
         return True
     user_home_pattern = r"/" + "Users" + r"/[^/]+"
     return bool(re.search(rf"(?:~|{user_home_pattern})/(Documents|Desktop|Downloads)(?:/|$)", expanded))
+
+
+def _references_path_root(text: str, root: Path) -> bool:
+    root_text = str(root)
+    if not root_text:
+        return False
+    return bool(re.search(re.escape(root_text) + r"(?:/|$)", text))
 
 
 def _protected_user_reference_roots(env: Mapping[str, str]) -> list[Path]:
@@ -203,11 +248,35 @@ def diagnose_across_context_command(
 ) -> dict[str, Any]:
     command = _command_from_env(env)
     warnings = _command_warnings(command, env)
+    disabled = _disabled_reason(warnings, env)
+    resolved = _resolved_command_path(command, env)
+    if disabled and resolved and _contains_protected_user_reference(resolved, env):
+        resolved = None
     return {
         "provider": "across-context",
-        "status": "warning" if warnings else "configured",
-        "command": command,
-        "resolvedCommand": _resolved_command_path(command, env),
+        "status": "needs_repair" if disabled else ("warning" if warnings else "configured"),
+        "command": _diagnostic_command(command, env) if disabled else command,
+        "resolvedCommand": resolved,
         "warnings": warnings,
+        "disabledReason": disabled,
         "recommendedCommand": recommended_command,
     }
+
+
+def _diagnostic_command(command: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    return [
+        "<protected-user-path>" if _contains_protected_user_reference(part, env) else str(part)
+        for part in command
+    ]
+
+
+def _is_product_mode(env: Mapping[str, str]) -> bool:
+    return _truthy(env.get("ACROSS_ORCHESTRATOR_PRODUCT_MODE")) or _truthy(env.get("ACROSS_AGENTS_PRODUCT_MODE"))
+
+
+def _is_developer_mode(env: Mapping[str, str]) -> bool:
+    return _truthy(env.get("ACROSS_ORCHESTRATOR_DEVELOPER_MODE")) or _truthy(env.get("ACROSS_AGENTS_DEVELOPER_MODE"))
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "y"}

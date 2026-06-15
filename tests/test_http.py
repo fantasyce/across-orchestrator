@@ -77,6 +77,10 @@ class HttpTests(unittest.TestCase):
         with request.urlopen(self.base + path, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def get_text(self, path):
+        with request.urlopen(self.base + path, timeout=5) as response:
+            return response.read().decode("utf-8")
+
     def post(self, path, payload):
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
@@ -155,6 +159,10 @@ class HttpTests(unittest.TestCase):
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
 
+        stream = self.get_text(f"/loops/{loop_id}/events/stream")
+        self.assertIn("event: loop.completed", stream)
+        self.assertIn('"loop_id":', stream)
+
     def test_http_host_conformance_validates_external_host_contract(self):
         report = self.post(
             "/host-conformance",
@@ -203,6 +211,59 @@ class HttpTests(unittest.TestCase):
 
         completed = self.post(f"/loops/{loop['loop_id']}/run", {})
         self.assertEqual(completed["status"], "completed")
+
+    def test_http_agent_loop_control_actions(self):
+        cancel_loop = self.post(
+            "/loops",
+            {
+                "goal": "Cancel over HTTP",
+                "projectRoot": str(self.project),
+                "maxTurns": 8,
+            },
+        )
+
+        cancelled = self.post(f"/loops/{cancel_loop['loop_id']}/cancel", {"reason": "user stopped it"})
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["error"], "user stopped it")
+        self.assertEqual(self.post(f"/loops/{cancel_loop['loop_id']}/run", {})["status"], "cancelled")
+
+        reject_loop = self.post(
+            "/loops",
+            {
+                "goal": "Reject over HTTP",
+                "projectRoot": str(self.project),
+                "maxTurns": 8,
+                "approvalPolicy": {"requireApprovalFor": ["task_dispatch"]},
+            },
+        )
+        waiting = self.post(f"/loops/{reject_loop['loop_id']}/run", {})
+        action_id = waiting["steps"][-1]["action"]["action_id"]
+
+        rejected = self.post(
+            f"/loops/{reject_loop['loop_id']}/actions/{action_id}/reject",
+            {"reason": "unsafe action"},
+        )
+
+        self.assertEqual(rejected["status"], "stopped")
+        self.assertEqual(rejected["steps"][-1]["action"]["approval_status"], "rejected")
+
+        retry_loop = self.post(
+            "/loops",
+            {
+                "goal": "Retry over HTTP",
+                "projectRoot": str(self.project),
+                "maxTurns": 8,
+                "memoryPolicy": {"read": False, "writeCandidates": False},
+            },
+        )
+        completed = self.post(f"/loops/{retry_loop['loop_id']}/run", {})
+        quality_step = next(step for step in completed["steps"] if step["action"]["type"] == "quality_gate")
+
+        rewound = self.post(f"/loops/{retry_loop['loop_id']}/steps/{quality_step['step_id']}/retry", {})
+
+        self.assertEqual(rewound["status"], "running")
+        self.assertEqual([step["action"]["type"] for step in rewound["steps"]], ["task_dispatch"])
 
     def test_http_submit_release_e2e(self):
         task = self.post(
@@ -275,6 +336,51 @@ class HttpTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate(timeout=5)
+
+    def test_product_mode_runtime_info_ignores_protected_override(self):
+        from across_orchestrator.server import _runtime_info_path
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            previous = os.environ.copy()
+            try:
+                home = Path(tempdir) / "home"
+                across_home = Path(tempdir) / "across"
+                protected = home / "Documents" / "projects" / "runtime.json"
+                os.environ.clear()
+                os.environ.update(previous)
+                os.environ["HOME"] = str(home)
+                os.environ["ACROSS_HOME"] = str(across_home)
+                os.environ["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+                os.environ.pop("ACROSS_ORCHESTRATOR_DEVELOPER_MODE", None)
+
+                self.assertEqual(
+                    _runtime_info_path("unit-host", str(protected)),
+                    (across_home / "run" / "across-orchestrator" / "unit-host.json").resolve(),
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(previous)
+
+    def test_developer_mode_runtime_info_preserves_protected_override(self):
+        from across_orchestrator.server import _runtime_info_path
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            previous = os.environ.copy()
+            try:
+                home = Path(tempdir) / "home"
+                across_home = Path(tempdir) / "across"
+                protected = home / "Documents" / "projects" / "runtime.json"
+                os.environ.clear()
+                os.environ.update(previous)
+                os.environ["HOME"] = str(home)
+                os.environ["ACROSS_HOME"] = str(across_home)
+                os.environ["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
+                os.environ["ACROSS_ORCHESTRATOR_DEVELOPER_MODE"] = "1"
+
+                self.assertEqual(_runtime_info_path("unit-host", str(protected)), protected.resolve())
+            finally:
+                os.environ.clear()
+                os.environ.update(previous)
 
 
 if __name__ == "__main__":

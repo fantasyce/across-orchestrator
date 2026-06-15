@@ -4,6 +4,25 @@ import unittest
 from pathlib import Path
 
 
+class FailingThenPassingQualityGate:
+    def __init__(self):
+        self.calls = 0
+
+    def evaluate(self, *, loop, context):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "quality": "failed",
+                "passed": False,
+                "summary": "first pass failed",
+            }
+        return {
+            "quality": "passed",
+            "passed": True,
+            "summary": "retry passed",
+        }
+
+
 class AgentLoopRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -123,6 +142,81 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         completed = runtime.run_loop(loop.loop_id)
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.steps[1].observation.payload["approval"], "approved")
+
+    def test_cancel_loop_marks_terminal_and_prevents_run(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Stop this loop before it dispatches",
+            project_root=str(self.project),
+            max_turns=8,
+        )
+
+        cancelled = runtime.cancel_loop(loop.loop_id, reason="user requested stop")
+
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.error, "user requested stop")
+        self.assertEqual(cancelled.steps, [])
+        self.assertIn("loop.cancelled", [event["type"] for event in runtime.list_loop_events(loop.loop_id)])
+        still_cancelled = runtime.run_loop(loop.loop_id)
+        self.assertEqual(still_cancelled.status, "cancelled")
+        self.assertEqual(still_cancelled.steps, [])
+
+    def test_reject_waiting_action_stops_loop_with_rejection_event(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Gate dispatch through user approval",
+            project_root=str(self.project),
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+            max_turns=8,
+        )
+        waiting = runtime.run_loop(loop.loop_id)
+        action_id = waiting.steps[-1].action.action_id
+
+        rejected = runtime.reject_action(loop.loop_id, action_id, reason="needs a safer plan")
+
+        self.assertEqual(rejected.status, "stopped")
+        self.assertEqual(rejected.error, "approval_rejected")
+        self.assertEqual(rejected.steps[-1].status, "rejected")
+        self.assertEqual(rejected.steps[-1].action.approval_status, "rejected")
+        self.assertEqual(rejected.steps[-1].observation.payload["reason"], "needs a safer plan")
+        self.assertIn("loop.action.rejected", [event["type"] for event in runtime.list_loop_events(loop.loop_id)])
+        self.assertEqual(runtime.run_loop(loop.loop_id).status, "stopped")
+
+    def test_retry_step_rewinds_from_selected_step_and_reruns(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        quality_gate = FailingThenPassingQualityGate()
+        runtime = AgentLoopRuntime(adapters=AgentLoopAdapters(quality_gate=quality_gate))
+        loop = runtime.start_loop(
+            goal="Retry failed quality gate",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"maxRemediationTurns": 0},
+        )
+        failed = runtime.run_loop(loop.loop_id)
+        quality_step = failed.steps[-1]
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(quality_step.action.type, "quality_gate")
+
+        rewound = runtime.retry_step(loop.loop_id, quality_step.step_id)
+
+        self.assertEqual(rewound.status, "running")
+        self.assertIsNone(rewound.error)
+        self.assertEqual(rewound.turn_count, 1)
+        self.assertEqual([step.action.type for step in rewound.steps], ["task_dispatch"])
+        self.assertIn("loop.step.retry_requested", [event["type"] for event in runtime.list_loop_events(loop.loop_id)])
+
+        completed = runtime.run_loop(loop.loop_id)
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            ["task_dispatch", "quality_gate", "final_output"],
+        )
 
 
 if __name__ == "__main__":
