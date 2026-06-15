@@ -140,6 +140,53 @@ class AcrossContextProviderTests(unittest.TestCase):
         self.assertEqual(completed.steps[0].observation.payload["provider"], "across-context")
         self.assertEqual(completed.steps[0].observation.payload["result_count"], 1)
 
+    def test_product_mode_does_not_execute_development_checkout_context_command(self):
+        from across_orchestrator.across_context import AcrossContextMemoryProvider
+
+        dev_command = Path(self.tempdir.name) / "Documents" / "projects" / "across-context" / "bin" / "across-context"
+        marker = Path(self.tempdir.name) / "context-command-ran"
+        dev_command.parent.mkdir(parents=True)
+        dev_command.write_text(
+            "#!/bin/sh\n"
+            f"touch {marker}\n"
+            "printf '{\"results\":[]}\\n'\n",
+            encoding="utf-8",
+        )
+        dev_command.chmod(0o755)
+
+        provider = AcrossContextMemoryProvider(
+            command=[str(dev_command)],
+            env={
+                **os.environ,
+                "HOME": self.tempdir.name,
+                "ACROSS_ORCHESTRATOR_PRODUCT_MODE": "1",
+                "ACROSS_ORCHESTRATOR_MEMORY_PROVIDER": "across-context",
+            },
+        )
+
+        result = provider.search(query="boundary", project_root=str(self.project))
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(result["provider"], "across-context")
+        self.assertEqual(result["error"]["status"], "blocked")
+        self.assertEqual(result["error"]["command"], ["<protected-user-path>"])
+        self.assertIn("development checkout", result["error"]["warnings"][0])
+        self.assertNotIn("Documents", json.dumps(result["error"]))
+
+    def test_product_mode_is_forwarded_to_context_cli_environment(self):
+        from across_orchestrator.across_context import AcrossContextMemoryProvider
+
+        provider = AcrossContextMemoryProvider(
+            command=["across-context"],
+            env={
+                **os.environ,
+                "HOME": self.tempdir.name,
+                "ACROSS_ORCHESTRATOR_PRODUCT_MODE": "1",
+            },
+        )
+
+        self.assertEqual(provider.env["ACROSS_CONTEXT_PRODUCT_MODE"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

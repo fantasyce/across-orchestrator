@@ -11,7 +11,7 @@ import time
 from .agent_card import render_agent_card
 from .agent_loop import AgentLoopRuntime
 from .host_conformance import evaluate_host_conformance
-from .paths import COMPONENT_ID, run_home
+from .paths import COMPONENT_ID, contains_protected_user_reference, is_developer_mode, is_product_mode, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
 
@@ -64,6 +64,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "events":
                 self.respond(self.loop_runtime.list_loop_events(parts[1]))
+                return
+            if len(parts) == 4 and parts[0] == "loops" and parts[2] == "events" and parts[3] == "stream":
+                self.respond_sse(self.loop_runtime.list_loop_events(parts[1]))
                 return
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
@@ -123,8 +126,20 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 loop = self.loop_runtime.run_loop(parts[1])
                 self.respond(loop.to_dict())
                 return
+            if len(parts) == 3 and parts[0] == "loops" and parts[2] == "cancel":
+                loop = self.loop_runtime.cancel_loop(parts[1], reason=payload.get("reason"))
+                self.respond(loop.to_dict())
+                return
             if len(parts) == 5 and parts[0] == "loops" and parts[2] == "actions" and parts[4] == "approve":
                 loop = self.loop_runtime.approve_action(parts[1], parts[3])
+                self.respond(loop.to_dict())
+                return
+            if len(parts) == 5 and parts[0] == "loops" and parts[2] == "actions" and parts[4] == "reject":
+                loop = self.loop_runtime.reject_action(parts[1], parts[3], reason=payload.get("reason"))
+                self.respond(loop.to_dict())
+                return
+            if len(parts) == 5 and parts[0] == "loops" and parts[2] == "steps" and parts[4] == "retry":
+                loop = self.loop_runtime.retry_step(parts[1], parts[3])
                 self.respond(loop.to_dict())
                 return
             self.respond({"error": "not_found"}, status=404)
@@ -171,7 +186,12 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
 
 def _runtime_info_path(runtime_id: str, runtime_info: str | None = None) -> Path:
     if runtime_info and runtime_info.strip():
-        return Path(runtime_info).expanduser().resolve()
+        if not (
+            is_product_mode()
+            and not is_developer_mode()
+            and contains_protected_user_reference(runtime_info)
+        ):
+            return Path(runtime_info).expanduser().resolve()
     return run_home() / f"{runtime_id}.json"
 
 

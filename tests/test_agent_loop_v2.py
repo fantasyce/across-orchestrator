@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -79,6 +81,37 @@ class FailingThenPassingQualityGate:
             "passed": True,
             "gate_count": 4,
             "summary": "All gates passed after remediation.",
+        }
+
+
+class AlwaysFailingQualityGate:
+    def evaluate(self, *, loop, context):
+        return {
+            "quality": "failed",
+            "passed": False,
+            "failed_gates": ["browser_e2e"],
+            "summary": "Browser E2E still fails.",
+        }
+
+
+class ExplodingDispatcher:
+    def dispatch(self, *, loop, action_type, context):
+        raise RuntimeError(f"{action_type} adapter unavailable")
+
+
+class SlowDispatcher:
+    def __init__(self):
+        self.actions = []
+        self._lock = threading.Lock()
+
+    def dispatch(self, *, loop, action_type, context):
+        with self._lock:
+            self.actions.append(action_type)
+        time.sleep(0.05)
+        return {
+            "dispatch": "completed",
+            "adapter": "slow-dispatcher",
+            "message": "Slow dispatch completed.",
         }
 
 
@@ -174,6 +207,98 @@ class AgentLoopV2Tests(unittest.TestCase):
         completed = runtime.run_loop(loop.loop_id)
         self.assertEqual(completed.status, "completed")
         self.assertIn("approval", completed.steps[1].observation.payload)
+
+    def test_quality_failure_after_remediation_budget_remains_failed(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=RemediationDispatcher(),
+                quality_gate=AlwaysFailingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Fail when quality never recovers",
+            project_root=str(self.project),
+            max_turns=8,
+            metadata={"maxRemediationTurns": 0},
+        )
+
+        failed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "quality_gate_failed")
+        self.assertIsNone(failed.final_output)
+        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        self.assertIn("loop.failed", event_types)
+        self.assertNotIn("loop.completed", event_types)
+
+    def test_adapter_exception_fails_loop_instead_of_leaving_it_running(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=ExplodingDispatcher(),
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Record adapter failures",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+
+        failed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "task_dispatch_failed")
+        event = runtime.list_loop_events(loop.loop_id)[-1]
+        self.assertEqual(event["type"], "loop.failed")
+        self.assertEqual(event["payload"]["action_type"], "task_dispatch")
+
+    def test_concurrent_run_loop_executes_dispatch_once(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = SlowDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Run only one dispatcher for concurrent callers",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+        start = threading.Barrier(3)
+        results = []
+
+        def run_loop():
+            start.wait(timeout=2)
+            results.append(runtime.run_loop(loop.loop_id).status)
+
+        threads = [threading.Thread(target=run_loop) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        start.wait(timeout=2)
+        for thread in threads:
+            thread.join(timeout=3)
+
+        final_loop = runtime.get_loop(loop.loop_id)
+
+        self.assertEqual(results, ["completed", "completed"])
+        self.assertEqual(dispatcher.actions, ["task_dispatch", "remediation_dispatch"])
+        self.assertEqual(dispatcher.actions.count("task_dispatch"), 1)
+        self.assertEqual(
+            [step.action.type for step in final_loop.steps],
+            ["task_dispatch", "quality_gate", "remediation_dispatch", "quality_gate", "final_output"],
+        )
 
 
 if __name__ == "__main__":

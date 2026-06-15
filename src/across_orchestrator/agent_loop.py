@@ -10,7 +10,7 @@ from .models import new_id
 from .store import LocalStore
 
 
-TERMINAL_LOOP_STATUSES = {"completed", "failed", "stopped"}
+TERMINAL_LOOP_STATUSES = {"completed", "failed", "stopped", "cancelled"}
 
 
 class MemoryProvider(Protocol):
@@ -334,6 +334,10 @@ class AgentLoopRuntime:
         return self.store.list_loop_events(loop_id)
 
     def run_loop(self, loop_id: str) -> LoopRun:
+        with self.store.loop_lock(loop_id):
+            return self._run_loop_locked(loop_id)
+
+    def _run_loop_locked(self, loop_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
         if loop.status in TERMINAL_LOOP_STATUSES:
             return loop
@@ -344,6 +348,8 @@ class AgentLoopRuntime:
         while True:
             action_type = self._select_next_action(loop)
             if action_type is None:
+                if loop.status in TERMINAL_LOOP_STATUSES:
+                    return loop
                 loop.status = "completed"
                 if loop.final_output is None:
                     loop.final_output = f"Agent loop completed for: {loop.goal}"
@@ -371,7 +377,15 @@ class AgentLoopRuntime:
                 "turn": loop.turn_count + 1,
                 "reason": self._next_action_reason(loop, action_type),
             })
-            step = self._build_step(loop, action_type)
+            try:
+                step = self._build_step(loop, action_type)
+            except Exception as exc:
+                return self._fail_loop(
+                    loop,
+                    reason=f"{action_type}_failed",
+                    error=str(exc),
+                    payload={"action_type": action_type, "turn": loop.turn_count + 1},
+                )
             loop.turn_count = step.turn
             loop.steps.append(step)
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
@@ -384,6 +398,25 @@ class AgentLoopRuntime:
             self.store.save_loop(loop)
 
     def approve_action(self, loop_id: str, action_id: str) -> LoopRun:
+        with self.store.loop_lock(loop_id):
+            return self._approve_action_locked(loop_id, action_id)
+
+    def cancel_loop(self, loop_id: str, reason: str | None = None) -> LoopRun:
+        with self.store.loop_lock(loop_id):
+            loop = self.get_loop(loop_id)
+            if loop.status in TERMINAL_LOOP_STATUSES:
+                return loop
+            loop.status = "cancelled"
+            loop.error = reason or "cancelled"
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
+                "reason": loop.error,
+                "turn_count": loop.turn_count,
+                "checkpoint_count": loop.checkpoint_count,
+            })
+            return loop
+
+    def _approve_action_locked(self, loop_id: str, action_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
         for step in loop.steps:
             if step.action.action_id != action_id:
@@ -391,9 +424,27 @@ class AgentLoopRuntime:
             if step.status != "waiting_approval":
                 return loop
             step.action.approval_status = "approved"
+            try:
+                observation_payload = self._execute_action(loop, step.action.type)
+            except Exception as exc:
+                step.status = "failed"
+                step.observation = LoopObservation.new("failed", {
+                    "approval": "approved",
+                    "action_type": step.action.type,
+                    "error": str(exc),
+                })
+                step.updated_at = time.time()
+                self.store.save_loop(loop)
+                self.store.append_loop_event(loop.loop_id, "loop.action.failed", asdict(step))
+                return self._fail_loop(
+                    loop,
+                    reason=f"{step.action.type}_failed",
+                    error=str(exc),
+                    payload={"action_id": action_id, "action_type": step.action.type},
+                )
             step.status = "completed"
             step.observation = LoopObservation.new("approved", {
-                **self._execute_action(loop, step.action.type),
+                **observation_payload,
                 "approval": "approved",
             })
             step.checkpoint = self._checkpoint(loop, step.action.type, step.turn)
@@ -407,6 +458,79 @@ class AgentLoopRuntime:
             self.store.append_loop_event(loop.loop_id, "loop.step.completed", asdict(step))
             return loop
         raise KeyError(f"Action not found: {action_id}")
+
+    def reject_action(self, loop_id: str, action_id: str, reason: str | None = None) -> LoopRun:
+        with self.store.loop_lock(loop_id):
+            loop = self.get_loop(loop_id)
+            for step in loop.steps:
+                if step.action.action_id != action_id:
+                    continue
+                if step.status != "waiting_approval":
+                    return loop
+                step.action.approval_status = "rejected"
+                step.status = "rejected"
+                step.observation = LoopObservation.new("rejected", {
+                    "approval": "rejected",
+                    "reason": reason or "rejected",
+                    "action_type": step.action.type,
+                })
+                step.updated_at = time.time()
+                loop.status = "stopped"
+                loop.error = "approval_rejected"
+                self.store.save_loop(loop)
+                self.store.append_loop_event(loop.loop_id, "loop.action.rejected", asdict(step))
+                self.store.append_loop_event(loop.loop_id, "loop.stopped", {
+                    "reason": loop.error,
+                    "action_id": action_id,
+                    "rejection_reason": reason or "rejected",
+                })
+                return loop
+            raise KeyError(f"Action not found: {action_id}")
+
+    def retry_step(self, loop_id: str, step_id: str) -> LoopRun:
+        with self.store.loop_lock(loop_id):
+            loop = self.get_loop(loop_id)
+            retry_index = None
+            for index, step in enumerate(loop.steps):
+                if step.step_id == step_id:
+                    retry_index = index
+                    break
+            if retry_index is None:
+                raise KeyError(f"Step not found: {step_id}")
+
+            removed = loop.steps[retry_index:]
+            loop.steps = loop.steps[:retry_index]
+            loop.turn_count = loop.steps[-1].turn if loop.steps else 0
+            loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+            loop.final_output = None
+            loop.error = None
+            loop.status = "running"
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.step.retry_requested", {
+                "step_id": step_id,
+                "action_type": removed[0].action.type,
+                "removed_step_count": len(removed),
+                "next_turn": loop.turn_count + 1,
+            })
+            return loop
+
+    def _fail_loop(
+        self,
+        loop: LoopRun,
+        *,
+        reason: str,
+        error: str,
+        payload: dict[str, Any] | None = None,
+    ) -> LoopRun:
+        loop.status = "failed"
+        loop.error = reason
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.failed", {
+            "reason": reason,
+            "error": error,
+            **(payload or {}),
+        })
+        return loop
 
     def _select_next_action(self, loop: LoopRun) -> str | None:
         if bool(loop.memory_policy.get("read", True)) and not self._has_action(loop, "memory_search"):

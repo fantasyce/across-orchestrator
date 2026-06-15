@@ -24,6 +24,18 @@ def _print(payload: Any, as_json: bool) -> None:
             print(payload)
 
 
+def _json_object_arg(value: str | None, name: str) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="across-orchestrator")
     sub = parser.add_subparsers(dest="command")
@@ -72,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     loop_start.add_argument("--agent", default="owner")
     loop_start.add_argument("--max-turns", type=int, default=8)
     loop_start.add_argument("--require-approval-for", action="append", default=[])
+    loop_start.add_argument("--memory-policy-json")
+    loop_start.add_argument("--approval-policy-json")
+    loop_start.add_argument("--metadata-json")
     loop_start.add_argument("--json", action="store_true")
 
     loop_run = sub.add_parser("loop-run", help="Run or continue an agent loop")
@@ -82,6 +97,22 @@ def build_parser() -> argparse.ArgumentParser:
     loop_approve.add_argument("loop_id")
     loop_approve.add_argument("action_id")
     loop_approve.add_argument("--json", action="store_true")
+
+    loop_reject = sub.add_parser("loop-reject", help="Reject a pending agent loop action")
+    loop_reject.add_argument("loop_id")
+    loop_reject.add_argument("action_id")
+    loop_reject.add_argument("--reason", default="rejected")
+    loop_reject.add_argument("--json", action="store_true")
+
+    loop_cancel = sub.add_parser("loop-cancel", help="Cancel a pending or running agent loop")
+    loop_cancel.add_argument("loop_id")
+    loop_cancel.add_argument("--reason", default="cancelled")
+    loop_cancel.add_argument("--json", action="store_true")
+
+    loop_retry = sub.add_parser("loop-retry", help="Retry an agent loop from a selected step")
+    loop_retry.add_argument("loop_id")
+    loop_retry.add_argument("step_id")
+    loop_retry.add_argument("--json", action="store_true")
 
     loop_status = sub.add_parser("loop-status", help="Show agent loop status")
     loop_status.add_argument("loop_id")
@@ -184,12 +215,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "loop-start":
+        try:
+            memory_policy = _json_object_arg(args.memory_policy_json, "--memory-policy-json")
+            approval_policy = _json_object_arg(args.approval_policy_json, "--approval-policy-json")
+            metadata = _json_object_arg(args.metadata_json, "--metadata-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.require_approval_for:
+            approval_policy = {
+                **approval_policy,
+                "requireApprovalFor": args.require_approval_for,
+            }
         loop = loop_runtime.start_loop(
             goal=args.goal,
             project_root=args.project,
             agent=args.agent,
             max_turns=args.max_turns,
-            approval_policy={"requireApprovalFor": args.require_approval_for or []},
+            memory_policy=memory_policy or None,
+            approval_policy=approval_policy or None,
+            metadata=metadata or None,
         )
         _print(loop.to_dict(), args.json)
         return 0
@@ -200,6 +244,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "loop-approve":
         _print(loop_runtime.approve_action(args.loop_id, args.action_id).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-reject":
+        _print(loop_runtime.reject_action(args.loop_id, args.action_id, reason=args.reason).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-cancel":
+        _print(loop_runtime.cancel_loop(args.loop_id, reason=args.reason).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-retry":
+        _print(loop_runtime.retry_step(args.loop_id, args.step_id).to_dict(), args.json)
         return 0
 
     if args.command == "loop-status":

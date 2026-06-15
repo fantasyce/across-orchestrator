@@ -60,6 +60,9 @@ class McpTests(unittest.TestCase):
             self.assertIn("submit_task", tool_names)
             self.assertIn("start_agent_loop", tool_names)
             self.assertIn("approve_agent_loop_action", tool_names)
+            self.assertIn("cancel_agent_loop", tool_names)
+            self.assertIn("reject_agent_loop_action", tool_names)
+            self.assertIn("retry_agent_loop_step", tool_names)
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
@@ -111,6 +114,7 @@ class McpTests(unittest.TestCase):
                         "goal": "MCP loop scenario",
                         "projectRoot": str(project),
                         "maxTurns": 8,
+                        "metadata": {"scenario": "mcp-loop"},
                     },
                 }),
             ]
@@ -129,6 +133,7 @@ class McpTests(unittest.TestCase):
             responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
             loop = json.loads(responses[1]["result"]["content"][0]["text"])
             self.assertTrue(loop["loop_id"].startswith("loop-"))
+            self.assertEqual(loop["metadata"]["scenario"], "mcp-loop")
 
             run_messages = [
                 rpc(1, "initialize", {}),
@@ -234,6 +239,66 @@ class McpTests(unittest.TestCase):
             self.assertEqual(approved_process.returncode, 0, approved_process.stderr)
             approved = json.loads([json.loads(line) for line in approved_process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
             self.assertEqual(approved["steps"][-1]["action"]["approval_status"], "approved")
+
+    def test_mcp_agent_loop_control_tools(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            project = Path(tempdir) / "project"
+            home = Path(tempdir) / "home"
+            project.mkdir()
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "start_agent_loop",
+                    "arguments": {
+                        "goal": "MCP cancel loop",
+                        "projectRoot": str(project),
+                        "maxTurns": 8,
+                    },
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            loop = json.loads([json.loads(line) for line in process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
+
+            cancel_messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "cancel_agent_loop",
+                    "arguments": {"loopId": loop["loop_id"], "reason": "mcp user cancelled"},
+                }),
+            ]
+            cancelled_process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in cancel_messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(cancelled_process.returncode, 0, cancelled_process.stderr)
+            cancelled = json.loads([json.loads(line) for line in cancelled_process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(cancelled["error"], "mcp user cancelled")
 
     def test_mcp_submit_release_e2e_task(self):
         with tempfile.TemporaryDirectory() as tempdir:

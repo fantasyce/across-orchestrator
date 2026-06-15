@@ -13,13 +13,13 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.5` is a structural boundary split on top of the durable Agent Loop Runtime
-introduced in `v0.6.0`. The runtime keeps loop state, step checkpoints,
-approval gates, adapter-backed memory hooks, dynamic remediation dispatch, and
-final output evidence inside the plugin so hosts can stay thin. This release
-keeps explicit serial-plan repair in the planning boundary instead of the
-runtime entrypoint, while preserving missing dependency repair when
-`strict_dependency` is enabled.
+`v0.6.6` hardens the durable Agent Loop Runtime and product-mode plugin
+boundary. The runtime keeps loop state, step checkpoints, approval gates,
+adapter-backed memory hooks, dynamic remediation dispatch, host-owned loop
+controls, and final output evidence inside the plugin so hosts can stay thin.
+This release adds reject, cancel, retry, product-mode path blocking, and managed
+Across Context diagnostics on top of the serial dependency and quality-gate
+runtime introduced in the `v0.6.x` line.
 
 Validated in this repository:
 
@@ -32,6 +32,17 @@ Validated in this repository:
   ecosystem root. Old standalone `~/.across-orchestrator` task stores are not
   read or copied automatically unless a host explicitly opts into a custom
   `ACROSS_ORCHESTRATOR_HOME`.
+- Product hosts can set `ACROSS_ORCHESTRATOR_PRODUCT_MODE=1`; development
+  checkout commands and runtime/data root overrides under protected user
+  project locations are reported as `needs_repair`, blocked, or ignored instead
+  of being executed or used. A protected `across-orchestrator` found on `PATH`
+  is not reported as the available product command. Set
+  `ACROSS_ORCHESTRATOR_DEVELOPER_MODE=1` only for intentional source checkout
+  development.
+- In product mode, an explicit `serve --runtime-info` path under protected user
+  project locations is ignored and runtime metadata stays under
+  `~/.across/run/across-orchestrator`; developer mode preserves explicit
+  runtime-info paths for local debugging.
 - The plugin manifest exposes CLI, sidecar, MCP, and Python SDK entrypoints.
 - Hosts can inspect `plugin-status`, `health`, and
   `/.well-known/across-plugin.json` before routing work to the runtime.
@@ -81,7 +92,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.5/across_orchestrator-0.6.5-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.6/across_orchestrator-0.6.6-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -167,6 +178,12 @@ export ACROSS_ORCHESTRATOR_MEMORY_PROVIDER=across-context
 export ACROSS_CONTEXT_COMMAND="$HOME/.across/bin/across-context"
 ```
 
+In product mode, `ACROSS_CONTEXT_COMMAND` must point at the managed wrapper
+under `~/.across/bin`. If it points at a protected source checkout, diagnostics
+return `needs_repair` and memory calls return a blocked observation instead of
+executing that command. Use `ACROSS_ORCHESTRATOR_DEVELOPER_MODE=1` only for
+local runtime development.
+
 The runtime then searches active global/project memory before dispatch and
 writes compact post-loop summaries as pending project memory candidates. Missing
 or failing memory providers are recorded in loop observations instead of
@@ -186,6 +203,9 @@ across-orchestrator quality <task-id> --json
 across-orchestrator loop-start "Refactor checkout flow" --project . --json
 across-orchestrator loop-run <loop-id> --json
 across-orchestrator loop-approve <loop-id> <action-id> --json
+across-orchestrator loop-reject <loop-id> <action-id> --reason "Needs a safer plan" --json
+across-orchestrator loop-cancel <loop-id> --reason "User stopped the run" --json
+across-orchestrator loop-retry <loop-id> <step-id> --json
 across-orchestrator loop-status <loop-id> --json
 across-orchestrator loop-events <loop-id> --json
 across-orchestrator agent-card --json
@@ -220,8 +240,12 @@ Endpoints:
 - `POST /loops`
 - `POST /loops/{loop_id}/run`
 - `POST /loops/{loop_id}/actions/{action_id}/approve`
+- `POST /loops/{loop_id}/actions/{action_id}/reject`
+- `POST /loops/{loop_id}/cancel`
+- `POST /loops/{loop_id}/steps/{step_id}/retry`
 - `GET /loops/{loop_id}`
 - `GET /loops/{loop_id}/events`
+- `GET /loops/{loop_id}/events/stream`
 
 ## MCP Server
 
@@ -236,6 +260,9 @@ The MCP server exposes:
 - `start_agent_loop`
 - `run_agent_loop`
 - `approve_agent_loop_action`
+- `reject_agent_loop_action`
+- `cancel_agent_loop`
+- `retry_agent_loop_step`
 - `get_agent_loop`
 - `get_agent_loop_events`
 
