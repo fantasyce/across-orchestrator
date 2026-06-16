@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--task-type", action="append", default=[])
     submit.add_argument("--strict-dependency", action="store_true")
     submit.add_argument("--subtasks-json")
+    submit.add_argument("--agent-adapters-json")
     submit.add_argument("--json", action="store_true")
 
     release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade host conformance scenario")
@@ -171,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(f"--subtasks-json must be valid JSON: {exc}")
             if not isinstance(subtasks, list):
                 parser.error("--subtasks-json must be a JSON array")
+        try:
+            agent_adapters = _json_object_arg(args.agent_adapters_json, "--agent-adapters-json")
+        except ValueError as exc:
+            parser.error(str(exc))
         task = runtime.submit_task(
             goal=args.goal,
             project_root=args.project,
@@ -179,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             subtasks=subtasks,
             strict_dependency=bool(args.strict_dependency),
             task_types=args.task_type or None,
+            agent_adapters=agent_adapters or None,
         )
         _print(task.to_dict(), args.json)
         return 0

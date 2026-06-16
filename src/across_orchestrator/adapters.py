@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import subprocess
+from typing import Any
 
 from .models import SubTask, Task
 
@@ -440,7 +441,50 @@ if __name__ == "__main__":
         )
 
 
-def adapter_for(agent: str, command: list[str] | None = None) -> AgentAdapter:
+def normalize_agent_adapter_specs(specs: Any) -> dict[str, dict[str, Any]]:
+    if specs is None:
+        return {}
+    if not isinstance(specs, dict):
+        raise ValueError("agent_adapters must be an object keyed by agent id")
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_agent, raw_spec in specs.items():
+        agent_id = str(raw_agent or "").strip()
+        if not agent_id:
+            raise ValueError("agent adapter id cannot be empty")
+        if not isinstance(raw_spec, dict):
+            raise ValueError(f"agent adapter spec for {agent_id} must be an object")
+        kind = str(raw_spec.get("type") or raw_spec.get("kind") or "").strip().lower()
+        if not kind:
+            raise ValueError(f"agent adapter spec for {agent_id} requires type")
+        spec = dict(raw_spec)
+        spec["type"] = kind
+        if kind == "command":
+            command = spec.get("command")
+            if not isinstance(command, list) or not command:
+                raise ValueError(f"command adapter for {agent_id} requires a non-empty command array")
+            spec["command"] = [str(item) for item in command]
+        elif kind in {"demo", "reference", "reference_delivery"}:
+            pass
+        else:
+            raise ValueError(f"unsupported agent adapter type for {agent_id}: {kind}")
+        normalized[agent_id] = spec
+    return normalized
+
+
+def adapter_for(
+    agent: str,
+    command: list[str] | None = None,
+    spec: dict[str, Any] | None = None,
+) -> AgentAdapter:
+    if spec:
+        kind = str(spec.get("type") or spec.get("kind") or "").strip().lower()
+        if kind == "command":
+            return CommandAgentAdapter([str(item) for item in spec.get("command") or []])
+        if kind == "demo":
+            return DemoAgentAdapter()
+        if kind in {"reference", "reference_delivery"}:
+            return ReferenceDeliveryAdapter(agent)
+        raise ValueError(f"unsupported agent adapter type for {agent}: {kind}")
     if agent == "demo":
         return DemoAgentAdapter()
     if agent == "command":

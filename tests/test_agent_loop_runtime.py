@@ -95,12 +95,42 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(completed.steps[0].observation.payload["provider"], "across-context")
         self.assertEqual(completed.steps[2].observation.payload["quality"], "passed")
+        self.assertEqual(completed.steps[2].checkpoint["observation_status"], "passed")
         self.assertEqual(completed.checkpoint_count, 5)
 
         events = runtime.list_loop_events(loop.loop_id)
         event_types = [event["type"] for event in events]
         self.assertIn("loop.step.completed", event_types)
         self.assertIn("loop.completed", event_types)
+
+    def test_loop_honors_host_supplied_action_plan(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Run a host supplied multi-dispatch plan",
+            project_root=str(self.project),
+            memory_policy={"read": False, "writeCandidates": False},
+            max_turns=8,
+            metadata={
+                "actionPlan": [
+                    "task_dispatch",
+                    "quality_gate",
+                    "task_dispatch",
+                    "quality_gate",
+                    "final_output",
+                ]
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            ["task_dispatch", "quality_gate", "task_dispatch", "quality_gate", "final_output"],
+        )
+        self.assertEqual(completed.checkpoint_count, 5)
 
     def test_loop_turn_budget_stops_before_unbounded_execution(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime

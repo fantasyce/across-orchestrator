@@ -11,6 +11,14 @@ from .store import LocalStore
 
 
 TERMINAL_LOOP_STATUSES = {"completed", "failed", "stopped", "cancelled"}
+SUPPORTED_LOOP_ACTION_TYPES = {
+    "memory_search",
+    "task_dispatch",
+    "remediation_dispatch",
+    "quality_gate",
+    "memory_write_candidate",
+    "final_output",
+}
 
 
 class MemoryProvider(Protocol):
@@ -447,7 +455,7 @@ class AgentLoopRuntime:
                 **observation_payload,
                 "approval": "approved",
             })
-            step.checkpoint = self._checkpoint(loop, step.action.type, step.turn)
+            step.checkpoint = self._checkpoint(loop, step.action.type, step.turn, step.observation.payload)
             step.updated_at = time.time()
             loop.status = "running"
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
@@ -533,10 +541,6 @@ class AgentLoopRuntime:
         return loop
 
     def _select_next_action(self, loop: LoopRun) -> str | None:
-        if bool(loop.memory_policy.get("read", True)) and not self._has_action(loop, "memory_search"):
-            return "memory_search"
-        if not self._has_action(loop, "task_dispatch"):
-            return "task_dispatch"
         latest_quality = self._latest_step(loop, "quality_gate")
         latest_dispatch_index = self._latest_action_index(loop, {"task_dispatch", "remediation_dispatch"})
         latest_quality_index = self._latest_action_index(loop, {"quality_gate"})
@@ -553,6 +557,19 @@ class AgentLoopRuntime:
                 "failed_quality": latest_quality.observation.payload,
             })
             return None
+
+        action_plan = self._host_action_plan(loop)
+        if action_plan:
+            if len(loop.steps) < len(action_plan):
+                return action_plan[len(loop.steps)]
+            return None
+
+        if bool(loop.memory_policy.get("read", True)) and not self._has_action(loop, "memory_search"):
+            return "memory_search"
+        if not self._has_action(loop, "task_dispatch"):
+            return "task_dispatch"
+        if latest_quality_index < latest_dispatch_index:
+            return "quality_gate"
         if bool(loop.memory_policy.get("writeCandidates", True)) and not self._has_action_after(loop, "memory_write_candidate", latest_quality_index):
             return "memory_write_candidate"
         if not self._has_action(loop, "final_output"):
@@ -567,7 +584,7 @@ class AgentLoopRuntime:
             "remediation_dispatch": "latest quality gate failed and remediation budget remains",
             "memory_write_candidate": "quality passed and memory policy allows pending summaries",
             "final_output": "loop has enough evidence to produce final output",
-        }.get(action_type, "selected by loop policy")
+        }.get(action_type, "selected by host action plan" if self._host_action_plan(loop) else "selected by loop policy")
 
     def _planned_action_types(self, loop: LoopRun) -> list[str]:
         actions: list[str] = []
@@ -608,7 +625,7 @@ class AgentLoopRuntime:
             status="completed",
             action=action,
             observation=LoopObservation.new("completed", observation_payload),
-            checkpoint=self._checkpoint(loop, action_type, turn),
+            checkpoint=self._checkpoint(loop, action_type, turn, observation_payload),
         )
 
     def _action_title(self, action_type: str) -> str:
@@ -669,8 +686,14 @@ class AgentLoopRuntime:
             return self.adapters.finalizer.finalize(loop=loop, context=context)
         return {}
 
-    def _checkpoint(self, loop: LoopRun, action_type: str, turn: int) -> dict[str, Any]:
-        latest = loop.steps[-1].observation.payload if loop.steps else {}
+    def _checkpoint(
+        self,
+        loop: LoopRun,
+        action_type: str,
+        turn: int,
+        observation_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        latest = observation_payload or (loop.steps[-1].observation.payload if loop.steps else {})
         return {
             "loop_id": loop.loop_id,
             "turn": turn,
@@ -679,6 +702,19 @@ class AgentLoopRuntime:
             "adapter": self._adapter_name(action_type),
             "observation_status": latest.get("quality") or latest.get("dispatch") or latest.get("status") or "completed",
         }
+
+    def _host_action_plan(self, loop: LoopRun) -> list[str]:
+        raw_plan = loop.metadata.get("actionPlan")
+        if raw_plan is None:
+            raw_plan = loop.metadata.get("action_plan")
+        if not isinstance(raw_plan, list):
+            return []
+        plan: list[str] = []
+        for item in raw_plan:
+            action_type = str(item or "").strip()
+            if action_type in SUPPORTED_LOOP_ACTION_TYPES:
+                plan.append(action_type)
+        return plan
 
     def _context(self, loop: LoopRun) -> dict[str, Any]:
         return {
