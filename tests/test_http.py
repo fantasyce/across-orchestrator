@@ -132,6 +132,45 @@ class HttpTests(unittest.TestCase):
         body = stream.read().decode("utf-8")
         self.assertIn("event: task.completed", body)
 
+    def test_http_declared_agent_adapter_executes_arbitrary_agent(self):
+        agent_script = self.project / "http_agent_adapter.py"
+        agent_script.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "subtask = json.loads(os.environ['ACROSS_SUBTASK_JSON'])",
+                    "target = Path(subtask['path'])",
+                    "target.parent.mkdir(parents=True, exist_ok=True)",
+                    "target.write_text(f\"http-adapter={subtask['agent']}\\n\", encoding='utf-8')",
+                    "print(json.dumps({'agent': subtask['agent'], 'path': subtask['path']}))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        task = self.post(
+            "/tasks",
+            {
+                "goal": "Run a generic HTTP-provided agent adapter",
+                "projectRoot": str(self.project),
+                "deliverables": ["out/http.txt"],
+                "agent": "http-custom-agent",
+                "agentAdapters": {
+                    "http-custom-agent": {
+                        "type": "command",
+                        "command": [sys.executable, str(agent_script)],
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(task["metadata"]["agent_adapters"]["http-custom-agent"]["type"], "command")
+        completed = self.post(f"/tasks/{task['task_id']}/run", {})
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual((self.project / "out/http.txt").read_text(encoding="utf-8"), "http-adapter=http-custom-agent\n")
+
     def test_http_agent_loop_lifecycle(self):
         loop = self.post(
             "/loops",

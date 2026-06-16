@@ -119,6 +119,55 @@ class CliTests(unittest.TestCase):
         self.assertEqual([item["wave"] for item in task["subtasks"]], [1, 2])
         self.assertEqual(task["subtasks"][1]["dependencies"], [task["subtasks"][0]["subtask_id"]])
 
+    def test_cli_declared_agent_adapter_executes_arbitrary_agent(self):
+        agent_script = self.project / "cli_agent_adapter.py"
+        agent_script.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "subtask = json.loads(os.environ['ACROSS_SUBTASK_JSON'])",
+                    "target = Path(subtask['path'])",
+                    "target.parent.mkdir(parents=True, exist_ok=True)",
+                    "target.write_text(f\"cli-adapter={subtask['agent']}\\n\", encoding='utf-8')",
+                    "print(json.dumps({'agent': subtask['agent'], 'path': subtask['path']}))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        submit = self.run_cli(
+            "submit",
+            "Run a CLI-declared custom agent",
+            "--project",
+            str(self.project),
+            "--deliverable",
+            "cli/out.txt",
+            "--agent",
+            "cli-custom-agent",
+            "--agent-adapters-json",
+            json.dumps(
+                {
+                    "cli-custom-agent": {
+                        "type": "command",
+                        "command": [sys.executable, str(agent_script)],
+                    }
+                }
+            ),
+            "--json",
+        )
+
+        self.assertEqual(submit.returncode, 0, submit.stderr)
+        task = json.loads(submit.stdout)
+        self.assertEqual(task["metadata"]["agent_adapters"]["cli-custom-agent"]["type"], "command")
+
+        run = self.run_cli("run", task["task_id"], "--json")
+
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["status"], "completed")
+        self.assertEqual((self.project / "cli/out.txt").read_text(encoding="utf-8"), "cli-adapter=cli-custom-agent\n")
+
     def test_cli_agent_card_is_json(self):
         result = self.run_cli("agent-card", "--json")
         self.assertEqual(result.returncode, 0, result.stderr)

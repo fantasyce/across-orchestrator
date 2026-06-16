@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -198,6 +199,50 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(quality["gates"]["serial_wave_dependencies"])
         self.assertTrue(quality["gates"]["cli_generic"])
         self.assertTrue(quality["gates"]["api_service"])
+
+    def test_declared_command_agent_adapter_executes_arbitrary_agent(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "agent_adapter.py"
+        agent_script.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "subtask = json.loads(os.environ['ACROSS_SUBTASK_JSON'])",
+                    "target = Path(subtask['path'])",
+                    "target.parent.mkdir(parents=True, exist_ok=True)",
+                    "target.write_text(f\"adapter={subtask['agent']} path={subtask['path']}\\n\", encoding='utf-8')",
+                    "print(json.dumps({'agent': subtask['agent'], 'path': subtask['path']}))",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Run a host-neutral custom agent",
+            project_root=str(self.project),
+            deliverables=["artifacts/result.txt"],
+            agent="custom-agent",
+            agent_adapters={
+                "custom-agent": {
+                    "type": "command",
+                    "command": [sys.executable, str(agent_script)],
+                    "description": "Unit-test command adapter for any host agent id.",
+                }
+            },
+        )
+
+        self.assertEqual(task.metadata["agent_adapters"]["custom-agent"]["type"], "command")
+        completed = runtime.run_task(task.task_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual((self.project / "artifacts/result.txt").read_text(encoding="utf-8"), "adapter=custom-agent path=artifacts/result.txt\n")
+        completed_events = [event for event in runtime.list_events(task.task_id) if event["type"] == "subtask.completed"]
+        self.assertEqual(len(completed_events), 1)
+        self.assertIn('"agent": "custom-agent"', completed_events[0]["payload"]["result"]["message"])
 
     def test_run_task_writes_artifacts_and_builds_evidence(self):
         from across_orchestrator.runtime import OrchestratorRuntime

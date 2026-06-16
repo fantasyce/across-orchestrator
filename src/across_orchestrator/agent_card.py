@@ -28,6 +28,8 @@ def render_agent_card() -> dict:
             "evidenceBundles": True,
             "qualityBenchmarks": True,
             "eventStreaming": True,
+            "hostNeutralAgentAdapters": True,
+            "declarativeAgentAdapters": True,
             "localFirst": True,
         },
         "protocols": {
@@ -68,6 +70,11 @@ def render_agent_card() -> dict:
                 "id": "task-orchestration",
                 "name": "Task Orchestration",
                 "description": "Submit, run, pause, inspect, and verify multi-artifact delivery tasks.",
+            },
+            {
+                "id": "agent-adapter-specs",
+                "name": "Declarative Agent Adapters",
+                "description": "Bind arbitrary host agent ids to command, demo, or reference execution adapters.",
             },
             {
                 "id": "delivery-contracts",

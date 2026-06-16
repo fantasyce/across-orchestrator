@@ -48,6 +48,8 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "dynamicLoopPlanning": True,
             "remediationDispatch": True,
             "hostingPlatformAdapters": True,
+            "hostNeutralAgentAdapters": True,
+            "declarativeAgentAdapters": True,
             "localFirst": True,
         },
         "compatibility": {
@@ -187,6 +189,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "task_contracts",
                 "wave_orchestration",
                 "execution_state",
+                "agent_adapter_specs",
                 "agent_loop_runtime",
                 "checkpoints",
                 "human_approval_gates",

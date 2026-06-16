@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_grade import APP_GRADE_RELEASE_E2E_ENGINE, build_release_e2e_payload, run_release_e2e_payload
-from .adapters import adapter_for
+from .adapters import adapter_for, normalize_agent_adapter_specs
 from .agent_loop import AgentLoopRuntime
 from .evidence import build_evidence_bundle, build_quality
 from .models import SubTask, Task
@@ -26,6 +26,7 @@ class OrchestratorRuntime:
         subtasks: list[dict[str, Any]] | None = None,
         strict_dependency: bool = False,
         task_types: list[str] | None = None,
+        agent_adapters: dict[str, Any] | None = None,
     ) -> Task:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
@@ -48,6 +49,9 @@ class OrchestratorRuntime:
         if clean_task_types:
             task.metadata["task_types"] = clean_task_types
             task.metadata["delivery_mode"] = _delivery_mode_for_task_types(clean_task_types)
+        clean_agent_adapters = normalize_agent_adapter_specs(agent_adapters)
+        if clean_agent_adapters:
+            task.metadata["agent_adapters"] = clean_agent_adapters
         loop = self.loop_runtime.start_loop(
             goal=task.goal,
             project_root=str(root),
@@ -153,7 +157,11 @@ class OrchestratorRuntime:
         for subtask in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id)):
             if subtask.status == "completed":
                 continue
-            adapter = adapter_for(subtask.agent, command=command)
+            adapter = adapter_for(
+                subtask.agent,
+                command=command,
+                spec=_agent_adapter_spec_for(task, subtask.agent),
+            )
             subtask.status = "running"
             subtask.attempts += 1
             self.store.append_event(task.task_id, "subtask.started", subtask.__dict__)
@@ -291,6 +299,17 @@ def _clean_task_types(task_types: list[str] | None) -> list[str]:
         clean.append(value)
         seen.add(value)
     return clean
+
+
+def _agent_adapter_spec_for(task: Task, agent: str) -> dict[str, Any] | None:
+    specs = task.metadata.get("agent_adapters") or {}
+    if not isinstance(specs, dict):
+        return None
+    for key in (agent, "default", "*"):
+        spec = specs.get(key)
+        if isinstance(spec, dict):
+            return spec
+    return None
 
 
 def _clean_release_e2e_agents(allowed_agents: list[str] | None) -> list[str]:

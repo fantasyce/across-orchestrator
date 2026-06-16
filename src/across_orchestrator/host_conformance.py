@@ -20,6 +20,7 @@ PLUGIN_PROVIDE_CAPABILITIES = {
     "task_contracts": "contracts",
     "wave_orchestration": "taskOrchestration",
     "execution_state": "eventStreaming",
+    "agent_adapter_specs": "declarativeAgentAdapters",
     "agent_loop_runtime": "agentLoopRuntime",
     "checkpoints": "checkpoints",
     "human_approval_gates": "humanApproval",

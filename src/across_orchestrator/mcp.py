@@ -28,6 +28,16 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "strict_dependency": {"type": "boolean", "default": False},
                     "taskTypes": {"type": "array", "items": {"type": "string"}},
                     "task_types": {"type": "array", "items": {"type": "string"}},
+                    "agentAdapters": {
+                        "type": "object",
+                        "additionalProperties": {"type": "object"},
+                        "description": "Map agent ids to adapter specs. Supported types: command, demo, reference.",
+                    },
+                    "agent_adapters": {
+                        "type": "object",
+                        "additionalProperties": {"type": "object"},
+                        "description": "Snake-case alias for agentAdapters.",
+                    },
                 },
                 "required": ["goal", "projectRoot"],
             },
@@ -229,6 +239,10 @@ def agent_loop_schema() -> dict[str, Any]:
         "approvalPolicy": {
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
         },
+        "metadata": {
+            "actionPlan": "optional ordered list of supported action types; duplicates are allowed",
+            "action_plan": "snake-case alias for actionPlan",
+        },
     }
 
 
@@ -243,6 +257,7 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
             subtasks=arguments.get("subtasks") or None,
             strict_dependency=bool(arguments.get("strictDependency") or arguments.get("strict_dependency")),
             task_types=arguments.get("taskTypes") or arguments.get("task_types") or None,
+            agent_adapters=arguments.get("agentAdapters") or arguments.get("agent_adapters") or None,
         ).to_dict()
     if name == "run_task":
         return runtime.run_task(arguments["taskId"]).to_dict()

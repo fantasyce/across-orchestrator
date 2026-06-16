@@ -22,6 +22,22 @@ class McpTests(unittest.TestCase):
             home = Path(tempdir) / "home"
             project.mkdir()
             home.mkdir()
+            agent_script = project / "mcp_agent_adapter.py"
+            agent_script.write_text(
+                "\n".join(
+                    [
+                        "import json",
+                        "import os",
+                        "from pathlib import Path",
+                        "subtask = json.loads(os.environ['ACROSS_SUBTASK_JSON'])",
+                        "target = Path(subtask['path'])",
+                        "target.parent.mkdir(parents=True, exist_ok=True)",
+                        "target.write_text(f\"mcp-adapter={subtask['agent']}\\n\", encoding='utf-8')",
+                        "print(json.dumps({'agent': subtask['agent'], 'path': subtask['path']}))",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             env = os.environ.copy()
             env["PYTHONPATH"] = str(root / "src")
             env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
@@ -34,10 +50,16 @@ class McpTests(unittest.TestCase):
                 rpc(5, "tools/call", {
                     "name": "submit_task",
                     "arguments": {
-                        "goal": "Build MCP demo",
+                        "goal": "Build MCP demo with declared custom agent adapter",
                         "projectRoot": str(project),
-                        "deliverables": ["README.md", "web/index.html"],
-                        "agent": "demo",
+                        "deliverables": ["mcp/custom.txt"],
+                        "agent": "mcp-custom-agent",
+                        "agentAdapters": {
+                            "mcp-custom-agent": {
+                                "type": "command",
+                                "command": [sys.executable, str(agent_script)],
+                            }
+                        },
                     },
                 }),
             ]
@@ -63,6 +85,10 @@ class McpTests(unittest.TestCase):
             self.assertIn("cancel_agent_loop", tool_names)
             self.assertIn("reject_agent_loop_action", tool_names)
             self.assertIn("retry_agent_loop_step", tool_names)
+            submit_tool = next(tool for tool in responses[1]["result"]["tools"] if tool["name"] == "submit_task")
+            submit_properties = submit_tool["inputSchema"]["properties"]
+            self.assertIn("agentAdapters", submit_properties)
+            self.assertIn("agent_adapters", submit_properties)
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
@@ -94,6 +120,7 @@ class McpTests(unittest.TestCase):
             self.assertEqual(json.loads(second[1]["result"]["content"][0]["text"])["status"], "completed")
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
+            self.assertEqual((project / "mcp/custom.txt").read_text(encoding="utf-8"), "mcp-adapter=mcp-custom-agent\n")
 
     def test_mcp_agent_loop_tools(self):
         with tempfile.TemporaryDirectory() as tempdir:

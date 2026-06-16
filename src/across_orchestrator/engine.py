@@ -89,6 +89,7 @@ class MatureOrchestrationEngine:
             subtasks=planned_subtasks,
             strict_dependency=bool(context.get("strict_dependency", True)),
             task_types=context.get("task_types") or None,
+            agent_adapters=context.get("agent_adapters") or context.get("agentAdapters") or None,
         )
         return task.task_id
 

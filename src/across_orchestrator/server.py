@@ -88,6 +88,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     subtasks=payload.get("subtasks") or None,
                     strict_dependency=bool(payload.get("strictDependency") or payload.get("strict_dependency")),
                     task_types=payload.get("taskTypes") or payload.get("task_types") or None,
+                    agent_adapters=payload.get("agentAdapters") or payload.get("agent_adapters") or None,
                 )
                 self.respond(task.to_dict(), status=201)
                 return
