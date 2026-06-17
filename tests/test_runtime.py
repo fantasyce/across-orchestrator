@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -321,12 +323,68 @@ class RuntimeTests(unittest.TestCase):
         failed = [event for event in events if event["type"] == "task.failed"]
         self.assertTrue(failed)
         self.assertIn("No adapter configured for agent claude", failed[-1]["payload"]["error"])
+        self.assertEqual(failed[-1]["payload"]["failure_type"], "adapter_error")
         loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
         self.assertEqual(loop.status, "failed")
         self.assertEqual(loop.error, "task_dispatch_failed")
         event_types = [event["type"] for event in events]
         self.assertIn("agent_loop.failed", event_types)
         self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_preserves_root_loop_failure_type_when_syncing_task_status(self):
+        from across_orchestrator.agent_loop import LoopAction, LoopObservation, LoopStep
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Preserve terminal failure classification",
+            project_root=str(self.project),
+            deliverables=["blocked.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        failure_type = "environment_blocked"
+        observation_payload = {
+            "action_type": "task_dispatch",
+            "error": "task_dispatch missing required toolchain",
+            "failure_type": failure_type,
+        }
+        loop.status = "failed"
+        loop.error = "task_dispatch_failed"
+        loop.turn_count = 1
+        loop.steps.append(
+            LoopStep.new(
+                loop_id=loop.loop_id,
+                turn=1,
+                phase="act",
+                status="failed",
+                action=LoopAction.new("task_dispatch", "Dispatch work through host adapter"),
+                observation=LoopObservation.new("failed", observation_payload),
+                checkpoint={
+                    "loop_id": loop.loop_id,
+                    "turn": 1,
+                    "action_type": "task_dispatch",
+                    "status": "failed",
+                    "adapter": "RuntimeLoopDispatcher",
+                    "observation_status": "failed",
+                    "failure_type": failure_type,
+                },
+            )
+        )
+        loop.checkpoint_count = 1
+        runtime.store.save_loop(loop)
+
+        failed = runtime.run_task(task.task_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.metadata["agent_loop"]["status"], "failed")
+        self.assertEqual(failed.metadata["agent_loop"]["error"], "task_dispatch_failed")
+        self.assertEqual(failed.metadata["agent_loop"]["failure_type"], failure_type)
+        events = runtime.list_events(task.task_id)
+        agent_loop_failed = [event for event in events if event["type"] == "agent_loop.failed"]
+        task_failed = [event for event in events if event["type"] == "task.failed"]
+        self.assertEqual(agent_loop_failed[-1]["payload"]["failure_type"], failure_type)
+        self.assertEqual(task_failed[-1]["payload"]["failure_type"], failure_type)
 
     def test_run_task_event_stream_marks_agent_loop_awaiting_approval(self):
         from across_orchestrator.runtime import OrchestratorRuntime
@@ -371,10 +429,74 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(cancelled.status, "cancelled")
         self.assertEqual(cancelled.metadata["agent_loop"]["status"], "cancelled")
-        event_types = [event["type"] for event in runtime.list_events(task.task_id)]
+        events = runtime.list_events(task.task_id)
+        cancelled_events = [event for event in events if event["type"] == "task.cancelled"]
+        self.assertNotIn("failure_type", cancelled_events[-1]["payload"])
+        event_types = [event["type"] for event in events]
         self.assertIn("agent_loop.cancelled", event_types)
         self.assertIn("task.cancelled", event_types)
         self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_cancel_running_command_adapter_terminates_subprocess(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        adapter_script = Path(self.tempdir.name) / "sleeping_adapter.py"
+        adapter_script.write_text(
+            "\n".join([
+                "from pathlib import Path",
+                "import signal",
+                "import sys",
+                "import time",
+                "",
+                "def stop(signum, frame):",
+                "    Path('terminated.flag').write_text('terminated', encoding='utf-8')",
+                "    sys.exit(42)",
+                "",
+                "signal.signal(signal.SIGTERM, stop)",
+                "Path('started.flag').write_text('started', encoding='utf-8')",
+                "for _ in range(200):",
+                "    time.sleep(0.05)",
+                "Path('cancelled.md').write_text('should not be written', encoding='utf-8')",
+                "print('completed')",
+            ]),
+            encoding="utf-8",
+        )
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Cancel a running command adapter",
+            project_root=str(self.project),
+            deliverables=["cancelled.md"],
+            agent="worker",
+            agent_adapters={"worker": {"type": "command", "command": [sys.executable, str(adapter_script)]}},
+        )
+        loop_id = task.metadata["agent_loop"]["loop_id"]
+        results = []
+
+        def run_task():
+            results.append(runtime.run_task(task.task_id))
+
+        thread = threading.Thread(target=run_task)
+        thread.start()
+        deadline = time.time() + 3
+        while time.time() < deadline and not (self.project / "started.flag").exists():
+            time.sleep(0.01)
+        self.assertTrue((self.project / "started.flag").exists())
+
+        requested = runtime.loop_runtime.cancel_loop(loop_id, reason="user stopped subprocess")
+
+        thread.join(timeout=4)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(requested.status, "cancelled")
+        self.assertTrue(results)
+        self.assertEqual(results[0].status, "cancelled")
+        self.assertTrue((self.project / "terminated.flag").exists())
+        self.assertFalse((self.project / "cancelled.md").exists())
+        loop = runtime.loop_runtime.get_loop(loop_id)
+        self.assertEqual(loop.status, "cancelled")
+        task_events = [event["type"] for event in runtime.list_events(task.task_id)]
+        self.assertIn("subtask.cancelled", task_events)
+        self.assertIn("task.cancelled", task_events)
+        self.assertIn("agent_loop.cancelled", task_events)
 
     def test_run_task_syncs_rejected_agent_loop_to_failed_task_status(self):
         from across_orchestrator.runtime import OrchestratorRuntime
@@ -398,6 +520,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.metadata["agent_loop"]["status"], "stopped")
         self.assertEqual(failed.metadata["agent_loop"]["error"], "approval_rejected")
+        failed_events = [event for event in runtime.list_events(task.task_id) if event["type"] == "task.failed"]
+        self.assertEqual(failed_events[-1]["payload"]["failure_type"], "approval_rejected")
         event_types = [event["type"] for event in runtime.list_events(task.task_id)]
         self.assertIn("agent_loop.stopped", event_types)
         self.assertIn("task.failed", event_types)
@@ -422,6 +546,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.metadata["agent_loop"]["status"], "stopped")
         self.assertEqual(failed.metadata["agent_loop"]["error"], "max_turns_exceeded")
+        failed_events = [event for event in runtime.list_events(task.task_id) if event["type"] == "task.failed"]
+        self.assertEqual(failed_events[-1]["payload"]["failure_type"], "max_turns_exceeded")
         event_types = [event["type"] for event in runtime.list_events(task.task_id)]
         self.assertIn("agent_loop.stopped", event_types)
         self.assertIn("task.failed", event_types)

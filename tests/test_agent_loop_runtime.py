@@ -240,7 +240,9 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(rejected.steps[-1].status, "rejected")
         self.assertEqual(rejected.steps[-1].action.approval_status, "rejected")
         self.assertEqual(rejected.steps[-1].observation.payload["reason"], "needs a safer plan")
-        self.assertIn("loop.action.rejected", [event["type"] for event in runtime.list_loop_events(loop.loop_id)])
+        events = runtime.list_loop_events(loop.loop_id)
+        self.assertIn("loop.action.rejected", [event["type"] for event in events])
+        self.assertEqual(events[-1]["payload"]["failure_type"], "approval_rejected")
         self.assertEqual(runtime.run_loop(loop.loop_id).status, "stopped")
 
     def test_retry_step_rewinds_from_selected_step_and_reruns(self):

@@ -63,6 +63,24 @@ class RemediationDispatcher:
         }
 
 
+class AgentRoutingDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.calls.append({
+            "action_type": action_type,
+            "agent": loop.agent,
+            "routing": context.get("routing"),
+        })
+        return {
+            "dispatch": "completed",
+            "adapter": "agent-routing-dispatcher",
+            "agent": loop.agent,
+            "message": f"{action_type} routed to {loop.agent}.",
+        }
+
+
 class FailingThenPassingQualityGate:
     def __init__(self):
         self.calls = 0
@@ -99,6 +117,20 @@ class ExplodingDispatcher:
         raise RuntimeError(f"{action_type} adapter unavailable")
 
 
+class EnvironmentBlockedError(RuntimeError):
+    blocked_by_environment = True
+
+
+class TimeoutDispatcher:
+    def dispatch(self, *, loop, action_type, context):
+        raise TimeoutError(f"{action_type} timed out")
+
+
+class EnvironmentBlockedDispatcher:
+    def dispatch(self, *, loop, action_type, context):
+        raise EnvironmentBlockedError(f"{action_type} missing required toolchain")
+
+
 class SlowDispatcher:
     def __init__(self):
         self.actions = []
@@ -112,6 +144,106 @@ class SlowDispatcher:
             "dispatch": "completed",
             "adapter": "slow-dispatcher",
             "message": "Slow dispatch completed.",
+        }
+
+
+class InspectingDispatcher:
+    def __init__(self):
+        self.runtime = None
+        self.persisted_during_dispatch = None
+
+    def dispatch(self, *, loop, action_type, context):
+        if self.persisted_during_dispatch is None:
+            self.persisted_during_dispatch = self.runtime.get_loop(loop.loop_id).to_dict()
+        return {
+            "dispatch": "completed",
+            "adapter": "inspecting-dispatcher",
+            "message": "Inspected persisted loop state during dispatch.",
+        }
+
+
+class HeartbeatRenewingDispatcher:
+    def __init__(self):
+        self.runtime = None
+        self.before = None
+        self.after = None
+        self.renewal = None
+
+    def dispatch(self, *, loop, action_type, context):
+        self.before = self.runtime.get_loop(loop.loop_id).steps[-1].checkpoint["execution"]
+        time.sleep(0.01)
+        self.renewal = context["heartbeat"]()
+        self.after = self.runtime.get_loop(loop.loop_id).steps[-1].checkpoint["execution"]
+        return {
+            "dispatch": "completed",
+            "adapter": "heartbeat-renewing-dispatcher",
+            "message": "Renewed dispatch heartbeat.",
+        }
+
+
+class CancellableDispatcher:
+    def __init__(self):
+        self.started = threading.Event()
+        self.cancel_seen = threading.Event()
+        self.actions = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.actions.append(action_type)
+        self.started.set()
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if context["cancellation"].is_cancelled():
+                self.cancel_seen.set()
+                context["cancellation"].raise_if_cancelled()
+            context["heartbeat"]()
+            time.sleep(0.01)
+        return {
+            "dispatch": "completed",
+            "adapter": "cancellable-dispatcher",
+            "message": "Cancellation was not observed.",
+        }
+
+
+class NonCooperativeHangingDispatcher:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.actions = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.actions.append(action_type)
+        self.started.set()
+        self.release.wait(timeout=5)
+        return {
+            "dispatch": "completed",
+            "adapter": "non-cooperative-hanging-dispatcher",
+            "message": "Returned after test cleanup.",
+        }
+
+
+class LateCheckingDetachedDispatcher:
+    def __init__(self):
+        self.started = threading.Event()
+        self.allow_late_check = threading.Event()
+        self.finished = threading.Event()
+        self.worker_saw_cancel = False
+        self.actions = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.actions.append(action_type)
+        self.started.set()
+        self.allow_late_check.wait(timeout=2)
+        self.worker_saw_cancel = context["cancellation"].is_cancelled()
+        if self.worker_saw_cancel:
+            self.finished.set()
+            context["cancellation"].raise_if_cancelled()
+        late_write = Path(loop.project_root) / "late-write.txt"
+        late_write.write_text("dispatch continued after cancellation", encoding="utf-8")
+        self.finished.set()
+        return {
+            "dispatch": "completed",
+            "adapter": "late-checking-detached-dispatcher",
+            "message": "Late cancellation was not observed.",
         }
 
 
@@ -208,6 +340,85 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertIn("approval", completed.steps[1].observation.payload)
 
+    def test_approved_action_persists_running_step_lease_before_adapter_returns(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = InspectingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        dispatcher.runtime = runtime
+        loop = runtime.start_loop(
+            goal="Persist approved action leases",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+        )
+        waiting = runtime.run_loop(loop.loop_id)
+
+        approved = runtime.approve_action(waiting.loop_id, waiting.steps[-1].action.action_id)
+
+        persisted = dispatcher.persisted_during_dispatch
+        self.assertEqual(persisted["status"], "running")
+        self.assertEqual(len(persisted["steps"]), 1)
+        running_step = persisted["steps"][0]
+        self.assertEqual(running_step["action"]["approval_status"], "approved")
+        self.assertEqual(running_step["status"], "running")
+        self.assertEqual(running_step["observation"]["status"], "running")
+        execution = running_step["checkpoint"]["execution"]
+        self.assertTrue(execution["lease_id"].startswith("lease-"))
+        self.assertGreater(execution["lease_expires_at"], execution["heartbeat_at"])
+
+        self.assertEqual(approved.steps[0].status, "completed")
+        self.assertEqual(approved.steps[0].observation.payload["approval"], "approved")
+        self.assertEqual(approved.steps[0].checkpoint["execution"]["lease_id"], execution["lease_id"])
+        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        self.assertIn("loop.step.started", event_types)
+        self.assertIn("loop.step.heartbeat", event_types)
+
+    def test_approved_action_exception_records_failed_execution_lease(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=ExplodingDispatcher(),
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Fail an approved action with lease evidence",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+        )
+        waiting = runtime.run_loop(loop.loop_id)
+
+        failed = runtime.approve_action(waiting.loop_id, waiting.steps[-1].action.action_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "task_dispatch_failed")
+        self.assertEqual(failed.steps[0].status, "failed")
+        self.assertEqual(failed.steps[0].action.approval_status, "approved")
+        self.assertEqual(failed.steps[0].observation.payload["approval"], "approved")
+        self.assertEqual(failed.steps[0].observation.payload["error"], "task_dispatch adapter unavailable")
+        self.assertEqual(failed.steps[0].observation.payload["failure_type"], "adapter_error")
+        self.assertEqual(failed.steps[0].checkpoint["failure_type"], "adapter_error")
+        execution = failed.steps[0].checkpoint["execution"]
+        self.assertTrue(execution["lease_id"].startswith("lease-"))
+        self.assertGreaterEqual(execution["duration_ms"], 0)
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertIn("loop.step.heartbeat", event_types)
+        self.assertIn("loop.action.failed", event_types)
+        self.assertEqual(events[-1]["payload"]["failure_type"], "adapter_error")
+
     def test_run_loop_does_not_advance_past_pending_approval(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
@@ -257,9 +468,11 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.error, "quality_gate_failed")
         self.assertIsNone(failed.final_output)
-        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
         self.assertIn("loop.failed", event_types)
         self.assertNotIn("loop.completed", event_types)
+        self.assertEqual(events[-1]["payload"]["failure_type"], "quality_failed")
 
     def test_adapter_exception_fails_loop_instead_of_leaving_it_running(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -287,10 +500,190 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(failed.steps[0].status, "failed")
         self.assertEqual(failed.steps[0].observation.status, "failed")
         self.assertEqual(failed.steps[0].observation.payload["error"], "task_dispatch adapter unavailable")
+        self.assertEqual(failed.steps[0].observation.payload["failure_type"], "adapter_error")
         self.assertEqual(failed.steps[0].checkpoint["status"], "failed")
+        self.assertEqual(failed.steps[0].checkpoint["failure_type"], "adapter_error")
         event = runtime.list_loop_events(loop.loop_id)[-1]
         self.assertEqual(event["type"], "loop.failed")
         self.assertEqual(event["payload"]["action_type"], "task_dispatch")
+        self.assertEqual(event["payload"]["failure_type"], "adapter_error")
+
+    def test_dispatch_failure_type_propagates_to_loop_failed_event(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        cases = [
+            (TimeoutDispatcher(), "timeout"),
+            (EnvironmentBlockedDispatcher(), "environment_blocked"),
+        ]
+        for dispatcher, expected_failure_type in cases:
+            with self.subTest(failure_type=expected_failure_type):
+                runtime = AgentLoopRuntime(
+                    adapters=AgentLoopAdapters(
+                        memory_provider=RecordingMemoryProvider(),
+                        dispatcher=dispatcher,
+                        quality_gate=FailingThenPassingQualityGate(),
+                    )
+                )
+                loop = runtime.start_loop(
+                    goal=f"Preserve {expected_failure_type} terminal classification",
+                    project_root=str(self.project),
+                    max_turns=8,
+                    memory_policy={"read": False, "writeCandidates": False},
+                )
+
+                failed = runtime.run_loop(loop.loop_id)
+
+                self.assertEqual(failed.status, "failed")
+                self.assertEqual(failed.error, "task_dispatch_failed")
+                self.assertEqual(failed.steps[0].observation.payload["failure_type"], expected_failure_type)
+                self.assertEqual(failed.steps[0].checkpoint["failure_type"], expected_failure_type)
+                event = runtime.list_loop_events(loop.loop_id)[-1]
+                self.assertEqual(event["type"], "loop.failed")
+                self.assertEqual(event["payload"]["failure_type"], expected_failure_type)
+
+    def test_dispatch_action_persists_running_step_lease_before_adapter_returns(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = InspectingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        dispatcher.runtime = runtime
+        loop = runtime.start_loop(
+            goal="Persist running action leases",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        persisted = dispatcher.persisted_during_dispatch
+        self.assertEqual(persisted["status"], "running")
+        self.assertEqual(len(persisted["steps"]), 1)
+        running_step = persisted["steps"][0]
+        self.assertEqual(running_step["action"]["type"], "task_dispatch")
+        self.assertEqual(running_step["status"], "running")
+        self.assertEqual(running_step["checkpoint"]["status"], "running")
+        execution = running_step["checkpoint"]["execution"]
+        self.assertTrue(execution["lease_id"].startswith("lease-"))
+        self.assertGreater(execution["lease_expires_at"], execution["heartbeat_at"])
+        self.assertEqual(execution["heartbeat_at"], execution["started_at"])
+
+        completed_step = completed.steps[0]
+        self.assertEqual(completed_step.status, "completed")
+        self.assertEqual(completed_step.checkpoint["execution"]["lease_id"], execution["lease_id"])
+        self.assertGreaterEqual(completed_step.checkpoint["execution"]["duration_ms"], 0)
+        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        self.assertIn("loop.step.started", event_types)
+        self.assertIn("loop.step.heartbeat", event_types)
+
+    def test_dispatch_adapter_can_renew_running_step_lease(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = HeartbeatRenewingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        dispatcher.runtime = runtime
+        loop = runtime.start_loop(
+            goal="Renew long running dispatch lease",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"actionLeaseSeconds": 1},
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(dispatcher.before["lease_id"], dispatcher.after["lease_id"])
+        self.assertEqual(dispatcher.renewal["lease_id"], dispatcher.before["lease_id"])
+        self.assertGreater(dispatcher.after["heartbeat_at"], dispatcher.before["heartbeat_at"])
+        self.assertGreater(dispatcher.after["lease_expires_at"], dispatcher.before["lease_expires_at"])
+        self.assertEqual(dispatcher.after["renewal_count"], 1)
+        heartbeat_events = [
+            event for event in runtime.list_loop_events(loop.loop_id)
+            if event["type"] == "loop.step.heartbeat"
+        ]
+        self.assertGreaterEqual(len(heartbeat_events), 2)
+        renewed_events = [
+            event for event in heartbeat_events
+            if event["payload"]["lease_id"] == dispatcher.renewal["lease_id"]
+        ]
+        self.assertEqual(renewed_events[-1]["payload"]["renewal_count"], 1)
+
+    def test_stale_running_action_lease_fails_without_reexecuting_dispatcher(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, LoopAction, LoopObservation, LoopStep
+
+        dispatcher = RemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Recover an expired running action",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+        started_at = time.time() - 60
+        running_step = LoopStep.new(
+            loop_id=loop.loop_id,
+            turn=1,
+            phase="act",
+            status="running",
+            action=LoopAction.new("task_dispatch", "Dispatch work through host adapter"),
+            observation=LoopObservation.new("running", {"action_type": "task_dispatch"}),
+            checkpoint={
+                "loop_id": loop.loop_id,
+                "turn": 1,
+                "action_type": "task_dispatch",
+                "status": "running",
+                "adapter": "RemediationDispatcher",
+                "observation_status": "running",
+                "execution": {
+                    "lease_id": "lease-expired",
+                    "started_at": started_at,
+                    "heartbeat_at": started_at,
+                    "lease_seconds": 0.01,
+                    "lease_expires_at": started_at + 0.01,
+                },
+            },
+        )
+        loop.status = "running"
+        loop.turn_count = 1
+        loop.steps.append(running_step)
+        loop.checkpoint_count = 1
+        runtime.store.save_loop(loop)
+
+        recovered = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(recovered.error, "action_lease_expired")
+        self.assertEqual(dispatcher.actions, [])
+        self.assertEqual(recovered.steps[0].status, "failed")
+        self.assertEqual(recovered.steps[0].observation.status, "failed")
+        self.assertEqual(recovered.steps[0].observation.payload["error"], "action_lease_expired")
+        self.assertEqual(recovered.steps[0].observation.payload["failure_type"], "lease_expired")
+        self.assertEqual(recovered.steps[0].checkpoint["status"], "failed")
+        self.assertEqual(recovered.steps[0].checkpoint["failure_type"], "lease_expired")
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertIn("loop.step.lease_expired", event_types)
+        self.assertIn("loop.failed", event_types)
+        self.assertEqual(events[-1]["payload"]["failure_type"], "lease_expired")
 
     def test_invalid_host_action_plan_is_rejected_instead_of_silently_ignored(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
@@ -351,6 +744,47 @@ class AgentLoopV2Tests(unittest.TestCase):
         )
         self.assertEqual(dispatcher.actions, ["task_dispatch", "remediation_dispatch", "task_dispatch"])
 
+    def test_remediation_dispatch_can_route_agent_from_failed_quality_gate(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = AgentRoutingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Route remediation to a specialist",
+            project_root=str(self.project),
+            agent="owner",
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "agentRouting": {
+                    "task_dispatch": "builder",
+                    "remediation_dispatch": {
+                        "browser_e2e": "browser-specialist",
+                        "default": "repair-generalist",
+                    },
+                }
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [(call["action_type"], call["agent"]) for call in dispatcher.calls],
+            [("task_dispatch", "builder"), ("remediation_dispatch", "browser-specialist")],
+        )
+        remediation_call = dispatcher.calls[1]
+        self.assertEqual(remediation_call["routing"]["selected_agent"], "browser-specialist")
+        self.assertEqual(remediation_call["routing"]["matched_gate"], "browser_e2e")
+        self.assertEqual(completed.steps[0].action.payload["agent"], "builder")
+        self.assertEqual(completed.steps[2].action.payload["agent"], "browser-specialist")
+
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
@@ -391,6 +825,131 @@ class AgentLoopV2Tests(unittest.TestCase):
             [step.action.type for step in final_loop.steps],
             ["task_dispatch", "quality_gate", "remediation_dispatch", "quality_gate", "final_output"],
         )
+
+    def test_cancel_running_loop_interrupts_cooperative_dispatch_adapter(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = CancellableDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Cancel a running dispatch adapter",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+        results = []
+
+        def run_loop():
+            results.append(runtime.run_loop(loop.loop_id))
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        self.assertTrue(dispatcher.started.wait(timeout=2))
+
+        requested = runtime.cancel_loop(loop.loop_id, reason="stop running adapter")
+
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(dispatcher.cancel_seen.is_set())
+        self.assertEqual(requested.status, "cancelled")
+        self.assertEqual(results[0].status, "cancelled")
+        self.assertEqual(results[0].error, "stop running adapter")
+        self.assertEqual(results[0].steps[0].status, "cancelled")
+        self.assertEqual(results[0].steps[0].observation.payload["reason"], "stop running adapter")
+        self.assertEqual(dispatcher.actions, ["task_dispatch"])
+        final_loop = runtime.get_loop(loop.loop_id)
+        self.assertEqual(final_loop.status, "cancelled")
+        self.assertEqual([step.action.type for step in final_loop.steps], ["task_dispatch"])
+        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        self.assertIn("loop.cancel_requested", event_types)
+        self.assertIn("loop.cancelled", event_types)
+
+    def test_cancel_running_loop_releases_runtime_from_noncooperative_dispatcher(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = NonCooperativeHangingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Cancel a noncooperative dispatch adapter",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+        results = []
+
+        def run_loop():
+            results.append(runtime.run_loop(loop.loop_id))
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        self.assertTrue(dispatcher.started.wait(timeout=2))
+
+        requested = runtime.cancel_loop(loop.loop_id, reason="stop noncooperative adapter")
+
+        try:
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(requested.status, "cancelled")
+            self.assertTrue(results)
+            self.assertEqual(results[0].status, "cancelled")
+            self.assertEqual(results[0].error, "stop noncooperative adapter")
+            self.assertEqual(results[0].steps[0].status, "cancelled")
+        finally:
+            dispatcher.release.set()
+            thread.join(timeout=2)
+
+    def test_cancelled_dispatch_token_stays_latched_for_detached_worker(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = LateCheckingDetachedDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Latch cancellation after main loop detaches",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+        )
+        results = []
+
+        def run_loop():
+            results.append(runtime.run_loop(loop.loop_id))
+
+        thread = threading.Thread(target=run_loop)
+        thread.start()
+        self.assertTrue(dispatcher.started.wait(timeout=2))
+
+        requested = runtime.cancel_loop(loop.loop_id, reason="late cancellation")
+
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(requested.status, "cancelled")
+        self.assertTrue(results)
+        self.assertEqual(results[0].status, "cancelled")
+
+        dispatcher.allow_late_check.set()
+        self.assertTrue(dispatcher.finished.wait(timeout=2))
+        self.assertTrue(dispatcher.worker_saw_cancel)
+        self.assertFalse((self.project / "late-write.txt").exists())
+        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        self.assertIn("loop.dispatch.detached", event_types)
 
 
 if __name__ == "__main__":
