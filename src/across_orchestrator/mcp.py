@@ -6,7 +6,6 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
-from .agent_loop import AgentLoopRuntime
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 
@@ -228,7 +227,7 @@ def agent_loop_schema() -> dict[str, Any]:
     return {
         "schemaVersion": "0.2",
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
-        "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed"],
+        "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed", "cancelled"],
         "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
         "memoryPolicy": {
@@ -247,7 +246,7 @@ def agent_loop_schema() -> dict[str, Any]:
 
 
 def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[str, Any]) -> Any:
-    loop_runtime = AgentLoopRuntime(runtime.store)
+    loop_runtime = runtime.loop_runtime
     if name == "submit_task":
         return runtime.submit_task(
             goal=arguments.get("goal") or "",
@@ -364,6 +363,8 @@ def main() -> int:
             else:
                 raise ValueError(f"Unsupported method: {method}")
             print(json.dumps(response(message_id, result=result)), flush=True)
+        except ValueError as exc:
+            print(json.dumps(response(message_id, error=str(exc))), flush=True)
         except Exception:
             print(json.dumps(response(message_id, error="Across Orchestrator MCP request failed.")), flush=True)
     return 0

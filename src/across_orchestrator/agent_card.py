@@ -74,7 +74,7 @@ def render_agent_card() -> dict:
             {
                 "id": "agent-adapter-specs",
                 "name": "Declarative Agent Adapters",
-                "description": "Bind arbitrary host agent ids to command, demo, or reference execution adapters.",
+                "description": "Bind arbitrary host agent ids to explicit command, demo, or reference execution adapters.",
             },
             {
                 "id": "delivery-contracts",

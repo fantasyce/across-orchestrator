@@ -208,6 +208,33 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertIn("approval", completed.steps[1].observation.payload)
 
+    def test_run_loop_does_not_advance_past_pending_approval(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = RemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Do not bypass approval",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+        )
+
+        waiting = runtime.run_loop(loop.loop_id)
+        rerun = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(rerun.status, "awaiting_approval")
+        self.assertEqual(len(rerun.steps), len(waiting.steps))
+        self.assertEqual(rerun.steps[-1].status, "waiting_approval")
+        self.assertEqual(dispatcher.actions, [])
+
     def test_quality_failure_after_remediation_budget_remains_failed(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
@@ -255,9 +282,74 @@ class AgentLoopV2Tests(unittest.TestCase):
 
         self.assertEqual(failed.status, "failed")
         self.assertEqual(failed.error, "task_dispatch_failed")
+        self.assertEqual(len(failed.steps), 1)
+        self.assertEqual(failed.steps[0].action.type, "task_dispatch")
+        self.assertEqual(failed.steps[0].status, "failed")
+        self.assertEqual(failed.steps[0].observation.status, "failed")
+        self.assertEqual(failed.steps[0].observation.payload["error"], "task_dispatch adapter unavailable")
+        self.assertEqual(failed.steps[0].checkpoint["status"], "failed")
         event = runtime.list_loop_events(loop.loop_id)[-1]
         self.assertEqual(event["type"], "loop.failed")
         self.assertEqual(event["payload"]["action_type"], "task_dispatch")
+
+    def test_invalid_host_action_plan_is_rejected_instead_of_silently_ignored(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+
+        with self.assertRaises(ValueError) as exc:
+            runtime.start_loop(
+                goal="Reject invalid host action plan",
+                project_root=str(self.project),
+                metadata={"actionPlan": ["task_dispatch", "unsafe_shell_action", "final_output"]},
+            )
+
+        self.assertIn("unsupported actionPlan entries", str(exc.exception))
+
+    def test_host_action_plan_continues_after_inserted_remediation_steps(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = RemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Continue a host plan after remediation",
+            project_root=str(self.project),
+            max_turns=10,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "actionPlan": [
+                    "task_dispatch",
+                    "quality_gate",
+                    "task_dispatch",
+                    "quality_gate",
+                    "final_output",
+                ],
+                "maxRemediationTurns": 1,
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            [
+                "task_dispatch",
+                "quality_gate",
+                "remediation_dispatch",
+                "quality_gate",
+                "task_dispatch",
+                "quality_gate",
+                "final_output",
+            ],
+        )
+        self.assertEqual(dispatcher.actions, ["task_dispatch", "remediation_dispatch", "task_dispatch"])
 
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

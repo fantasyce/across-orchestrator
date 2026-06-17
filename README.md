@@ -13,13 +13,16 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.7` makes the durable Agent Loop Runtime more host-neutral. The runtime
-keeps loop state, step checkpoints, approval gates, declarative agent adapters,
-adapter-backed memory hooks, host-supplied action plans, dynamic remediation
-dispatch, host-owned loop controls, and final output evidence inside the plugin
-so hosts can stay thin. This release keeps the product-mode path boundary from
-`v0.6.6` while adding generic agent adapter descriptors for hosts beyond Across
-Agents Assistant.
+`v0.6.8` keeps the durable Agent Loop Runtime host-neutral and synchronizes
+task terminal status with loop terminal status. Cancelled loops now mark their
+tasks `cancelled`, while stopped loops such as approval rejection or max-turn
+exhaustion mark tasks `failed` and keep the loop-specific `stopped` detail in
+metadata and events. The runtime still keeps loop state, step checkpoints,
+approval gates, declarative agent adapters, adapter-backed memory hooks,
+host-supplied action plans, dynamic remediation dispatch, host-owned loop
+controls, and final output evidence inside the plugin so hosts can stay thin.
+This release keeps the product-mode path boundary from `v0.6.6` and the generic
+agent adapter descriptors introduced for hosts beyond Across Agents Assistant.
 
 Validated in this repository:
 
@@ -92,7 +95,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.7/across_orchestrator-0.6.7-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.8/across_orchestrator-0.6.8-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a

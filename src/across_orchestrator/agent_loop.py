@@ -317,6 +317,7 @@ class AgentLoopRuntime:
     ) -> LoopRun:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
+        clean_metadata = self._validated_metadata(metadata)
         Path(project_root).expanduser().resolve().mkdir(parents=True, exist_ok=True)
         loop = LoopRun.new(
             goal=goal,
@@ -325,7 +326,7 @@ class AgentLoopRuntime:
             max_turns=max_turns,
             memory_policy=memory_policy,
             approval_policy=approval_policy,
-            metadata=metadata,
+            metadata=clean_metadata,
         )
         self.store.save_loop(loop)
         self.store.append_loop_event(loop.loop_id, "loop.started", {
@@ -348,6 +349,10 @@ class AgentLoopRuntime:
     def _run_loop_locked(self, loop_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
         if loop.status in TERMINAL_LOOP_STATUSES:
+            return loop
+        if self._pending_approval_step(loop) is not None:
+            loop.status = "awaiting_approval"
+            self.store.save_loop(loop)
             return loop
         loop.status = "running"
         loop.error = None
@@ -388,11 +393,21 @@ class AgentLoopRuntime:
             try:
                 step = self._build_step(loop, action_type)
             except Exception as exc:
+                failed_step = self._build_failed_step(loop, action_type, exc)
+                loop.turn_count = failed_step.turn
+                loop.steps.append(failed_step)
+                loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+                self.store.save_loop(loop)
+                self.store.append_loop_event(loop.loop_id, "loop.step.failed", asdict(failed_step))
                 return self._fail_loop(
                     loop,
                     reason=f"{action_type}_failed",
                     error=str(exc),
-                    payload={"action_type": action_type, "turn": loop.turn_count + 1},
+                    payload={
+                        "action_type": action_type,
+                        "turn": failed_step.turn,
+                        "step_id": failed_step.step_id,
+                    },
                 )
             loop.turn_count = step.turn
             loop.steps.append(step)
@@ -414,8 +429,19 @@ class AgentLoopRuntime:
             loop = self.get_loop(loop_id)
             if loop.status in TERMINAL_LOOP_STATUSES:
                 return loop
+            cancel_reason = reason or "cancelled"
+            for step in loop.steps:
+                if step.status == "waiting_approval" and step.action.approval_status == "pending":
+                    step.action.approval_status = "cancelled"
+                    step.status = "cancelled"
+                    step.observation = LoopObservation.new("cancelled", {
+                        "approval": "cancelled",
+                        "reason": cancel_reason,
+                        "action_type": step.action.type,
+                    })
+                    step.updated_at = time.time()
             loop.status = "cancelled"
-            loop.error = reason or "cancelled"
+            loop.error = cancel_reason
             self.store.save_loop(loop)
             self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
                 "reason": loop.error,
@@ -426,6 +452,8 @@ class AgentLoopRuntime:
 
     def _approve_action_locked(self, loop_id: str, action_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
+        if loop.status in TERMINAL_LOOP_STATUSES:
+            return loop
         for step in loop.steps:
             if step.action.action_id != action_id:
                 continue
@@ -441,7 +469,15 @@ class AgentLoopRuntime:
                     "action_type": step.action.type,
                     "error": str(exc),
                 })
+                step.checkpoint = self._checkpoint(
+                    loop,
+                    step.action.type,
+                    step.turn,
+                    step.observation.payload,
+                    status="failed",
+                )
                 step.updated_at = time.time()
+                loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
                 self.store.save_loop(loop)
                 self.store.append_loop_event(loop.loop_id, "loop.action.failed", asdict(step))
                 return self._fail_loop(
@@ -467,9 +503,25 @@ class AgentLoopRuntime:
             return loop
         raise KeyError(f"Action not found: {action_id}")
 
+    def _validated_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        clean = dict(metadata or {})
+        raw_plan = clean.get("actionPlan")
+        if raw_plan is None:
+            raw_plan = clean.get("action_plan")
+        if raw_plan is None:
+            return clean
+        if not isinstance(raw_plan, list):
+            raise ValueError("actionPlan must be a list of supported action types")
+        invalid = [str(item or "").strip() for item in raw_plan if str(item or "").strip() not in SUPPORTED_LOOP_ACTION_TYPES]
+        if invalid:
+            raise ValueError(f"unsupported actionPlan entries: {', '.join(invalid)}")
+        return clean
+
     def reject_action(self, loop_id: str, action_id: str, reason: str | None = None) -> LoopRun:
         with self.store.loop_lock(loop_id):
             loop = self.get_loop(loop_id)
+            if loop.status in TERMINAL_LOOP_STATUSES:
+                return loop
             for step in loop.steps:
                 if step.action.action_id != action_id:
                     continue
@@ -560,8 +612,9 @@ class AgentLoopRuntime:
 
         action_plan = self._host_action_plan(loop)
         if action_plan:
-            if len(loop.steps) < len(action_plan):
-                return action_plan[len(loop.steps)]
+            plan_index = self._host_action_plan_progress(loop, action_plan)
+            if plan_index < len(action_plan):
+                return action_plan[plan_index]
             return None
 
         if bool(loop.memory_policy.get("read", True)) and not self._has_action(loop, "memory_search"):
@@ -628,6 +681,27 @@ class AgentLoopRuntime:
             checkpoint=self._checkpoint(loop, action_type, turn, observation_payload),
         )
 
+    def _build_failed_step(self, loop: LoopRun, action_type: str, exc: Exception) -> LoopStep:
+        turn = loop.turn_count + 1
+        action = LoopAction.new(
+            action_type,
+            self._action_title(action_type),
+            self._action_payload(loop, action_type),
+        )
+        observation_payload = {
+            "action_type": action_type,
+            "error": str(exc),
+        }
+        return LoopStep.new(
+            loop_id=loop.loop_id,
+            turn=turn,
+            phase=self._phase_for(action_type),
+            status="failed",
+            action=action,
+            observation=LoopObservation.new("failed", observation_payload),
+            checkpoint=self._checkpoint(loop, action_type, turn, observation_payload, status="failed"),
+        )
+
     def _action_title(self, action_type: str) -> str:
         return {
             "memory_search": "Search shared memory before planning",
@@ -692,15 +766,17 @@ class AgentLoopRuntime:
         action_type: str,
         turn: int,
         observation_payload: dict[str, Any] | None = None,
+        *,
+        status: str = "completed",
     ) -> dict[str, Any]:
         latest = observation_payload or (loop.steps[-1].observation.payload if loop.steps else {})
         return {
             "loop_id": loop.loop_id,
             "turn": turn,
             "action_type": action_type,
-            "status": "completed",
+            "status": status,
             "adapter": self._adapter_name(action_type),
-            "observation_status": latest.get("quality") or latest.get("dispatch") or latest.get("status") or "completed",
+            "observation_status": latest.get("quality") or latest.get("dispatch") or latest.get("status") or status,
         }
 
     def _host_action_plan(self, loop: LoopRun) -> list[str]:
@@ -715,6 +791,21 @@ class AgentLoopRuntime:
             if action_type in SUPPORTED_LOOP_ACTION_TYPES:
                 plan.append(action_type)
         return plan
+
+    def _host_action_plan_progress(self, loop: LoopRun, action_plan: list[str]) -> int:
+        plan_index = 0
+        for step in loop.steps:
+            if plan_index >= len(action_plan):
+                break
+            if step.action.type == action_plan[plan_index]:
+                plan_index += 1
+        return plan_index
+
+    def _pending_approval_step(self, loop: LoopRun) -> LoopStep | None:
+        for step in loop.steps:
+            if step.status == "waiting_approval" and step.action.approval_status == "pending":
+                return step
+        return None
 
     def _context(self, loop: LoopRun) -> dict[str, Any]:
         return {

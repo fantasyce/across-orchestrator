@@ -16,6 +16,10 @@ class AgentAdapter:
         raise NotImplementedError
 
 
+class AdapterMissingError(RuntimeError):
+    pass
+
+
 class DemoAgentAdapter(AgentAdapter):
     name = "demo"
 
@@ -489,4 +493,7 @@ def adapter_for(
         return DemoAgentAdapter()
     if agent == "command":
         return CommandAgentAdapter(command or [])
-    return ReferenceDeliveryAdapter(agent)
+    raise AdapterMissingError(
+        f"No adapter configured for agent {agent}. "
+        "Provide agent_adapters with type command, demo, or reference."
+    )

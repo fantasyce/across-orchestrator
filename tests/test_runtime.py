@@ -149,6 +149,7 @@ class RuntimeTests(unittest.TestCase):
             agent="claude",
             strict_dependency=True,
             task_types=["functional", "artifact"],
+            agent_adapters={"*": {"type": "reference"}},
             subtasks=[
                 {"id": "contract", "description": "Wave 1 contract", "path": "docs/contract.json", "agent": "claude", "wave": 1},
                 {"id": "api", "description": "Wave 2 API reads docs/contract.json", "path": "api/server.mjs", "agent": "deepseek", "wave": 2, "dependencies": ["contract"]},
@@ -272,6 +273,19 @@ class RuntimeTests(unittest.TestCase):
             ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
         )
         self.assertEqual(evidence["agent_loop"]["memory_policy"]["provider"], "across-context")
+
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        dispatch_step = next(step for step in loop.steps if step.action.type == "task_dispatch")
+        self.assertEqual(dispatch_step.observation.payload["adapter"], "runtime")
+        self.assertEqual(dispatch_step.observation.payload["task_id"], task.task_id)
+        self.assertEqual(dispatch_step.observation.payload["completed_subtasks"], 2)
+        quality_step = next(step for step in loop.steps if step.action.type == "quality_gate")
+        self.assertEqual(quality_step.observation.payload["task_id"], task.task_id)
+        self.assertEqual(quality_step.observation.payload["status"], "passed")
+        final_step = next(step for step in loop.steps if step.action.type == "final_output")
+        self.assertEqual(final_step.observation.payload["task_status"], "completed")
+        self.assertIn(task.task_id, final_step.observation.payload["final_output"])
+
         self.assertEqual(
             [artifact["path"] for artifact in evidence["artifacts"]],
             ["README.md", "notes/release.md"],
@@ -287,6 +301,186 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("task.started", event_types)
         self.assertIn("subtask.completed", event_types)
         self.assertIn("task.completed", event_types)
+
+    def test_run_task_fails_when_non_demo_agent_has_no_adapter(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Require an explicit production adapter",
+            project_root=str(self.project),
+            deliverables=["adapter-required.md"],
+            agent="claude",
+        )
+
+        completed = runtime.run_task(task.task_id)
+
+        self.assertEqual(completed.status, "failed")
+        self.assertFalse((self.project / "adapter-required.md").exists())
+        events = runtime.list_events(task.task_id)
+        failed = [event for event in events if event["type"] == "task.failed"]
+        self.assertTrue(failed)
+        self.assertIn("No adapter configured for agent claude", failed[-1]["payload"]["error"])
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        self.assertEqual(loop.status, "failed")
+        self.assertEqual(loop.error, "task_dispatch_failed")
+        event_types = [event["type"] for event in events]
+        self.assertIn("agent_loop.failed", event_types)
+        self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_event_stream_marks_agent_loop_awaiting_approval(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Require approval before dispatch",
+            project_root=str(self.project),
+            deliverables=["approval-required.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.approval_policy = {"requireApprovalFor": ["task_dispatch"]}
+        runtime.store.save_loop(loop)
+
+        waiting = runtime.run_task(task.task_id)
+
+        self.assertEqual(waiting.status, "running")
+        updated_loop = runtime.loop_runtime.get_loop(loop.loop_id)
+        self.assertEqual(updated_loop.status, "awaiting_approval")
+        event_types = [event["type"] for event in runtime.list_events(task.task_id)]
+        self.assertIn("agent_loop.awaiting_approval", event_types)
+        self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_syncs_cancelled_agent_loop_to_task_status(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Cancel a task while waiting for approval",
+            project_root=str(self.project),
+            deliverables=["cancelled.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.approval_policy = {"requireApprovalFor": ["task_dispatch"]}
+        runtime.store.save_loop(loop)
+        waiting = runtime.run_task(task.task_id)
+        runtime.loop_runtime.cancel_loop(loop.loop_id, reason="user cancel")
+
+        cancelled = runtime.run_task(waiting.task_id)
+
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.metadata["agent_loop"]["status"], "cancelled")
+        event_types = [event["type"] for event in runtime.list_events(task.task_id)]
+        self.assertIn("agent_loop.cancelled", event_types)
+        self.assertIn("task.cancelled", event_types)
+        self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_syncs_rejected_agent_loop_to_failed_task_status(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Reject a task dispatch approval",
+            project_root=str(self.project),
+            deliverables=["rejected.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.approval_policy = {"requireApprovalFor": ["task_dispatch"]}
+        runtime.store.save_loop(loop)
+        waiting = runtime.run_task(task.task_id)
+        action_id = runtime.loop_runtime.get_loop(loop.loop_id).steps[-1].action.action_id
+        runtime.loop_runtime.reject_action(loop.loop_id, action_id, reason="not approved")
+
+        failed = runtime.run_task(waiting.task_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.metadata["agent_loop"]["status"], "stopped")
+        self.assertEqual(failed.metadata["agent_loop"]["error"], "approval_rejected")
+        event_types = [event["type"] for event in runtime.list_events(task.task_id)]
+        self.assertIn("agent_loop.stopped", event_types)
+        self.assertIn("task.failed", event_types)
+        self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_syncs_max_turns_agent_loop_stop_to_failed_task_status(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Stop before dispatch when max turns are exhausted",
+            project_root=str(self.project),
+            deliverables=["max-turns.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.max_turns = 1
+        runtime.store.save_loop(loop)
+
+        failed = runtime.run_task(task.task_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.metadata["agent_loop"]["status"], "stopped")
+        self.assertEqual(failed.metadata["agent_loop"]["error"], "max_turns_exceeded")
+        event_types = [event["type"] for event in runtime.list_events(task.task_id)]
+        self.assertIn("agent_loop.stopped", event_types)
+        self.assertIn("task.failed", event_types)
+        self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_is_idempotent_after_agent_loop_completion(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Create an idempotent artifact",
+            project_root=str(self.project),
+            deliverables=["idempotent.md"],
+            agent="demo",
+        )
+        first = runtime.run_task(task.task_id)
+        first_events = runtime.list_events(task.task_id)
+
+        second = runtime.run_task(task.task_id)
+        second_events = runtime.list_events(task.task_id)
+
+        self.assertEqual(first.status, "completed")
+        self.assertEqual(second.status, "completed")
+        self.assertEqual(
+            len([event for event in second_events if event["type"] == "subtask.completed"]),
+            len([event for event in first_events if event["type"] == "subtask.completed"]),
+        )
+
+    def test_standalone_agent_loop_with_deliverables_creates_and_runs_task(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        loop = runtime.loop_runtime.start_loop(
+            goal="Produce a standalone loop artifact",
+            project_root=str(self.project),
+            agent="demo",
+            max_turns=4,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"deliverables": ["standalone/result.md"]},
+        )
+
+        completed = runtime.loop_runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            ["task_dispatch", "quality_gate", "final_output"],
+        )
+        dispatch_payload = completed.steps[0].observation.payload
+        self.assertEqual(dispatch_payload["adapter"], "runtime")
+        self.assertTrue(dispatch_payload["task_id"].startswith("task-"))
+        self.assertEqual(dispatch_payload["completed_subtasks"], 1)
+        self.assertEqual(completed.steps[1].observation.payload["status"], "passed")
+        self.assertEqual(completed.steps[2].observation.payload["task_status"], "completed")
+        self.assertTrue((self.project / "standalone/result.md").exists())
+
+        task = runtime.get_task(dispatch_payload["task_id"])
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(task.metadata["agent_loop"]["loop_id"], loop.loop_id)
 
     def test_store_files_are_plain_json_and_jsonl(self):
         from across_orchestrator.runtime import OrchestratorRuntime

@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from urllib import request
+from urllib import error, request
 
 
 def free_port():
@@ -91,6 +91,20 @@ class HttpTests(unittest.TestCase):
         )
         with request.urlopen(req, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def post_error(self, path, payload):
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            self.base + path,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            request.urlopen(req, timeout=5)
+        except error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+        raise AssertionError("expected HTTP error")
 
     def test_http_submit_run_and_fetch_evidence(self):
         plugin_manifest = self.get("/.well-known/across-plugin.json")
@@ -201,6 +215,20 @@ class HttpTests(unittest.TestCase):
         stream = self.get_text(f"/loops/{loop_id}/events/stream")
         self.assertIn("event: loop.completed", stream)
         self.assertIn('"loop_id":', stream)
+
+    def test_http_rejects_invalid_loop_action_plan_with_400(self):
+        status, payload = self.post_error(
+            "/loops",
+            {
+                "goal": "Reject invalid action plan",
+                "projectRoot": str(self.project),
+                "metadata": {"actionPlan": ["task_dispatch", "unsafe_shell_action"]},
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "bad_request")
+        self.assertIn("unsupported actionPlan entries", payload["detail"])
 
     def test_http_host_conformance_validates_external_host_contract(self):
         report = self.post(
