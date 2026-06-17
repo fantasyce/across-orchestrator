@@ -5,7 +5,7 @@ from typing import Any
 
 from .app_grade import APP_GRADE_RELEASE_E2E_ENGINE, build_release_e2e_payload, run_release_e2e_payload
 from .adapters import adapter_for, normalize_agent_adapter_specs
-from .agent_loop import AgentLoopRuntime
+from .agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultFinalizer, DefaultQualityGate, HostLoopDispatcher
 from .evidence import build_evidence_bundle, build_quality
 from .models import SubTask, Task
 from .planning import ensure_strict_dependency_chain
@@ -15,7 +15,19 @@ from .store import LocalStore
 class OrchestratorRuntime:
     def __init__(self, store: LocalStore | None = None):
         self.store = store or LocalStore()
-        self.loop_runtime = AgentLoopRuntime(self.store)
+        self.loop_runtime = self._agent_loop_runtime()
+
+    def _agent_loop_runtime(self, *, command: list[str] | None = None) -> AgentLoopRuntime:
+        return AgentLoopRuntime(self.store, adapters=self._agent_loop_adapters(command=command))
+
+    def _agent_loop_adapters(self, *, command: list[str] | None = None) -> AgentLoopAdapters:
+        defaults = AgentLoopRuntime(self.store).adapters
+        return AgentLoopAdapters(
+            memory_provider=defaults.memory_provider,
+            dispatcher=RuntimeLoopDispatcher(self, command=command),
+            quality_gate=RuntimeQualityGate(self),
+            finalizer=RuntimeFinalizer(self),
+        )
 
     def submit_task(
         self,
@@ -148,47 +160,20 @@ class OrchestratorRuntime:
 
     def run_task(self, task_id: str, command: list[str] | None = None) -> Task:
         task = self.store.load_task(task_id)
+        self._mark_task_started(task)
+        loop = self._run_task_loop(task, command=command)
+        if loop is not None:
+            return self.store.load_task(task.task_id)
         if task.contract.get("engine") == APP_GRADE_RELEASE_E2E_ENGINE:
-            return self._run_app_grade_release_e2e(task)
-        task.status = "running"
-        self.store.save_task(task)
-        self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
-        self._run_task_loop(task)
+            self._dispatch_app_grade_task(task)
+            self._evaluate_task_quality(task)
+            return self.store.load_task(task.task_id)
         for subtask in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id)):
             if subtask.status == "completed":
                 continue
-            adapter = adapter_for(
-                subtask.agent,
-                command=command,
-                spec=_agent_adapter_spec_for(task, subtask.agent),
-            )
-            subtask.status = "running"
-            subtask.attempts += 1
-            self.store.append_event(task.task_id, "subtask.started", subtask.__dict__)
-            try:
-                result = adapter.run(task, subtask)
-                subtask.status = "completed"
-                subtask.error = None
-                self.store.append_event(task.task_id, "subtask.completed", {**subtask.__dict__, "result": result})
-            except Exception as exc:
-                subtask.status = "failed"
-                subtask.error = str(exc)
-                task.status = "failed"
-                self.store.append_event(task.task_id, "subtask.failed", subtask.__dict__)
-                self.store.save_task(task)
-                self.store.append_event(task.task_id, "task.failed", {"error": str(exc)})
-                return task
-            self.store.save_task(task)
-
-        quality = build_quality(task)
-        task.status = "completed" if quality["status"] == "passed" else "failed"
-        self.store.save_task(task)
-        self.store.append_event(
-            task.task_id,
-            "task.completed" if task.status == "completed" else "task.failed",
-            quality,
-        )
-        return task
+            self._dispatch_subtask(task, subtask, command=command)
+        self._evaluate_task_quality(task)
+        return self.store.load_task(task.task_id)
 
     def evidence_bundle(self, task_id: str) -> dict:
         task = self.store.load_task(task_id)
@@ -202,11 +187,7 @@ class OrchestratorRuntime:
         task = self.store.load_task(task_id)
         return build_quality(task)
 
-    def _run_app_grade_release_e2e(self, task: Task) -> Task:
-        task.status = "running"
-        self.store.save_task(task)
-        self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
-        self._run_task_loop(task)
+    def _dispatch_app_grade_task(self, task: Task) -> dict[str, Any]:
         payload = task.metadata.get("app_grade_request")
         if not payload:
             payload = build_release_e2e_payload(
@@ -224,32 +205,201 @@ class OrchestratorRuntime:
             subtask.status = "completed"
             subtask.error = None
         task.metadata["app_grade"] = result
-        task.status = "completed"
         self.store.save_task(task)
         self.store.append_event(task.task_id, "app_grade.host_conformance.completed", {
             "delivery_quality": result["delivery_quality"],
             "exact_files": result["exact_files"],
         })
-        self.store.append_event(task.task_id, "task.completed", result["quality_report"])
-        return task
+        return result
 
-    def _run_task_loop(self, task: Task) -> None:
+    def _mark_task_started(self, task: Task) -> None:
+        if task.status not in {"running", "completed"}:
+            task.status = "running"
+            self.store.save_task(task)
+            self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
+
+    def _run_task_loop(self, task: Task, *, command: list[str] | None = None):
         loop_id = str((task.metadata.get("agent_loop") or {}).get("loop_id") or "")
         if not loop_id:
-            return
-        loop = self.loop_runtime.run_loop(loop_id)
-        self.store.append_event(task.task_id, "agent_loop.completed", {
+            return None
+        loop_runtime = self._agent_loop_runtime(command=command)
+        loop = loop_runtime.run_loop(loop_id)
+        event_type = {
+            "completed": "agent_loop.completed",
+            "failed": "agent_loop.failed",
+            "awaiting_approval": "agent_loop.awaiting_approval",
+            "stopped": "agent_loop.stopped",
+            "cancelled": "agent_loop.cancelled",
+        }.get(str(loop.status or ""), "agent_loop.updated")
+        self.store.append_event(task.task_id, event_type, {
             "loop_id": loop.loop_id,
             "status": loop.status,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
+            "error": loop.error,
         })
-        task.metadata["agent_loop"].update({
+        current = self.store.load_task(task.task_id)
+        current.metadata.setdefault("agent_loop", {}).update({
             "status": loop.status,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
+            "error": loop.error,
         })
+        self._sync_task_status_from_loop(current, loop)
+        self.store.save_task(current)
+        return loop
+
+    def _sync_task_status_from_loop(self, task: Task, loop: Any) -> None:
+        loop_status = str(getattr(loop, "status", "") or "")
+        target_status = {
+            "cancelled": "cancelled",
+            "failed": "failed",
+            "stopped": "failed",
+        }.get(loop_status)
+        if loop_status == "completed" and task.status not in {"completed", "failed", "cancelled"}:
+            target_status = "completed"
+        if target_status is None or task.status == target_status:
+            return
+        task.status = target_status
+        event_type = {
+            "completed": "task.completed",
+            "cancelled": "task.cancelled",
+        }.get(target_status, "task.failed")
+        self.store.append_event(task.task_id, event_type, {
+            "loop_id": getattr(loop, "loop_id", None),
+            "loop_status": loop_status,
+            "error": getattr(loop, "error", None),
+        })
+
+    def _dispatch_task_from_loop(
+        self,
+        task_id: str,
+        *,
+        command: list[str] | None = None,
+        remediation: bool = False,
+    ) -> dict[str, Any]:
+        task = self.store.load_task(task_id)
+        self._mark_task_started(task)
+        if task.contract.get("engine") == APP_GRADE_RELEASE_E2E_ENGINE:
+            result = self._dispatch_app_grade_task(task)
+            completed = len(task.subtasks)
+            return {
+                "dispatch": "completed",
+                "adapter": "runtime",
+                "task_id": task.task_id,
+                "task_status": self.store.load_task(task.task_id).status,
+                "completed_subtasks": completed,
+                "failed_subtasks": 0,
+                "remediation": remediation,
+                "app_grade": {
+                    "scenario_id": result.get("scenario_id"),
+                    "delivery_quality": result.get("delivery_quality"),
+                },
+            }
+
+        completed = 0
+        skipped = 0
+        for subtask in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id)):
+            if subtask.status == "completed":
+                skipped += 1
+                continue
+            if remediation and subtask.status not in {"failed", "pending", "running"}:
+                skipped += 1
+                continue
+            self._dispatch_subtask(task, subtask, command=command)
+            completed += 1
+            task = self.store.load_task(task.task_id)
+        failed = len([item for item in task.subtasks if item.status == "failed"])
+        return {
+            "dispatch": "completed" if failed == 0 else "failed",
+            "adapter": "runtime",
+            "task_id": task.task_id,
+            "task_status": task.status,
+            "completed_subtasks": completed,
+            "skipped_subtasks": skipped,
+            "failed_subtasks": failed,
+            "remediation": remediation,
+            "project_root": task.project_root,
+        }
+
+    def _dispatch_subtask(self, task: Task, subtask: SubTask, *, command: list[str] | None = None) -> None:
+        subtask.status = "running"
+        subtask.attempts += 1
+        self.store.append_event(task.task_id, "subtask.started", subtask.__dict__)
+        try:
+            adapter = adapter_for(
+                subtask.agent,
+                command=command,
+                spec=_agent_adapter_spec_for(task, subtask.agent),
+            )
+            result = adapter.run(task, subtask)
+        except Exception as exc:
+            subtask.status = "failed"
+            subtask.error = str(exc)
+            task.status = "failed"
+            self.store.append_event(task.task_id, "subtask.failed", subtask.__dict__)
+            self.store.save_task(task)
+            self.store.append_event(task.task_id, "task.failed", {"error": str(exc)})
+            raise
+        subtask.status = "completed"
+        subtask.error = None
+        self.store.append_event(task.task_id, "subtask.completed", {**subtask.__dict__, "result": result})
         self.store.save_task(task)
+
+    def _evaluate_task_quality(self, task: Task) -> dict[str, Any]:
+        task = self.store.load_task(task.task_id)
+        quality = build_quality(task)
+        status = str(quality.get("status") or "failed")
+        task.status = "completed" if status == "passed" else "failed"
+        self.store.save_task(task)
+        self.store.append_event(
+            task.task_id,
+            "task.completed" if task.status == "completed" else "task.failed",
+            quality,
+        )
+        return quality
+
+    def _create_task_for_loop(self, loop: Any) -> Task:
+        metadata = dict(getattr(loop, "metadata", {}) or {})
+        deliverables = metadata.get("deliverables") or metadata.get("requiredArtifacts") or metadata.get("required_artifacts")
+        if not isinstance(deliverables, list):
+            deliverables = ["README.md"]
+        raw_subtasks = metadata.get("subtasks")
+        subtasks = raw_subtasks if isinstance(raw_subtasks, list) else None
+        paths = [str(item) for item in deliverables] or ["README.md"]
+        if subtasks:
+            task = Task.from_plan(
+                goal=loop.goal,
+                project_root=loop.project_root,
+                subtasks=subtasks,
+                deliverables=paths,
+                agent=loop.agent,
+            )
+        else:
+            task = Task.new(goal=loop.goal, project_root=loop.project_root, deliverables=paths, agent=loop.agent)
+        if bool(metadata.get("strictDependency") or metadata.get("strict_dependency")) and len(task.subtasks) > 1:
+            ensure_strict_dependency_chain(task)
+        clean_task_types = _clean_task_types(metadata.get("taskTypes") or metadata.get("task_types") or None)
+        if clean_task_types:
+            task.metadata["task_types"] = clean_task_types
+            task.metadata["delivery_mode"] = _delivery_mode_for_task_types(clean_task_types)
+        clean_agent_adapters = normalize_agent_adapter_specs(
+            metadata.get("agentAdapters") or metadata.get("agent_adapters") or None
+        )
+        if clean_agent_adapters:
+            task.metadata["agent_adapters"] = clean_agent_adapters
+        task.metadata["agent_loop"] = {
+            "loop_id": loop.loop_id,
+            "runtime": "across-orchestrator",
+            "mode": "durable",
+        }
+        self.store.save_task(task)
+        self.store.append_event(task.task_id, "task.created", {"goal": task.goal, "agent": task.agent})
+        self.store.append_event(task.task_id, "contract.created", task.contract)
+        self.store.append_event(task.task_id, "agent_loop.bound", task.metadata["agent_loop"])
+        for subtask in task.subtasks:
+            self.store.append_event(task.task_id, "subtask.created", subtask.__dict__)
+        return task
 
     def _agent_loop_summary(self, task: Task) -> dict[str, Any] | None:
         loop_id = str((task.metadata.get("agent_loop") or {}).get("loop_id") or "")
@@ -278,6 +428,125 @@ class OrchestratorRuntime:
             "final_output": loop.final_output,
             "events": self.loop_runtime.list_loop_events(loop.loop_id),
         }
+
+
+class RuntimeLoopDispatcher:
+    """Agent-loop dispatcher that can drive Orchestrator task execution."""
+
+    def __init__(self, runtime: OrchestratorRuntime, *, command: list[str] | None = None):
+        self.runtime = runtime
+        self.command = command
+        self._fallback = HostLoopDispatcher()
+
+    def dispatch(self, *, loop: Any, action_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        task_id = _task_id_from_loop_context(loop, context)
+        if not task_id:
+            if not _loop_declares_runtime_task(loop):
+                return self._fallback.dispatch(loop=loop, action_type=action_type, context=context)
+            task = self.runtime._create_task_for_loop(loop)
+            loop.metadata["task_id"] = task.task_id
+            self.runtime.store.save_loop(loop)
+            task_id = task.task_id
+        return self.runtime._dispatch_task_from_loop(
+            task_id,
+            command=self.command,
+            remediation=action_type == "remediation_dispatch",
+        )
+
+
+class RuntimeQualityGate:
+    """Agent-loop quality gate backed by task evidence and quality benchmarks."""
+
+    def __init__(self, runtime: OrchestratorRuntime):
+        self.runtime = runtime
+        self._fallback = DefaultQualityGate()
+
+    def evaluate(self, *, loop: Any, context: dict[str, Any]) -> dict[str, Any]:
+        task_id = _task_id_from_loop_context(loop, context)
+        if not task_id:
+            return self._fallback.evaluate(loop=loop, context=context)
+        quality = dict(self.runtime._evaluate_task_quality(self.runtime.store.load_task(task_id)))
+        status = str(quality.get("status") or "failed")
+        quality.update({
+            "task_id": task_id,
+            "quality": status,
+            "passed": status == "passed",
+            "summary": _quality_summary(quality),
+        })
+        return quality
+
+
+class RuntimeFinalizer:
+    """Agent-loop finalizer that returns task-aware completion output."""
+
+    def __init__(self, runtime: OrchestratorRuntime):
+        self.runtime = runtime
+        self._fallback = DefaultFinalizer()
+
+    def finalize(self, *, loop: Any, context: dict[str, Any]) -> dict[str, Any]:
+        task_id = _task_id_from_loop_context(loop, context)
+        if not task_id:
+            return self._fallback.finalize(loop=loop, context=context)
+        task = self.runtime.store.load_task(task_id)
+        quality = build_quality(task)
+        status = str(task.status or "unknown")
+        quality_status = str(quality.get("status") or "unknown")
+        return {
+            "final_output": f"Task {task.task_id} {status} for: {task.goal}",
+            "status": "completed" if status == "completed" else status,
+            "task_id": task.task_id,
+            "task_status": status,
+            "quality": quality_status,
+            "passed": status == "completed" and quality_status == "passed",
+        }
+
+
+def _task_id_from_loop_context(loop: Any, context: dict[str, Any]) -> str | None:
+    metadata = getattr(loop, "metadata", {}) or {}
+    for key in ("task_id", "taskId"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for step in reversed(context.get("steps") or []):
+        observation = step.get("observation") if isinstance(step, dict) else None
+        payload = observation.get("payload") if isinstance(observation, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("task_id") or payload.get("taskId")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _loop_declares_runtime_task(loop: Any) -> bool:
+    metadata = getattr(loop, "metadata", {}) or {}
+    return any(
+        key in metadata
+        for key in (
+            "deliverables",
+            "requiredArtifacts",
+            "required_artifacts",
+            "subtasks",
+            "taskTypes",
+            "task_types",
+            "agentAdapters",
+            "agent_adapters",
+            "strictDependency",
+            "strict_dependency",
+        )
+    )
+
+
+def _quality_summary(quality: dict[str, Any]) -> str:
+    status = str(quality.get("status") or "unknown")
+    missing = quality.get("missing_artifacts") or quality.get("missingArtifacts") or []
+    if missing:
+        return f"Quality {status}; missing artifacts: {', '.join(str(item) for item in missing)}."
+    present = quality.get("present_artifacts")
+    required = quality.get("required_artifacts")
+    if present is not None and required is not None:
+        return f"Quality {status}; {present}/{required} required artifacts present."
+    return f"Quality {status}."
 
 
 def _resolve_subtask_dependency_ids(subtasks: list[SubTask], stable_ids: dict[str, str] | None = None) -> None:

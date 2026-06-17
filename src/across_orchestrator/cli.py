@@ -6,7 +6,6 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
-from .agent_loop import AgentLoopRuntime
 from .host_conformance import evaluate_host_conformance, load_host_contract
 from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .runtime import OrchestratorRuntime
@@ -156,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     runtime = OrchestratorRuntime()
-    loop_runtime = AgentLoopRuntime(runtime.store)
+    loop_runtime = runtime.loop_runtime
 
     if args.command == "init":
         store = LocalStore()
@@ -232,15 +231,18 @@ def main(argv: list[str] | None = None) -> int:
                 **approval_policy,
                 "requireApprovalFor": args.require_approval_for,
             }
-        loop = loop_runtime.start_loop(
-            goal=args.goal,
-            project_root=args.project,
-            agent=args.agent,
-            max_turns=args.max_turns,
-            memory_policy=memory_policy or None,
-            approval_policy=approval_policy or None,
-            metadata=metadata or None,
-        )
+        try:
+            loop = loop_runtime.start_loop(
+                goal=args.goal,
+                project_root=args.project,
+                agent=args.agent,
+                max_turns=args.max_turns,
+                memory_policy=memory_policy or None,
+                approval_policy=approval_policy or None,
+                metadata=metadata or None,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         _print(loop.to_dict(), args.json)
         return 0
 

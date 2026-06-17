@@ -337,6 +337,21 @@ class CliTests(unittest.TestCase):
             ["task_dispatch", "quality_gate", "final_output"],
         )
 
+    def test_cli_loop_start_rejects_invalid_action_plan_without_traceback(self):
+        invalid = self.run_cli(
+            "loop-start",
+            "Reject invalid plan",
+            "--project",
+            str(self.project),
+            "--metadata-json",
+            json.dumps({"actionPlan": ["task_dispatch", "unsafe_shell_action"]}),
+            "--json",
+        )
+
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("unsupported actionPlan entries", invalid.stderr)
+        self.assertNotIn("Traceback", invalid.stderr)
+
     def test_cli_agent_loop_control_actions(self):
         cancel_start = self.run_cli(
             "loop-start",

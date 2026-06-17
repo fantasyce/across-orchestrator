@@ -122,6 +122,14 @@ class McpTests(unittest.TestCase):
             self.assertEqual(evidence["quality"]["status"], "passed")
             self.assertEqual((project / "mcp/custom.txt").read_text(encoding="utf-8"), "mcp-adapter=mcp-custom-agent\n")
 
+    def test_agent_loop_schema_declares_cancelled_terminal_status(self):
+        from across_orchestrator.mcp import agent_loop_schema
+
+        schema = agent_loop_schema()
+
+        self.assertIn("cancelled", schema["status"])
+        self.assertIn("cancel_agent_loop", schema["controlActions"])
+
     def test_mcp_agent_loop_tools(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(__file__).resolve().parents[1]
@@ -185,6 +193,44 @@ class McpTests(unittest.TestCase):
             self.assertEqual(completed["status"], "completed")
             events = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertIn("loop.completed", [event["type"] for event in events])
+
+    def test_mcp_agent_loop_reports_invalid_action_plan(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            project = Path(tempdir) / "project"
+            home = Path(tempdir) / "home"
+            project.mkdir()
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "start_agent_loop",
+                    "arguments": {
+                        "goal": "MCP invalid action plan",
+                        "projectRoot": str(project),
+                        "metadata": {"actionPlan": ["task_dispatch", "unsafe_shell_action"]},
+                    },
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            self.assertIn("error", responses[1])
+            self.assertIn("unsupported actionPlan entries", responses[1]["error"]["message"])
 
     def test_mcp_agent_loop_approval_tool(self):
         with tempfile.TemporaryDirectory() as tempdir:

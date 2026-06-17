@@ -193,6 +193,33 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(still_cancelled.status, "cancelled")
         self.assertEqual(still_cancelled.steps, [])
 
+    def test_cancelled_pending_approval_cannot_be_approved_or_rejected(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Cancel this pending approval",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+        )
+        waiting = runtime.run_loop(loop.loop_id)
+        action_id = waiting.steps[-1].action.action_id
+
+        cancelled = runtime.cancel_loop(loop.loop_id, reason="user cancelled before approval")
+
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.steps[-1].status, "cancelled")
+        self.assertEqual(cancelled.steps[-1].action.approval_status, "cancelled")
+
+        approved = runtime.approve_action(loop.loop_id, action_id)
+        rejected = runtime.reject_action(loop.loop_id, action_id, reason="too late")
+
+        self.assertEqual(approved.status, "cancelled")
+        self.assertEqual(rejected.status, "cancelled")
+        self.assertEqual(runtime.run_loop(loop.loop_id).status, "cancelled")
+
     def test_reject_waiting_action_stops_loop_with_rejection_event(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
 

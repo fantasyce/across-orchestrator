@@ -71,6 +71,8 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
+        except ValueError as exc:
+            self.respond({"error": "bad_request", "detail": str(exc)}, status=400)
         except Exception:
             self.respond({"error": "internal_error"}, status=500)
 
@@ -146,6 +148,8 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
+        except ValueError as exc:
+            self.respond({"error": "bad_request", "detail": str(exc)}, status=400)
         except Exception:
             self.respond({"error": "internal_error"}, status=500)
 
@@ -182,7 +186,7 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int]):
         super().__init__(server_address, OrchestratorHandler)
         self.runtime = OrchestratorRuntime()
-        self.loop_runtime = AgentLoopRuntime(self.runtime.store)
+        self.loop_runtime = self.runtime.loop_runtime
 
 
 def _runtime_info_path(runtime_id: str, runtime_info: str | None = None) -> Path:
