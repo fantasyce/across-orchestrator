@@ -29,6 +29,7 @@ class LocalStore:
         self.events_dir = self.home / "events"
         self.loops_dir = self.home / "loops"
         self.loop_events_dir = self.home / "loop-events"
+        self.loop_cancel_requests_dir = self.home / "loop-cancel-requests"
         self.locks_dir = self.home / "locks"
         self.init()
 
@@ -37,6 +38,7 @@ class LocalStore:
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.loops_dir.mkdir(parents=True, exist_ok=True)
         self.loop_events_dir.mkdir(parents=True, exist_ok=True)
+        self.loop_cancel_requests_dir.mkdir(parents=True, exist_ok=True)
         self.locks_dir.mkdir(parents=True, exist_ok=True)
 
     def save_task(self, task: Task) -> None:
@@ -81,10 +83,13 @@ class LocalStore:
         _atomic_write_json(path, loop.to_dict())
 
     @contextmanager
-    def loop_lock(self, loop_id: str):
+    def loop_lock(self, loop_id: str, *, blocking: bool = True):
         path = self.locks_dir / f"{loop_id}.lock"
         with path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
             try:
                 yield
             finally:
@@ -120,6 +125,28 @@ class LocalStore:
             if line.strip():
                 events.append(json.loads(line))
         return events
+
+    def request_loop_cancel(self, loop_id: str, reason: str | None = None) -> dict[str, Any]:
+        request = {
+            "loop_id": loop_id,
+            "reason": reason or "cancelled",
+            "requested_at": time.time(),
+        }
+        _atomic_write_json(self.loop_cancel_requests_dir / f"{loop_id}.json", request)
+        return request
+
+    def load_loop_cancel_request(self, loop_id: str) -> dict[str, Any] | None:
+        path = self.loop_cancel_requests_dir / f"{loop_id}.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def clear_loop_cancel_request(self, loop_id: str) -> None:
+        path = self.loop_cancel_requests_dir / f"{loop_id}.json"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

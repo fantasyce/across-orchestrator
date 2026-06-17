@@ -8,6 +8,7 @@ from . import __version__
 from .agent_card import render_agent_card
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
+from .failures import FAILURE_TYPES
 
 
 def tool_definitions() -> list[dict[str, Any]]:
@@ -225,11 +226,52 @@ def text_result(payload: Any) -> dict[str, Any]:
 
 def agent_loop_schema() -> dict[str, Any]:
     return {
-        "schemaVersion": "0.2",
+        "schemaVersion": "0.3",
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
         "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed", "cancelled"],
         "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
+        "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
+        "events": [
+            "loop.started",
+            "loop.next_action.selected",
+            "loop.cancel_requested",
+            "loop.dispatch.detached",
+            "loop.step.started",
+            "loop.step.heartbeat",
+            "loop.step.completed",
+            "loop.step.cancelled",
+            "loop.step.lease_expired",
+            "loop.approval_required",
+            "loop.action.approved",
+            "loop.action.rejected",
+            "loop.action.failed",
+            "loop.step.retry_requested",
+            "loop.completed",
+            "loop.stopped",
+            "loop.failed",
+            "loop.cancelled",
+        ],
+        "checkpoint": {
+            "execution": {
+                "description": "Optional execution lease block on running, completed, and failed action checkpoints.",
+                "fields": [
+                    "lease_id",
+                    "started_at",
+                    "heartbeat_at",
+                    "lease_seconds",
+                    "lease_expires_at",
+                    "renewal_count",
+                    "completed_at",
+                    "duration_ms",
+                ],
+            }
+        },
+        "context": {
+            "routing": "dispatch context block describing selected_agent, base_agent, source, and optional matched_gate",
+            "heartbeat": "callable lease renewal hook for long-running dispatch adapters",
+            "cancellation": "cooperative token with is_cancelled(), reason(), and raise_if_cancelled() for running dispatch adapters",
+        },
         "memoryPolicy": {
             "provider": "across-context",
             "read": "search active memory before planning",
@@ -241,6 +283,10 @@ def agent_loop_schema() -> dict[str, Any]:
         "metadata": {
             "actionPlan": "optional ordered list of supported action types; duplicates are allowed",
             "action_plan": "snake-case alias for actionPlan",
+            "actionLeaseSeconds": "optional per-loop action lease duration in seconds; default is 300",
+            "action_lease_seconds": "snake-case alias for actionLeaseSeconds",
+            "agentRouting": "optional mapping from action type or failed quality gate to selected dispatch agent",
+            "agent_routing": "snake-case alias for agentRouting",
         },
     }
 

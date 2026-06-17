@@ -6,7 +6,9 @@ from typing import Any
 from .app_grade import APP_GRADE_RELEASE_E2E_ENGINE, build_release_e2e_payload, run_release_e2e_payload
 from .adapters import adapter_for, normalize_agent_adapter_specs
 from .agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultFinalizer, DefaultQualityGate, HostLoopDispatcher
+from .cancellation import ActionCancelledError
 from .evidence import build_evidence_bundle, build_quality
+from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
 from .models import SubTask, Task
 from .planning import ensure_strict_dependency_chain
 from .store import LocalStore
@@ -231,20 +233,26 @@ class OrchestratorRuntime:
             "stopped": "agent_loop.stopped",
             "cancelled": "agent_loop.cancelled",
         }.get(str(loop.status or ""), "agent_loop.updated")
-        self.store.append_event(task.task_id, event_type, {
+        payload = {
             "loop_id": loop.loop_id,
             "status": loop.status,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "error": loop.error,
-        })
+        }
+        if str(loop.status or "") in {"failed", "stopped"}:
+            payload["failure_type"] = failure_type_for_loop(loop)
+        self.store.append_event(task.task_id, event_type, payload)
         current = self.store.load_task(task.task_id)
-        current.metadata.setdefault("agent_loop", {}).update({
+        agent_loop_metadata = {
             "status": loop.status,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "error": loop.error,
-        })
+        }
+        if str(loop.status or "") in {"failed", "stopped"}:
+            agent_loop_metadata["failure_type"] = failure_type_for_loop(loop)
+        current.metadata.setdefault("agent_loop", {}).update(agent_loop_metadata)
         self._sync_task_status_from_loop(current, loop)
         self.store.save_task(current)
         return loop
@@ -265,11 +273,14 @@ class OrchestratorRuntime:
             "completed": "task.completed",
             "cancelled": "task.cancelled",
         }.get(target_status, "task.failed")
-        self.store.append_event(task.task_id, event_type, {
+        payload = {
             "loop_id": getattr(loop, "loop_id", None),
             "loop_status": loop_status,
             "error": getattr(loop, "error", None),
-        })
+        }
+        if target_status == "failed":
+            payload["failure_type"] = failure_type_for_loop(loop)
+        self.store.append_event(task.task_id, event_type, payload)
 
     def _dispatch_task_from_loop(
         self,
@@ -277,6 +288,7 @@ class OrchestratorRuntime:
         *,
         command: list[str] | None = None,
         remediation: bool = False,
+        cancellation: Any | None = None,
     ) -> dict[str, Any]:
         task = self.store.load_task(task_id)
         self._mark_task_started(task)
@@ -306,7 +318,7 @@ class OrchestratorRuntime:
             if remediation and subtask.status not in {"failed", "pending", "running"}:
                 skipped += 1
                 continue
-            self._dispatch_subtask(task, subtask, command=command)
+            self._dispatch_subtask(task, subtask, command=command, cancellation=cancellation)
             completed += 1
             task = self.store.load_task(task.task_id)
         failed = len([item for item in task.subtasks if item.status == "failed"])
@@ -322,7 +334,14 @@ class OrchestratorRuntime:
             "project_root": task.project_root,
         }
 
-    def _dispatch_subtask(self, task: Task, subtask: SubTask, *, command: list[str] | None = None) -> None:
+    def _dispatch_subtask(
+        self,
+        task: Task,
+        subtask: SubTask,
+        *,
+        command: list[str] | None = None,
+        cancellation: Any | None = None,
+    ) -> None:
         subtask.status = "running"
         subtask.attempts += 1
         self.store.append_event(task.task_id, "subtask.started", subtask.__dict__)
@@ -332,14 +351,30 @@ class OrchestratorRuntime:
                 command=command,
                 spec=_agent_adapter_spec_for(task, subtask.agent),
             )
-            result = adapter.run(task, subtask)
+            if cancellation is not None:
+                cancellation.raise_if_cancelled()
+            result = adapter.run(task, subtask, cancellation=cancellation)
+            if cancellation is not None:
+                cancellation.raise_if_cancelled()
+        except ActionCancelledError as exc:
+            subtask.status = "cancelled"
+            subtask.error = exc.reason
+            task.status = "cancelled"
+            self.store.append_event(task.task_id, "subtask.cancelled", subtask.__dict__)
+            self.store.save_task(task)
+            self.store.append_event(task.task_id, "task.cancelled", {"error": exc.reason})
+            raise
         except Exception as exc:
+            failure_type = failure_type_for_exception(exc)
             subtask.status = "failed"
             subtask.error = str(exc)
             task.status = "failed"
-            self.store.append_event(task.task_id, "subtask.failed", subtask.__dict__)
+            self.store.append_event(task.task_id, "subtask.failed", {**subtask.__dict__, "failure_type": failure_type})
             self.store.save_task(task)
-            self.store.append_event(task.task_id, "task.failed", {"error": str(exc)})
+            self.store.append_event(task.task_id, "task.failed", {
+                "error": str(exc),
+                "failure_type": failure_type,
+            })
             raise
         subtask.status = "completed"
         subtask.error = None
@@ -352,10 +387,13 @@ class OrchestratorRuntime:
         status = str(quality.get("status") or "failed")
         task.status = "completed" if status == "passed" else "failed"
         self.store.save_task(task)
+        payload = dict(quality)
+        if status != "passed":
+            payload["failure_type"] = failure_type_for_reason("quality_gate_failed")
         self.store.append_event(
             task.task_id,
             "task.completed" if task.status == "completed" else "task.failed",
-            quality,
+            payload,
         )
         return quality
 
@@ -433,24 +471,28 @@ class OrchestratorRuntime:
 class RuntimeLoopDispatcher:
     """Agent-loop dispatcher that can drive Orchestrator task execution."""
 
+    requires_cancel_ack = True
+
     def __init__(self, runtime: OrchestratorRuntime, *, command: list[str] | None = None):
         self.runtime = runtime
         self.command = command
         self._fallback = HostLoopDispatcher()
 
     def dispatch(self, *, loop: Any, action_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        source_loop = getattr(loop, "_source_loop", loop)
         task_id = _task_id_from_loop_context(loop, context)
         if not task_id:
             if not _loop_declares_runtime_task(loop):
                 return self._fallback.dispatch(loop=loop, action_type=action_type, context=context)
             task = self.runtime._create_task_for_loop(loop)
-            loop.metadata["task_id"] = task.task_id
-            self.runtime.store.save_loop(loop)
+            source_loop.metadata["task_id"] = task.task_id
+            self.runtime.store.save_loop(source_loop)
             task_id = task.task_id
         return self.runtime._dispatch_task_from_loop(
             task_id,
             command=self.command,
             remediation=action_type == "remediation_dispatch",
+            cancellation=context.get("cancellation"),
         )
 
 

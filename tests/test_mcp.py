@@ -130,6 +130,47 @@ class McpTests(unittest.TestCase):
         self.assertIn("cancelled", schema["status"])
         self.assertIn("cancel_agent_loop", schema["controlActions"])
 
+    def test_agent_loop_schema_documents_execution_lease_and_routing_contract(self):
+        from across_orchestrator.mcp import agent_loop_schema
+
+        schema = agent_loop_schema()
+
+        self.assertIn("loop.step.heartbeat", schema["events"])
+        self.assertIn("loop.step.lease_expired", schema["events"])
+        self.assertIn("loop.cancel_requested", schema["events"])
+        self.assertIn("loop.dispatch.detached", schema["events"])
+        self.assertIn("loop.step.cancelled", schema["events"])
+        execution = schema["checkpoint"]["execution"]
+        self.assertEqual(
+            execution["fields"],
+            [
+                "lease_id",
+                "started_at",
+                "heartbeat_at",
+                "lease_seconds",
+                "lease_expires_at",
+                "renewal_count",
+                "completed_at",
+                "duration_ms",
+            ],
+        )
+        self.assertIn("actionLeaseSeconds", schema["metadata"])
+        self.assertIn("agentRouting", schema["metadata"])
+        self.assertEqual(schema["context"]["heartbeat"], "callable lease renewal hook for long-running dispatch adapters")
+        self.assertIn("raise_if_cancelled", schema["context"]["cancellation"])
+        self.assertEqual(
+            schema["failureTypes"],
+            [
+                "adapter_error",
+                "approval_rejected",
+                "environment_blocked",
+                "lease_expired",
+                "max_turns_exceeded",
+                "quality_failed",
+                "timeout",
+            ],
+        )
+
     def test_mcp_agent_loop_tools(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(__file__).resolve().parents[1]

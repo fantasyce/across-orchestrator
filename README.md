@@ -13,14 +13,20 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.8` keeps the durable Agent Loop Runtime host-neutral and synchronizes
-task terminal status with loop terminal status. Cancelled loops now mark their
-tasks `cancelled`, while stopped loops such as approval rejection or max-turn
-exhaustion mark tasks `failed` and keep the loop-specific `stopped` detail in
-metadata and events. The runtime still keeps loop state, step checkpoints,
-approval gates, declarative agent adapters, adapter-backed memory hooks,
-host-supplied action plans, dynamic remediation dispatch, host-owned loop
-controls, and final output evidence inside the plugin so hosts can stay thin.
+`v0.6.9` hardens the durable Agent Loop Runtime for long-running host adapter
+work. Running and approved actions now persist execution leases before adapter
+dispatch, long-running adapters can renew leases through heartbeat hooks, stale
+leases recover deterministically, cancellation reaches cooperative dispatchers,
+command adapters terminate subprocess groups, and detached dispatch guards let
+the loop finish cancelled even when an in-process custom adapter does not
+return. Failed steps, checkpoints, loop events, task events, and task metadata
+now preserve the root `failure_type` for timeout, environment-blocked, quality,
+lease, approval, max-turn, and adapter failures. Metadata-driven `agentRouting`
+also lets hosts route dispatch by action type or latest failed quality gate.
+The runtime still keeps loop state, step checkpoints, approval gates,
+declarative agent adapters, adapter-backed memory hooks, host-supplied action
+plans, dynamic remediation dispatch, host-owned loop controls, and final output
+evidence inside the plugin so hosts can stay thin.
 This release keeps the product-mode path boundary from `v0.6.6` and the generic
 agent adapter descriptors introduced for hosts beyond Across Agents Assistant.
 
@@ -95,7 +101,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.8/across_orchestrator-0.6.8-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.9/across_orchestrator-0.6.9-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -218,6 +224,73 @@ across-orchestrator health --json
 across-orchestrator serve --host 127.0.0.1 --port 8765
 across-orchestrator mcp
 ```
+
+### Agent Loop Lease And Routing Contract
+
+Agent Loop actions persist a running checkpoint before dispatch adapters run.
+Running action checkpoints include an `execution` block with `lease_id`,
+`started_at`, `heartbeat_at`, `lease_seconds`, and `lease_expires_at`. Completed
+and failed action checkpoints keep that same lease and add `completed_at` plus
+`duration_ms`.
+
+Long-running dispatch adapters receive a heartbeat hook in their dispatch
+context and can call it to renew the active lease. Each renewal updates
+`heartbeat_at`, moves `lease_expires_at`, increments the renewal count, and emits
+`loop.step.heartbeat`. If a later run sees an expired running lease, the runtime
+marks the step failed, emits `loop.step.lease_expired`, and fails the loop with
+`action_lease_expired`.
+
+Dispatch adapters also receive a `cancellation` token with `is_cancelled()`,
+`reason()`, and `raise_if_cancelled()`. `loop-cancel` records a
+`loop.cancel_requested` marker outside the loop execution lock, so running
+adapters can observe it while work is still active. When the token is raised, the
+runtime marks the running step `cancelled`, emits `loop.step.cancelled`, clears
+the lease, and finishes the loop as `cancelled`. Command adapters terminate their
+subprocess group before raising the cancellation error.
+
+The dispatch cancellation guard invokes host dispatch adapters behind a managed
+runtime wait loop. This lets the Agent Loop finish as `cancelled` even when a
+custom adapter ignores the cancellation token and never calls heartbeat. The
+guard latches the cancellation token, so the same dispatch context keeps
+reporting cancellation even after durable cancel markers are cleared. If a
+non-runtime host dispatcher stays blocked, the guard emits `loop.dispatch.detached`
+before the Agent Loop records `loop.step.cancelled`. The guard cannot terminate noncooperative in-process Python callbacks; use the command adapter path for
+subprocesses that must be killed by the runtime.
+
+Runtime-backed dispatchers that mutate task or subtask state require a cancel ack
+before the guard returns. This keeps `subtask.cancelled` and `task.cancelled`
+events durable before the Agent Loop publishes `agent_loop.cancelled`.
+
+Failed steps, checkpoints, and failed task/loop events include a stable
+`failure_type` for remediation and UI routing. Current values are
+`adapter_error`, `timeout`, `quality_failed`, `approval_rejected`,
+`lease_expired`, `environment_blocked`, and `max_turns_exceeded`.
+
+Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
+`action_lease_seconds`. Hosts can also set `agentRouting` or `agent_routing` to
+select dispatch agents by action type or by the latest failed quality gate, for
+example routing `remediation_dispatch.browser_e2e` to a browser specialist.
+
+### Agent Loop Post-Release Backlog
+
+The `v0.6.9` Agent Loop runtime covers the release-blocking durability,
+cancellation, routing, and terminal failure propagation semantics. Follow-up
+work is tracked separately from this release:
+
+- Add a loop health summary for hosts and UI surfaces, including last heartbeat,
+  lease remaining time, cancel acknowledgement latency, detached dispatch count,
+  and recent `failure_type` counts.
+- Add opt-in recovery policy metadata that can choose retry, remediation, or
+  human confirmation by `failure_type` without changing the default fail-fast
+  lease-expiry behavior.
+- Extend routing beyond static metadata with a host-provided agent capability
+  registry that can consider quality-gate failures and historical failure types.
+- Standardize structured cancel categories such as `user_cancelled`, `shutdown`,
+  `superseded`, and `timeout_cancelled` while preserving the existing free-form
+  cancel reason text.
+- Add correlation or causality identifiers across
+  `loop.step.started -> loop.step.heartbeat -> loop.step.failed/cancelled ->
+  task event` chains for easier audit reconstruction.
 
 ## HTTP And A2A Card
 

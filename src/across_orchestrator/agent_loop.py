@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 import os
+import threading
 import time
 
+from .cancellation import ActionCancelledError
+from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
 from .models import new_id
 from .store import LocalStore
 
@@ -67,6 +70,46 @@ class NullMemoryProvider:
             },
             "mode": "memory-provider-not-configured",
         }
+
+
+class LoopCancellationToken:
+    """Cooperative cancellation token backed by the durable loop store."""
+
+    def __init__(self, store: LocalStore, loop_id: str):
+        self.store = store
+        self.loop_id = loop_id
+        self._lock = threading.Lock()
+        self._cancel_request: dict[str, Any] | None = None
+
+    def request(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._cancel_request is not None:
+                return dict(self._cancel_request)
+        request = self.store.load_loop_cancel_request(self.loop_id)
+        if request is None:
+            return None
+        return self._latch(request)
+
+    def is_cancelled(self) -> bool:
+        return self.request() is not None
+
+    def reason(self) -> str:
+        request = self.request() or {}
+        return str(request.get("reason") or "cancelled")
+
+    def raise_if_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise ActionCancelledError(self.reason())
+
+    def _latch(self, request: dict[str, Any]) -> dict[str, Any]:
+        clean = dict(request)
+        clean["loop_id"] = self.loop_id
+        clean["reason"] = str(clean.get("reason") or "cancelled")
+        clean.setdefault("requested_at", time.time())
+        with self._lock:
+            if self._cancel_request is None:
+                self._cancel_request = clean
+            return dict(self._cancel_request)
 
 
 class HostLoopDispatcher:
@@ -349,7 +392,14 @@ class AgentLoopRuntime:
     def _run_loop_locked(self, loop_id: str) -> LoopRun:
         loop = self.get_loop(loop_id)
         if loop.status in TERMINAL_LOOP_STATUSES:
+            self.store.clear_loop_cancel_request(loop.loop_id)
             return loop
+        cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
+        if cancel_request:
+            return self._cancel_loop_state(loop, str(cancel_request.get("reason") or "cancelled"))
+        incomplete = self._recover_or_hold_running_action(loop)
+        if incomplete is not None:
+            return incomplete
         if self._pending_approval_step(loop) is not None:
             loop.status = "awaiting_approval"
             self.store.save_loop(loop)
@@ -359,6 +409,9 @@ class AgentLoopRuntime:
         self.store.save_loop(loop)
 
         while True:
+            cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
+            if cancel_request:
+                return self._cancel_loop_state(loop, str(cancel_request.get("reason") or "cancelled"))
             action_type = self._select_next_action(loop)
             if action_type is None:
                 if loop.status in TERMINAL_LOOP_STATUSES:
@@ -380,6 +433,7 @@ class AgentLoopRuntime:
                 self.store.save_loop(loop)
                 self.store.append_loop_event(loop.loop_id, "loop.stopped", {
                     "reason": loop.error,
+                    "failure_type": failure_type_for_reason(loop.error),
                     "turn_count": loop.turn_count,
                     "max_turns": loop.max_turns,
                 })
@@ -392,10 +446,15 @@ class AgentLoopRuntime:
             })
             try:
                 step = self._build_step(loop, action_type)
+            except ActionCancelledError as exc:
+                self._mark_running_step_cancelled(loop, action_type, exc.reason)
+                return self._cancel_loop_state(loop, exc.reason)
             except Exception as exc:
-                failed_step = self._build_failed_step(loop, action_type, exc)
+                failed_step = self._mark_running_step_failed(loop, action_type, exc)
+                if failed_step is None:
+                    failed_step = self._build_failed_step(loop, action_type, exc)
+                    loop.steps.append(failed_step)
                 loop.turn_count = failed_step.turn
-                loop.steps.append(failed_step)
                 loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
                 self.store.save_loop(loop)
                 self.store.append_loop_event(loop.loop_id, "loop.step.failed", asdict(failed_step))
@@ -410,7 +469,8 @@ class AgentLoopRuntime:
                     },
                 )
             loop.turn_count = step.turn
-            loop.steps.append(step)
+            if not any(item.step_id == step.step_id for item in loop.steps):
+                loop.steps.append(step)
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
             if step.status == "waiting_approval":
                 loop.status = "awaiting_approval"
@@ -425,29 +485,29 @@ class AgentLoopRuntime:
             return self._approve_action_locked(loop_id, action_id)
 
     def cancel_loop(self, loop_id: str, reason: str | None = None) -> LoopRun:
-        with self.store.loop_lock(loop_id):
+        loop = self.get_loop(loop_id)
+        if loop.status in TERMINAL_LOOP_STATUSES:
+            self.store.clear_loop_cancel_request(loop.loop_id)
+            return loop
+        cancel_reason = reason or "cancelled"
+        request = self.store.request_loop_cancel(loop_id, cancel_reason)
+        self.store.append_loop_event(loop_id, "loop.cancel_requested", {
+            "reason": cancel_reason,
+            "requested_at": request["requested_at"],
+        })
+        try:
+            lock = self.store.loop_lock(loop_id, blocking=False)
+            with lock:
+                loop = self.get_loop(loop_id)
+                if loop.status in TERMINAL_LOOP_STATUSES:
+                    self.store.clear_loop_cancel_request(loop.loop_id)
+                    return loop
+                return self._cancel_loop_state(loop, cancel_reason)
+        except BlockingIOError:
             loop = self.get_loop(loop_id)
-            if loop.status in TERMINAL_LOOP_STATUSES:
-                return loop
-            cancel_reason = reason or "cancelled"
-            for step in loop.steps:
-                if step.status == "waiting_approval" and step.action.approval_status == "pending":
-                    step.action.approval_status = "cancelled"
-                    step.status = "cancelled"
-                    step.observation = LoopObservation.new("cancelled", {
-                        "approval": "cancelled",
-                        "reason": cancel_reason,
-                        "action_type": step.action.type,
-                    })
-                    step.updated_at = time.time()
-            loop.status = "cancelled"
-            loop.error = cancel_reason
-            self.store.save_loop(loop)
-            self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
-                "reason": loop.error,
-                "turn_count": loop.turn_count,
-                "checkpoint_count": loop.checkpoint_count,
-            })
+            if loop.status not in TERMINAL_LOOP_STATUSES:
+                loop.status = "cancelled"
+                loop.error = cancel_reason
             return loop
 
     def _approve_action_locked(self, loop_id: str, action_id: str) -> LoopRun:
@@ -460,26 +520,27 @@ class AgentLoopRuntime:
             if step.status != "waiting_approval":
                 return loop
             step.action.approval_status = "approved"
+            self._mark_step_running(loop, step, {"approval": "approved", "action_type": step.action.type})
             try:
                 observation_payload = self._execute_action(loop, step.action.type)
-            except Exception as exc:
-                step.status = "failed"
-                step.observation = LoopObservation.new("failed", {
-                    "approval": "approved",
-                    "action_type": step.action.type,
-                    "error": str(exc),
-                })
-                step.checkpoint = self._checkpoint(
+            except ActionCancelledError as exc:
+                self._mark_running_step_cancelled(
                     loop,
                     step.action.type,
-                    step.turn,
-                    step.observation.payload,
-                    status="failed",
+                    exc.reason,
+                    {"approval": "approved"},
                 )
-                step.updated_at = time.time()
+                return self._cancel_loop_state(loop, exc.reason)
+            except Exception as exc:
+                failed_step = self._mark_running_step_failed(
+                    loop,
+                    step.action.type,
+                    exc,
+                    {"approval": "approved"},
+                ) or step
                 loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
                 self.store.save_loop(loop)
-                self.store.append_loop_event(loop.loop_id, "loop.action.failed", asdict(step))
+                self.store.append_loop_event(loop.loop_id, "loop.action.failed", asdict(failed_step))
                 return self._fail_loop(
                     loop,
                     reason=f"{step.action.type}_failed",
@@ -491,7 +552,13 @@ class AgentLoopRuntime:
                 **observation_payload,
                 "approval": "approved",
             })
-            step.checkpoint = self._checkpoint(loop, step.action.type, step.turn, step.observation.payload)
+            step.checkpoint = self._checkpoint(
+                loop,
+                step.action.type,
+                step.turn,
+                step.observation.payload,
+                execution=self._complete_execution(step),
+            )
             step.updated_at = time.time()
             loop.status = "running"
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
@@ -532,6 +599,7 @@ class AgentLoopRuntime:
                 step.observation = LoopObservation.new("rejected", {
                     "approval": "rejected",
                     "reason": reason or "rejected",
+                    "failure_type": failure_type_for_reason("approval_rejected"),
                     "action_type": step.action.type,
                 })
                 step.updated_at = time.time()
@@ -541,6 +609,7 @@ class AgentLoopRuntime:
                 self.store.append_loop_event(loop.loop_id, "loop.action.rejected", asdict(step))
                 self.store.append_loop_event(loop.loop_id, "loop.stopped", {
                     "reason": loop.error,
+                    "failure_type": failure_type_for_reason(loop.error),
                     "action_id": action_id,
                     "rejection_reason": reason or "rejected",
                 })
@@ -582,13 +651,60 @@ class AgentLoopRuntime:
         error: str,
         payload: dict[str, Any] | None = None,
     ) -> LoopRun:
+        event_payload = dict(payload or {})
         loop.status = "failed"
         loop.error = reason
+        failure_type = str(event_payload.get("failure_type") or "") or failure_type_for_loop(loop, reason)
+        event_payload["failure_type"] = failure_type
         self.store.save_loop(loop)
         self.store.append_loop_event(loop.loop_id, "loop.failed", {
             "reason": reason,
             "error": error,
-            **(payload or {}),
+            **event_payload,
+        })
+        return loop
+
+    def _cancel_loop_state(self, loop: LoopRun, reason: str) -> LoopRun:
+        cancel_reason = reason or "cancelled"
+        cancelled_steps: list[LoopStep] = []
+        for step in loop.steps:
+            if step.status == "cancelled" and step.observation.status == "cancelled":
+                cancelled_steps.append(step)
+            elif step.status == "running":
+                payload = {"action_type": step.action.type, "reason": cancel_reason}
+                step.status = "cancelled"
+                step.observation = LoopObservation.new("cancelled", payload)
+                step.checkpoint = self._checkpoint(
+                    loop,
+                    step.action.type,
+                    step.turn,
+                    payload,
+                    status="cancelled",
+                    execution=self._complete_execution(step),
+                )
+                step.updated_at = time.time()
+                cancelled_steps.append(step)
+            elif step.status == "waiting_approval" and step.action.approval_status == "pending":
+                step.action.approval_status = "cancelled"
+                step.status = "cancelled"
+                step.observation = LoopObservation.new("cancelled", {
+                    "approval": "cancelled",
+                    "reason": cancel_reason,
+                    "action_type": step.action.type,
+                })
+                step.updated_at = time.time()
+                cancelled_steps.append(step)
+        loop.status = "cancelled"
+        loop.error = cancel_reason
+        loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+        self.store.save_loop(loop)
+        self.store.clear_loop_cancel_request(loop.loop_id)
+        for step in cancelled_steps:
+            self.store.append_loop_event(loop.loop_id, "loop.step.cancelled", step.to_dict())
+        self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
+            "reason": loop.error,
+            "turn_count": loop.turn_count,
+            "checkpoint_count": loop.checkpoint_count,
         })
         return loop
 
@@ -606,6 +722,7 @@ class AgentLoopRuntime:
             self.store.save_loop(loop)
             self.store.append_loop_event(loop.loop_id, "loop.failed", {
                 "reason": loop.error,
+                "failure_type": failure_type_for_reason(loop.error),
                 "failed_quality": latest_quality.observation.payload,
             })
             return None
@@ -668,18 +785,30 @@ class AgentLoopRuntime:
                 observation=LoopObservation.new("pending", {"approval": "required"}),
                 checkpoint={},
             )
-        observation_payload = self._execute_action(loop, action_type)
-        if action_type == "final_output":
-            loop.final_output = observation_payload.get("final_output")
-        return LoopStep.new(
+        step = LoopStep.new(
             loop_id=loop.loop_id,
             turn=turn,
             phase=self._phase_for(action_type),
-            status="completed",
+            status="running",
             action=action,
-            observation=LoopObservation.new("completed", observation_payload),
-            checkpoint=self._checkpoint(loop, action_type, turn, observation_payload),
+            observation=LoopObservation.new("running", {"action_type": action_type}),
+            checkpoint={},
         )
+        self._mark_step_running(loop, step)
+        observation_payload = self._execute_action(loop, action_type)
+        if action_type == "final_output":
+            loop.final_output = observation_payload.get("final_output")
+        step.status = "completed"
+        step.observation = LoopObservation.new("completed", observation_payload)
+        step.checkpoint = self._checkpoint(
+            loop,
+            action_type,
+            turn,
+            observation_payload,
+            execution=self._complete_execution(step),
+        )
+        step.updated_at = time.time()
+        return step
 
     def _build_failed_step(self, loop: LoopRun, action_type: str, exc: Exception) -> LoopStep:
         turn = loop.turn_count + 1
@@ -691,6 +820,7 @@ class AgentLoopRuntime:
         observation_payload = {
             "action_type": action_type,
             "error": str(exc),
+            "failure_type": failure_type_for_exception(exc),
         }
         return LoopStep.new(
             loop_id=loop.loop_id,
@@ -726,9 +856,11 @@ class AgentLoopRuntime:
         if action_type == "memory_search":
             return {"query": loop.goal, "provider": loop.memory_policy.get("provider", "across-context")}
         if action_type == "task_dispatch":
-            return {"agent": loop.agent, "project_root": loop.project_root, "host_adapter": "provided-by-host"}
+            routing = self._agent_routing(loop, action_type)
+            return {"agent": routing["selected_agent"], "project_root": loop.project_root, "host_adapter": "provided-by-host"}
         if action_type == "remediation_dispatch":
-            return {"agent": loop.agent, "project_root": loop.project_root, "host_adapter": "provided-by-host", "mode": "remediation"}
+            routing = self._agent_routing(loop, action_type)
+            return {"agent": routing["selected_agent"], "project_root": loop.project_root, "host_adapter": "provided-by-host", "mode": "remediation"}
         if action_type == "quality_gate":
             return {"required": ["artifact_integrity", "evidence_bundle", "memory_policy"]}
         if action_type == "memory_write_candidate":
@@ -747,7 +879,23 @@ class AgentLoopRuntime:
                 status=str(loop.memory_policy.get("readStatus") or "active"),
             )
         if action_type in {"task_dispatch", "remediation_dispatch"}:
-            return self.adapters.dispatcher.dispatch(loop=loop, action_type=action_type, context=context)
+            routing = self._agent_routing(loop, action_type)
+            dispatch_loop = replace(loop, agent=routing["selected_agent"])
+            setattr(dispatch_loop, "_source_loop", loop)
+            cancellation = LoopCancellationToken(self.store, loop.loop_id)
+            cancellation.raise_if_cancelled()
+            dispatch_context = {**context, "routing": routing, "cancellation": cancellation}
+            lease = self._latest_running_execution(loop, action_type)
+            if lease:
+                dispatch_context["lease"] = lease
+                dispatch_context["heartbeat"] = lambda: self._renew_running_step_lease(loop, action_type)
+            result = self._dispatch_with_cancellation_guard(
+                loop=dispatch_loop,
+                action_type=action_type,
+                context=dispatch_context,
+            )
+            cancellation.raise_if_cancelled()
+            return result
         if action_type == "quality_gate":
             return self.adapters.quality_gate.evaluate(loop=loop, context=context)
         if action_type == "memory_write_candidate":
@@ -760,6 +908,112 @@ class AgentLoopRuntime:
             return self.adapters.finalizer.finalize(loop=loop, context=context)
         return {}
 
+    def _dispatch_with_cancellation_guard(
+        self,
+        *,
+        loop: LoopRun,
+        action_type: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        outcome: dict[str, Any] = {}
+        done = threading.Event()
+
+        def call_dispatcher() -> None:
+            try:
+                outcome["result"] = self.adapters.dispatcher.dispatch(
+                    loop=loop,
+                    action_type=action_type,
+                    context=context,
+                )
+            except Exception as exc:
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(
+            target=call_dispatcher,
+            name=f"across-loop-dispatch-{loop.loop_id}-{action_type}",
+            daemon=True,
+        )
+        worker.start()
+        cancellation = context.get("cancellation")
+        while not done.wait(0.05):
+            if cancellation is not None:
+                try:
+                    cancellation.raise_if_cancelled()
+                except ActionCancelledError as exc:
+                    if self._dispatcher_requires_cancel_ack():
+                        done.wait()
+                        if "error" in outcome:
+                            raise outcome["error"]
+                        raise ActionCancelledError(exc.reason)
+                    self.store.append_loop_event(loop.loop_id, "loop.dispatch.detached", {
+                        "action_type": action_type,
+                        "reason": exc.reason,
+                        "dispatcher": self.adapters.dispatcher.__class__.__name__,
+                    })
+                    raise
+        if "error" in outcome:
+            raise outcome["error"]
+        return dict(outcome.get("result") or {})
+
+    def _dispatcher_requires_cancel_ack(self) -> bool:
+        return bool(getattr(self.adapters.dispatcher, "requires_cancel_ack", False))
+
+    def _agent_routing(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+        selected = loop.agent
+        source = "loop.agent"
+        matched_gate: str | None = None
+        routing = loop.metadata.get("agentRouting", loop.metadata.get("agent_routing"))
+        if isinstance(routing, dict):
+            route = routing.get(action_type, routing.get("default"))
+            if isinstance(route, str):
+                candidate = self._clean_agent_id(route)
+                if candidate:
+                    selected = candidate
+                    source = f"metadata.agentRouting.{action_type}"
+            elif isinstance(route, dict):
+                for gate in self._latest_failed_gates(loop):
+                    candidate = self._clean_agent_id(route.get(gate))
+                    if candidate:
+                        selected = candidate
+                        matched_gate = gate
+                        source = f"metadata.agentRouting.{action_type}.{gate}"
+                        break
+                if matched_gate is None:
+                    candidate = self._clean_agent_id(route.get("default"))
+                    if candidate:
+                        selected = candidate
+                        source = f"metadata.agentRouting.{action_type}.default"
+        result = {
+            "action_type": action_type,
+            "base_agent": loop.agent,
+            "selected_agent": selected,
+            "source": source,
+        }
+        if matched_gate:
+            result["matched_gate"] = matched_gate
+        return result
+
+    def _latest_failed_gates(self, loop: LoopRun) -> list[str]:
+        latest_quality = self._latest_step(loop, "quality_gate")
+        if latest_quality is None:
+            return []
+        payload = latest_quality.observation.payload
+        failed = payload.get("failed_gates") or payload.get("failedGates") or []
+        if not isinstance(failed, list):
+            return []
+        gates: list[str] = []
+        for item in failed:
+            value = str(item or "").strip()
+            if value:
+                gates.append(value)
+        return gates
+
+    def _clean_agent_id(self, value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
     def _checkpoint(
         self,
         loop: LoopRun,
@@ -768,9 +1022,10 @@ class AgentLoopRuntime:
         observation_payload: dict[str, Any] | None = None,
         *,
         status: str = "completed",
+        execution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         latest = observation_payload or (loop.steps[-1].observation.payload if loop.steps else {})
-        return {
+        checkpoint = {
             "loop_id": loop.loop_id,
             "turn": turn,
             "action_type": action_type,
@@ -778,6 +1033,228 @@ class AgentLoopRuntime:
             "adapter": self._adapter_name(action_type),
             "observation_status": latest.get("quality") or latest.get("dispatch") or latest.get("status") or status,
         }
+        if latest.get("failure_type"):
+            checkpoint["failure_type"] = latest["failure_type"]
+        if execution:
+            checkpoint["execution"] = execution
+        return checkpoint
+
+    def _recover_or_hold_running_action(self, loop: LoopRun) -> LoopRun | None:
+        step = self._latest_running_step(loop)
+        if step is None:
+            return None
+        execution = self._execution_from_checkpoint(step)
+        lease_expires_at = self._float_or_none(execution.get("lease_expires_at"))
+        if lease_expires_at is None or lease_expires_at > time.time():
+            loop.status = "running"
+            self.store.save_loop(loop)
+            return loop
+
+        observation_payload = {
+            "action_type": step.action.type,
+            "error": "action_lease_expired",
+            "failure_type": failure_type_for_reason("action_lease_expired"),
+            "lease_id": execution.get("lease_id"),
+            "lease_expires_at": lease_expires_at,
+        }
+        step.status = "failed"
+        step.observation = LoopObservation.new("failed", observation_payload)
+        step.checkpoint = self._checkpoint(
+            loop,
+            step.action.type,
+            step.turn,
+            observation_payload,
+            status="failed",
+            execution=self._complete_execution(step),
+        )
+        step.updated_at = time.time()
+        loop.turn_count = max(loop.turn_count, step.turn)
+        loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.step.lease_expired", step.to_dict())
+        return self._fail_loop(
+            loop,
+            reason="action_lease_expired",
+            error="action_lease_expired",
+            payload={
+                "step_id": step.step_id,
+                "action_type": step.action.type,
+                "lease_id": execution.get("lease_id"),
+                "lease_expires_at": lease_expires_at,
+            },
+        )
+
+    def _latest_running_step(self, loop: LoopRun) -> LoopStep | None:
+        for step in reversed(loop.steps):
+            if step.status == "running":
+                return step
+        return None
+
+    def _latest_running_execution(self, loop: LoopRun, action_type: str) -> dict[str, Any] | None:
+        step = self._latest_running_step(loop)
+        if step is None or step.action.type != action_type:
+            return None
+        execution = self._execution_from_checkpoint(step)
+        return execution or None
+
+    def _mark_step_running(
+        self,
+        loop: LoopRun,
+        step: LoopStep,
+        observation_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = observation_payload or {"action_type": step.action.type}
+        execution = self._start_execution_lease(loop)
+        step.status = "running"
+        step.observation = LoopObservation.new("running", payload)
+        step.checkpoint = self._checkpoint(
+            loop,
+            step.action.type,
+            step.turn,
+            {"status": "running", **payload},
+            status="running",
+            execution=execution,
+        )
+        step.updated_at = time.time()
+        loop.status = "running"
+        loop.turn_count = max(loop.turn_count, step.turn)
+        if not any(item.step_id == step.step_id for item in loop.steps):
+            loop.steps.append(step)
+        loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.step.started", step.to_dict())
+        self.store.append_loop_event(loop.loop_id, "loop.step.heartbeat", {
+            "step_id": step.step_id,
+            "action_type": step.action.type,
+            "lease_id": execution["lease_id"],
+            "heartbeat_at": execution["heartbeat_at"],
+            "lease_expires_at": execution["lease_expires_at"],
+            "renewal_count": execution["renewal_count"],
+        })
+        return execution
+
+    def _renew_running_step_lease(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+        cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
+        if cancel_request:
+            raise ActionCancelledError(str(cancel_request.get("reason") or "cancelled"))
+        step = self._latest_running_step(loop)
+        if step is None or step.action.type != action_type:
+            raise RuntimeError(f"No running action lease for {action_type}")
+        execution = self._execution_from_checkpoint(step)
+        if not execution:
+            raise RuntimeError(f"No execution lease for {action_type}")
+        now = time.time()
+        lease_seconds = self._action_lease_seconds(loop)
+        execution["heartbeat_at"] = now
+        execution["lease_seconds"] = lease_seconds
+        execution["lease_expires_at"] = now + lease_seconds
+        execution["renewal_count"] = int(execution.get("renewal_count") or 0) + 1
+        step.checkpoint["execution"] = execution
+        step.updated_at = now
+        self.store.save_loop(loop)
+        payload = {
+            "step_id": step.step_id,
+            "action_type": step.action.type,
+            "lease_id": execution["lease_id"],
+            "heartbeat_at": execution["heartbeat_at"],
+            "lease_expires_at": execution["lease_expires_at"],
+            "renewal_count": execution["renewal_count"],
+        }
+        self.store.append_loop_event(loop.loop_id, "loop.step.heartbeat", payload)
+        return payload
+
+    def _mark_running_step_failed(
+        self,
+        loop: LoopRun,
+        action_type: str,
+        exc: Exception,
+        observation_payload: dict[str, Any] | None = None,
+    ) -> LoopStep | None:
+        step = self._latest_running_step(loop)
+        if step is None or step.action.type != action_type:
+            return None
+        observation_payload = {
+            "action_type": action_type,
+            **(observation_payload or {}),
+            "error": str(exc),
+            "failure_type": failure_type_for_exception(exc),
+        }
+        step.status = "failed"
+        step.observation = LoopObservation.new("failed", observation_payload)
+        step.checkpoint = self._checkpoint(
+            loop,
+            action_type,
+            step.turn,
+            observation_payload,
+            status="failed",
+            execution=self._complete_execution(step),
+        )
+        step.updated_at = time.time()
+        return step
+
+    def _mark_running_step_cancelled(
+        self,
+        loop: LoopRun,
+        action_type: str,
+        reason: str,
+        observation_payload: dict[str, Any] | None = None,
+    ) -> LoopStep | None:
+        step = self._latest_running_step(loop)
+        if step is None or step.action.type != action_type:
+            return None
+        payload = {
+            "action_type": action_type,
+            **(observation_payload or {}),
+            "reason": reason or "cancelled",
+        }
+        step.status = "cancelled"
+        step.observation = LoopObservation.new("cancelled", payload)
+        step.checkpoint = self._checkpoint(
+            loop,
+            action_type,
+            step.turn,
+            payload,
+            status="cancelled",
+            execution=self._complete_execution(step),
+        )
+        step.updated_at = time.time()
+        return step
+
+    def _start_execution_lease(self, loop: LoopRun) -> dict[str, Any]:
+        started_at = time.time()
+        lease_seconds = self._action_lease_seconds(loop)
+        return {
+            "lease_id": new_id("lease"),
+            "started_at": started_at,
+            "heartbeat_at": started_at,
+            "lease_seconds": lease_seconds,
+            "lease_expires_at": started_at + lease_seconds,
+            "renewal_count": 0,
+        }
+
+    def _complete_execution(self, step: LoopStep) -> dict[str, Any]:
+        execution = self._execution_from_checkpoint(step)
+        completed_at = time.time()
+        started_at = self._float_or_none(execution.get("started_at")) or step.created_at
+        execution["completed_at"] = completed_at
+        execution["duration_ms"] = max(0, int(round((completed_at - started_at) * 1000)))
+        return execution
+
+    def _execution_from_checkpoint(self, step: LoopStep) -> dict[str, Any]:
+        return dict(step.checkpoint.get("execution") or {})
+
+    def _action_lease_seconds(self, loop: LoopRun) -> float:
+        raw = loop.metadata.get("actionLeaseSeconds", loop.metadata.get("action_lease_seconds", 300))
+        try:
+            return max(0.001, float(raw))
+        except (TypeError, ValueError):
+            return 300.0
+
+    def _float_or_none(self, value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _host_action_plan(self, loop: LoopRun) -> list[str]:
         raw_plan = loop.metadata.get("actionPlan")

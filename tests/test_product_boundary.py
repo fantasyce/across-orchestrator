@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import tomllib
@@ -15,6 +16,21 @@ def test_distribution_only_packages_across_orchestrator_namespace():
 
     assert package_find["where"] == ["src"]
     assert package_find["include"] == ["across_orchestrator*"]
+
+
+def test_development_package_metadata_tracks_distribution_version():
+    from across_orchestrator import __version__
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
+
+    expected_version = pyproject["project"]["version"]
+
+    assert __version__ == expected_version
+    assert package["version"] == expected_version
+    assert package_lock["version"] == expected_version
+    assert package_lock["packages"][""]["version"] == expected_version
 
 
 def test_across_orchestrator_production_code_does_not_import_aaa_internals():
@@ -58,6 +74,31 @@ def test_readme_describes_host_neutral_product_not_migration_snapshot():
     ]
 
     assert [phrase for phrase in forbidden_phrases if phrase in readme] == []
+
+
+def test_readme_documents_agent_loop_lease_and_routing_contract():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    required_phrases = [
+        "actionLeaseSeconds",
+        "agentRouting",
+        "loop.step.heartbeat",
+        "loop.step.lease_expired",
+        "loop.cancel_requested",
+        "loop.step.cancelled",
+        "cancellation",
+        "dispatch cancellation guard",
+        "loop.dispatch.detached",
+        "cancel ack",
+        "failure_type",
+        "adapter_error",
+        "quality_failed",
+        "lease_expired",
+        "cannot terminate noncooperative in-process Python callbacks",
+        "lease_expires_at",
+    ]
+
+    assert [phrase for phrase in required_phrases if phrase not in readme] == []
 
 
 def test_app_grade_payload_is_host_conformance_not_aaa_specific(tmp_path):

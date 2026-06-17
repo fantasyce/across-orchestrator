@@ -3,16 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import os
+import signal
 import subprocess
+import time
 from typing import Any
 
+from .cancellation import ActionCancelledError
 from .models import SubTask, Task
 
 
 class AgentAdapter:
     name = "base"
 
-    def run(self, task: Task, subtask: SubTask) -> dict[str, str]:
+    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, str]:
         raise NotImplementedError
 
 
@@ -20,10 +23,41 @@ class AdapterMissingError(RuntimeError):
     pass
 
 
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()
+    try:
+        process.communicate(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.kill()
+    process.communicate(timeout=2)
+
+
 class DemoAgentAdapter(AgentAdapter):
     name = "demo"
 
-    def run(self, task: Task, subtask: SubTask) -> dict[str, str]:
+    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, str]:
+        if cancellation is not None:
+            cancellation.raise_if_cancelled()
         target = Path(task.project_root) / subtask.path
         target.parent.mkdir(parents=True, exist_ok=True)
         content = (
@@ -44,23 +78,38 @@ class CommandAgentAdapter(AgentAdapter):
             raise ValueError("command adapter requires a command")
         self.command = command
 
-    def run(self, task: Task, subtask: SubTask) -> dict[str, str]:
+    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, str]:
         env = os.environ.copy()
         env["ACROSS_TASK_JSON"] = json.dumps(task.to_dict(), sort_keys=True)
         env["ACROSS_SUBTASK_JSON"] = json.dumps(subtask.__dict__, sort_keys=True)
-        completed = subprocess.run(
+        process = subprocess.Popen(
             self.command,
             cwd=task.project_root,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=300,
-            check=False,
+            start_new_session=True,
         )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "command adapter failed")
-        return {"path": subtask.path, "message": completed.stdout.strip()}
+        stdout = ""
+        stderr = ""
+        deadline = time.monotonic() + 300
+        while True:
+            if cancellation is not None and cancellation.is_cancelled():
+                _terminate_process_tree(process)
+                raise ActionCancelledError(cancellation.reason())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(process)
+                raise subprocess.TimeoutExpired(self.command, 300, output=stdout, stderr=stderr)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode != 0:
+            raise RuntimeError((stderr or "").strip() or (stdout or "").strip() or "command adapter failed")
+        return {"path": subtask.path, "message": (stdout or "").strip()}
 
 
 class ReferenceDeliveryAdapter(AgentAdapter):
@@ -69,7 +118,9 @@ class ReferenceDeliveryAdapter(AgentAdapter):
     def __init__(self, agent: str):
         self.agent = agent or "reference"
 
-    def run(self, task: Task, subtask: SubTask) -> dict[str, str]:
+    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, str]:
+        if cancellation is not None:
+            cancellation.raise_if_cancelled()
         target = Path(task.project_root) / subtask.path
         target.parent.mkdir(parents=True, exist_ok=True)
         task.metadata["execution_mode"] = "reference_delivery"
