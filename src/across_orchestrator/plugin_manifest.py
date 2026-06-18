@@ -154,6 +154,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "loopCancel": "POST /loops/{loopId}/cancel",
                 "loopRetryStep": "POST /loops/{loopId}/steps/{stepId}/retry",
                 "loopStatus": "GET /loops/{loopId}",
+                "loopHealth": "GET /loops/{loopId}/health",
                 "loopEvents": "GET /loops/{loopId}/events",
             },
             "mcp": {
@@ -168,6 +169,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                     "cancelAgentLoop": "cancel_agent_loop",
                     "retryAgentLoopStep": "retry_agent_loop_step",
                     "getAgentLoop": "get_agent_loop",
+                    "getAgentLoopHealth": "get_agent_loop_health",
                     "getAgentLoopEvents": "get_agent_loop_events",
                 },
             },

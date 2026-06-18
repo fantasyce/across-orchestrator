@@ -209,12 +209,64 @@ class HttpTests(unittest.TestCase):
         status = self.get(f"/loops/{loop_id}")
         self.assertEqual(status["final_output"], "Agent loop completed for: Run platform loop over hosted agents")
 
+        health = self.get(f"/loops/{loop_id}/health")
+        self.assertEqual(health["loop_id"], loop_id)
+        self.assertEqual(health["status"], "completed")
+        self.assertEqual(health["executable_actions"], [])
+        self.assertFalse(health["lease"]["active"])
+
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
 
         stream = self.get_text(f"/loops/{loop_id}/events/stream")
         self.assertIn("event: loop.completed", stream)
         self.assertIn('"loop_id":', stream)
+
+    def test_http_agent_loop_persists_all_loop_created_subtasks(self):
+        loop = self.post(
+            "/loops",
+            {
+                "goal": "Run a staged delivery loop",
+                "projectRoot": str(self.project),
+                "agent": "owner",
+                "maxTurns": 8,
+                "memoryPolicy": {"read": False, "writeCandidates": False},
+                "metadata": {
+                    "deliverables": ["README.md", "web/index.html", "web/app.js"],
+                    "strictDependency": True,
+                    "subtasks": [
+                        {"id": "docs", "goal": "Write README", "path": "README.md", "agent": "demo", "wave": 1},
+                        {
+                            "id": "html",
+                            "goal": "Build static HTML",
+                            "path": "web/index.html",
+                            "agent": "demo",
+                            "wave": 2,
+                            "dependencies": ["docs"],
+                        },
+                        {
+                            "id": "js",
+                            "goal": "Add browser JS",
+                            "path": "web/app.js",
+                            "agent": "demo",
+                            "wave": 3,
+                            "dependencies": ["html"],
+                        },
+                    ],
+                },
+            },
+        )
+
+        completed = self.post(f"/loops/{loop['loop_id']}/run", {})
+        dispatch_step = next(step for step in completed["steps"] if step["action"]["type"] == "task_dispatch")
+        task_id = dispatch_step["observation"]["payload"]["task_id"]
+        task = self.get(f"/tasks/{task_id}")
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual([item["status"] for item in task["subtasks"]], ["completed", "completed", "completed"])
+        self.assertTrue((self.project / "README.md").exists())
+        self.assertTrue((self.project / "web/index.html").exists())
+        self.assertTrue((self.project / "web/app.js").exists())
 
     def test_http_rejects_invalid_loop_action_plan_with_400(self):
         status, payload = self.post_error(

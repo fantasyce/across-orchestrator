@@ -385,6 +385,35 @@ class AgentLoopRuntime:
     def list_loop_events(self, loop_id: str) -> list[dict[str, Any]]:
         return self.store.list_loop_events(loop_id)
 
+    def get_loop_health(self, loop_id: str) -> dict[str, Any]:
+        loop = self.get_loop(loop_id)
+        events = self.store.list_loop_events(loop_id)
+        now = time.time()
+        pending_approval = self._pending_approval_step(loop)
+        current_action_type, current_step_id = self._current_action(loop)
+        failure_counts = self._recent_failure_type_counts(events)
+        cancel_request = self.store.load_loop_cancel_request(loop_id)
+        last_event_at = events[-1]["timestamp"] if events else loop.created_at
+
+        return {
+            "schema_version": "0.1",
+            "loop_id": loop.loop_id,
+            "status": loop.status,
+            "agent": loop.agent,
+            "turn_count": loop.turn_count,
+            "checkpoint_count": loop.checkpoint_count,
+            "current_action_type": current_action_type,
+            "current_step_id": current_step_id,
+            "pending_approval": self._pending_approval_payload(pending_approval),
+            "lease": self._lease_health(loop, events, now),
+            "last_event_at": last_event_at,
+            "detached_dispatch_count": sum(1 for event in events if event.get("type") == "loop.dispatch.detached"),
+            "recent_failure_types": failure_counts,
+            "executable_actions": self._executable_actions(loop, pending_approval),
+            "cancellation_requested": cancel_request is not None,
+            "cancel_ack_pending": cancel_request is not None and loop.status not in TERMINAL_LOOP_STATUSES,
+        }
+
     def run_loop(self, loop_id: str) -> LoopRun:
         with self.store.loop_lock(loop_id):
             return self._run_loop_locked(loop_id)
@@ -708,7 +737,105 @@ class AgentLoopRuntime:
         })
         return loop
 
-    def _select_next_action(self, loop: LoopRun) -> str | None:
+    def _current_action(self, loop: LoopRun) -> tuple[str | None, str | None]:
+        running = self._latest_running_step(loop)
+        if running is not None:
+            return running.action.type, running.step_id
+        pending = self._pending_approval_step(loop)
+        if pending is not None:
+            return pending.action.type, pending.step_id
+        if loop.status in TERMINAL_LOOP_STATUSES:
+            return None, None
+        return self._peek_next_action(loop), None
+
+    def _pending_approval_payload(self, step: LoopStep | None) -> dict[str, Any] | None:
+        if step is None:
+            return None
+        return {
+            "step_id": step.step_id,
+            "action_id": step.action.action_id,
+            "action_type": step.action.type,
+            "title": step.action.title,
+            "approval_status": step.action.approval_status,
+        }
+
+    def _lease_health(self, loop: LoopRun, events: list[dict[str, Any]], now: float) -> dict[str, Any]:
+        running = self._latest_running_step(loop)
+        execution = self._execution_from_checkpoint(running) if running is not None else {}
+        latest_heartbeat = self._latest_event_payload(events, "loop.step.heartbeat")
+        heartbeat_at = self._float_or_none(execution.get("heartbeat_at"))
+        if heartbeat_at is None:
+            heartbeat_at = self._float_or_none(latest_heartbeat.get("heartbeat_at")) if latest_heartbeat else None
+        lease_seconds = self._float_or_none(execution.get("lease_seconds"))
+        if lease_seconds is None:
+            lease_seconds = self._action_lease_seconds(loop)
+        expires_at = self._float_or_none(execution.get("lease_expires_at"))
+        active = running is not None and loop.status == "running"
+        remaining = max(0.0, expires_at - now) if active and expires_at is not None else None
+        return {
+            "active": active,
+            "lease_id": execution.get("lease_id"),
+            "lease_seconds": lease_seconds,
+            "heartbeat_at": heartbeat_at,
+            "expires_at": expires_at,
+            "remaining_seconds": remaining,
+            "expired": bool(active and expires_at is not None and expires_at <= now),
+            "renewal_count": int(execution.get("renewal_count") or 0) if execution else 0,
+        }
+
+    def _latest_event_payload(self, events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            if event.get("type") == event_type and isinstance(event.get("payload"), dict):
+                return event["payload"]
+        return None
+
+    def _recent_failure_type_counts(self, events: list[dict[str, Any]], *, limit: int = 10) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        collected = 0
+        for event in reversed(events):
+            failure_type = self._failure_type_from_event(event)
+            if not failure_type:
+                continue
+            counts[failure_type] = counts.get(failure_type, 0) + 1
+            collected += 1
+            if collected >= limit:
+                break
+        return counts
+
+    def _failure_type_from_event(self, event: dict[str, Any]) -> str | None:
+        event_type = str(event.get("type") or "")
+        if event_type not in {"loop.step.failed", "loop.step.lease_expired", "loop.action.failed", "loop.failed", "loop.stopped"}:
+            return None
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        direct = payload.get("failure_type")
+        if direct:
+            return str(direct)
+        observation = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
+        observation_payload = observation.get("payload") if isinstance(observation.get("payload"), dict) else {}
+        if observation_payload.get("failure_type"):
+            return str(observation_payload["failure_type"])
+        checkpoint = payload.get("checkpoint") if isinstance(payload.get("checkpoint"), dict) else {}
+        if checkpoint.get("failure_type"):
+            return str(checkpoint["failure_type"])
+        reason = payload.get("reason") or payload.get("error")
+        return failure_type_for_reason(str(reason)) if reason else None
+
+    def _executable_actions(self, loop: LoopRun, pending_approval: LoopStep | None) -> list[str]:
+        if loop.status in {"failed", "stopped"}:
+            return ["retry"] if loop.steps else []
+        if loop.status in {"completed", "cancelled"}:
+            return []
+        if pending_approval is not None or loop.status == "awaiting_approval":
+            actions = ["approve", "reject", "cancel"]
+            if loop.steps:
+                actions.append("retry")
+            return actions
+        actions = ["run", "cancel"]
+        if loop.steps:
+            actions.append("retry")
+        return actions
+
+    def _peek_next_action(self, loop: LoopRun) -> str | None:
         latest_quality = self._latest_step(loop, "quality_gate")
         latest_dispatch_index = self._latest_action_index(loop, {"task_dispatch", "remediation_dispatch"})
         latest_quality_index = self._latest_action_index(loop, {"quality_gate"})
@@ -717,14 +844,6 @@ class AgentLoopRuntime:
         if latest_quality and self._quality_failed(latest_quality):
             if self._action_count(loop, "remediation_dispatch") < self._max_remediation_turns(loop):
                 return "remediation_dispatch"
-            loop.status = "failed"
-            loop.error = "quality_gate_failed"
-            self.store.save_loop(loop)
-            self.store.append_loop_event(loop.loop_id, "loop.failed", {
-                "reason": loop.error,
-                "failure_type": failure_type_for_reason(loop.error),
-                "failed_quality": latest_quality.observation.payload,
-            })
             return None
 
         action_plan = self._host_action_plan(loop)
@@ -744,6 +863,23 @@ class AgentLoopRuntime:
             return "memory_write_candidate"
         if not self._has_action(loop, "final_output"):
             return "final_output"
+        return None
+
+    def _select_next_action(self, loop: LoopRun) -> str | None:
+        action = self._peek_next_action(loop)
+        if action is not None:
+            return action
+        latest_quality = self._latest_step(loop, "quality_gate")
+        if latest_quality and self._quality_failed(latest_quality):
+            loop.status = "failed"
+            loop.error = "quality_gate_failed"
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.failed", {
+                "reason": loop.error,
+                "failure_type": failure_type_for_reason(loop.error),
+                "failed_quality": latest_quality.observation.payload,
+            })
+            return None
         return None
 
     def _next_action_reason(self, loop: LoopRun, action_type: str) -> str:

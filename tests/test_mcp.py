@@ -85,6 +85,7 @@ class McpTests(unittest.TestCase):
             self.assertIn("cancel_agent_loop", tool_names)
             self.assertIn("reject_agent_loop_action", tool_names)
             self.assertIn("retry_agent_loop_step", tool_names)
+            self.assertIn("get_agent_loop_health", tool_names)
             submit_tool = next(tool for tool in responses[1]["result"]["tools"] if tool["name"] == "submit_task")
             submit_properties = submit_tool["inputSchema"]["properties"]
             self.assertIn("agentAdapters", submit_properties)
@@ -140,6 +141,8 @@ class McpTests(unittest.TestCase):
         self.assertIn("loop.cancel_requested", schema["events"])
         self.assertIn("loop.dispatch.detached", schema["events"])
         self.assertIn("loop.step.cancelled", schema["events"])
+        self.assertIn("get_agent_loop_health", schema["inspectionActions"])
+        self.assertIn("healthSummary", schema)
         execution = schema["checkpoint"]["execution"]
         self.assertEqual(
             execution["fields"],
@@ -216,6 +219,7 @@ class McpTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 rpc(2, "tools/call", {"name": "run_agent_loop", "arguments": {"loopId": loop["loop_id"]}}),
                 rpc(3, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(4, "tools/call", {"name": "get_agent_loop_health", "arguments": {"loopId": loop["loop_id"]}}),
             ]
             process2 = subprocess.run(
                 [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
@@ -234,6 +238,9 @@ class McpTests(unittest.TestCase):
             self.assertEqual(completed["status"], "completed")
             events = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertIn("loop.completed", [event["type"] for event in events])
+            health = json.loads(second[3]["result"]["content"][0]["text"])
+            self.assertEqual(health["status"], "completed")
+            self.assertEqual(health["loop_id"], loop["loop_id"])
 
     def test_mcp_agent_loop_reports_invalid_action_plan(self):
         with tempfile.TemporaryDirectory() as tempdir:
