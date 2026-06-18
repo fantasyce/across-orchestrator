@@ -437,6 +437,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("task.cancelled", event_types)
         self.assertNotIn("agent_loop.completed", event_types)
 
+    def test_run_task_is_idempotent_after_agent_loop_cancellation(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Do not rerun a cancelled task",
+            project_root=str(self.project),
+            deliverables=["cancel-idempotent.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.approval_policy = {"requireApprovalFor": ["task_dispatch"]}
+        runtime.store.save_loop(loop)
+        waiting = runtime.run_task(task.task_id)
+        runtime.loop_runtime.cancel_loop(loop.loop_id, reason="user cancel")
+        first = runtime.run_task(waiting.task_id)
+        first_events = runtime.list_events(task.task_id)
+
+        second = runtime.run_task(first.task_id)
+        second_events = runtime.list_events(task.task_id)
+
+        self.assertEqual(first.status, "cancelled")
+        self.assertEqual(second.status, "cancelled")
+        self.assertEqual(
+            [event["type"] for event in second_events],
+            [event["type"] for event in first_events],
+        )
+
     def test_cancel_running_command_adapter_terminates_subprocess(self):
         from across_orchestrator.runtime import OrchestratorRuntime
 
@@ -526,6 +554,60 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("agent_loop.stopped", event_types)
         self.assertIn("task.failed", event_types)
         self.assertNotIn("agent_loop.completed", event_types)
+
+    def test_run_task_is_idempotent_after_rejected_agent_loop_failure(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Do not rerun a rejected task",
+            project_root=str(self.project),
+            deliverables=["reject-idempotent.md"],
+            agent="demo",
+        )
+        loop = runtime.loop_runtime.get_loop(task.metadata["agent_loop"]["loop_id"])
+        loop.approval_policy = {"requireApprovalFor": ["task_dispatch"]}
+        runtime.store.save_loop(loop)
+        waiting = runtime.run_task(task.task_id)
+        action_id = runtime.loop_runtime.get_loop(loop.loop_id).steps[-1].action.action_id
+        runtime.loop_runtime.reject_action(loop.loop_id, action_id, reason="not approved")
+        first = runtime.run_task(waiting.task_id)
+        first_events = runtime.list_events(task.task_id)
+
+        second = runtime.run_task(first.task_id)
+        second_events = runtime.list_events(task.task_id)
+
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(second.status, "failed")
+        self.assertEqual(
+            [event["type"] for event in second_events],
+            [event["type"] for event in first_events],
+        )
+
+    def test_run_task_normalizes_legacy_stopped_task_status_without_new_events(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Normalize a legacy stopped task",
+            project_root=str(self.project),
+            deliverables=["legacy-stopped.md"],
+            agent="demo",
+        )
+        task.status = "stopped"
+        runtime.store.save_task(task)
+        first_events = runtime.list_events(task.task_id)
+
+        loaded = runtime.get_task(task.task_id)
+        result = runtime.run_task(task.task_id)
+        second_events = runtime.list_events(task.task_id)
+
+        self.assertEqual(loaded.status, "failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            [event["type"] for event in second_events],
+            [event["type"] for event in first_events],
+        )
 
     def test_run_task_syncs_max_turns_agent_loop_stop_to_failed_task_status(self):
         from across_orchestrator.runtime import OrchestratorRuntime

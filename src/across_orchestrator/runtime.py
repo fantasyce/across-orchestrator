@@ -14,6 +14,9 @@ from .planning import ensure_strict_dependency_chain
 from .store import LocalStore
 
 
+TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
+
+
 class OrchestratorRuntime:
     def __init__(self, store: LocalStore | None = None):
         self.store = store or LocalStore()
@@ -162,6 +165,8 @@ class OrchestratorRuntime:
 
     def run_task(self, task_id: str, command: list[str] | None = None) -> Task:
         task = self.store.load_task(task_id)
+        if task.status in TERMINAL_TASK_STATUSES:
+            return task
         self._mark_task_started(task)
         loop = self._run_task_loop(task, command=command)
         if loop is not None:
@@ -215,7 +220,7 @@ class OrchestratorRuntime:
         return result
 
     def _mark_task_started(self, task: Task) -> None:
-        if task.status not in {"running", "completed"}:
+        if task.status not in {"running", *TERMINAL_TASK_STATUSES}:
             task.status = "running"
             self.store.save_task(task)
             self.store.append_event(task.task_id, "task.started", {"agent": task.agent})
