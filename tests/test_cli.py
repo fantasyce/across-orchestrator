@@ -274,6 +274,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(json.loads(status.stdout)["final_output"], "Agent loop completed for: Coordinate platform agents")
 
+        health = self.run_cli("loop-health", loop["loop_id"], "--json")
+        self.assertEqual(health.returncode, 0, health.stderr)
+        health_payload = json.loads(health.stdout)
+        self.assertEqual(health_payload["status"], "completed")
+        self.assertEqual(health_payload["loop_id"], loop["loop_id"])
+        self.assertEqual(health_payload["recent_failure_types"], {})
+
         events = self.run_cli("loop-events", loop["loop_id"], "--json")
         self.assertEqual(events.returncode, 0, events.stderr)
         self.assertIn("loop.completed", [event["type"] for event in json.loads(events.stdout)])

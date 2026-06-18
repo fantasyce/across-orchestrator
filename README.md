@@ -13,17 +13,19 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.10` makes task execution idempotent after terminal Agent Loop outcomes.
-Cancelled, rejected, and failed tasks now remain terminal when `run_task()` is
-called again, and older persisted task rows with the former `stopped` task
-status are normalized to `failed` without emitting duplicate events. The durable
-Agent Loop Runtime still persists execution leases before adapter dispatch,
-allows long-running adapters to renew leases through heartbeat hooks, recovers
-stale leases deterministically, routes cancellation to cooperative dispatchers,
-terminates command adapter subprocess groups, and preserves root `failure_type`
-metadata across failed steps, checkpoints, loop events, task events, and task
-metadata. Metadata-driven `agentRouting` also lets hosts route dispatch by
-action type or latest failed quality gate.
+`v0.6.11` adds a read-only Agent Loop health surface for hosts that need to
+inspect durable loop state without mutating it. CLI, HTTP, MCP, the plugin
+manifest, and the public agent card now expose loop health summaries with the
+current action, pending approval, execution lease, detached dispatch count,
+recent `failure_type` counts, cancellation state, and executable controls.
+The durable Agent Loop Runtime still persists execution leases before adapter
+dispatch, allows long-running adapters to renew leases through heartbeat hooks,
+recovers stale leases deterministically, routes cancellation to cooperative
+dispatchers, terminates command adapter subprocess groups, preserves root
+`failure_type` metadata across failed steps, checkpoints, loop events, task
+events, and task metadata, and keeps terminal task execution idempotent.
+Metadata-driven `agentRouting` also lets hosts route dispatch by action type or
+latest failed quality gate.
 The runtime still keeps loop state, step checkpoints, approval gates,
 declarative agent adapters, adapter-backed memory hooks, host-supplied action
 plans, dynamic remediation dispatch, host-owned loop controls, and final output
@@ -102,7 +104,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.10/across_orchestrator-0.6.10-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.11/across_orchestrator-0.6.11-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -272,16 +274,15 @@ Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
 select dispatch agents by action type or by the latest failed quality gate, for
 example routing `remediation_dispatch.browser_e2e` to a browser specialist.
 
-### Agent Loop Post-Release Backlog
+### Agent Loop Follow-Up Backlog
 
-The `v0.6.10` Agent Loop runtime covers the release-blocking durability,
-cancellation, routing, terminal failure propagation, and terminal task
-idempotency semantics. Follow-up
-work is tracked separately from this release:
+The `v0.6.11` Agent Loop runtime covers the release-blocking durability,
+cancellation, routing, terminal failure propagation, terminal task idempotency,
+and read-only loop health inspection semantics. Follow-up work is tracked
+separately from this release:
 
-- Add a loop health summary for hosts and UI surfaces, including last heartbeat,
-  lease remaining time, cancel acknowledgement latency, detached dispatch count,
-  and recent `failure_type` counts.
+- Add richer host UI affordances on top of loop health, such as health detail
+  popovers, stale markers, and lease refresh cadence.
 - Add opt-in recovery policy metadata that can choose retry, remediation, or
   human confirmation by `failure_type` without changing the default fail-fast
   lease-expiry behavior.
@@ -322,6 +323,7 @@ Endpoints:
 - `POST /loops/{loop_id}/cancel`
 - `POST /loops/{loop_id}/steps/{step_id}/retry`
 - `GET /loops/{loop_id}`
+- `GET /loops/{loop_id}/health`
 - `GET /loops/{loop_id}/events`
 - `GET /loops/{loop_id}/events/stream`
 
@@ -342,6 +344,7 @@ The MCP server exposes:
 - `cancel_agent_loop`
 - `retry_agent_loop_step`
 - `get_agent_loop`
+- `get_agent_loop_health`
 - `get_agent_loop_events`
 
 It also exposes resources:

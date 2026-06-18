@@ -62,6 +62,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[0] == "loops":
                 self.respond(self.loop_runtime.get_loop(parts[1]).to_dict())
                 return
+            if len(parts) == 3 and parts[0] == "loops" and parts[2] == "health":
+                self.respond(self.loop_runtime.get_loop_health(parts[1]))
+                return
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "events":
                 self.respond(self.loop_runtime.list_loop_events(parts[1]))
                 return

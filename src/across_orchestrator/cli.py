@@ -118,6 +118,10 @@ def build_parser() -> argparse.ArgumentParser:
     loop_status.add_argument("loop_id")
     loop_status.add_argument("--json", action="store_true")
 
+    loop_health = sub.add_parser("loop-health", help="Show agent loop health summary")
+    loop_health.add_argument("loop_id")
+    loop_health.add_argument("--json", action="store_true")
+
     loop_events = sub.add_parser("loop-events", help="Show agent loop events")
     loop_events.add_argument("loop_id")
     loop_events.add_argument("--json", action="store_true")
@@ -268,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "loop-status":
         _print(loop_runtime.get_loop(args.loop_id).to_dict(), args.json)
+        return 0
+
+    if args.command == "loop-health":
+        _print(loop_runtime.get_loop_health(args.loop_id), args.json)
         return 0
 
     if args.command == "loop-events":

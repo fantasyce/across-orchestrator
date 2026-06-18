@@ -103,6 +103,44 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         self.assertIn("loop.step.completed", event_types)
         self.assertIn("loop.completed", event_types)
 
+        health = runtime.get_loop_health(loop.loop_id)
+        self.assertEqual(health["schema_version"], "0.1")
+        self.assertEqual(health["loop_id"], loop.loop_id)
+        self.assertEqual(health["status"], "completed")
+        self.assertIsNone(health["current_action_type"])
+        self.assertEqual(health["detached_dispatch_count"], 0)
+        self.assertEqual(health["recent_failure_types"], {})
+        self.assertEqual(health["executable_actions"], [])
+        self.assertFalse(health["lease"]["active"])
+        self.assertIsNotNone(health["lease"]["heartbeat_at"])
+
+    def test_loop_health_reports_pending_approval_and_available_actions(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Inspect health for approval",
+            project_root=str(self.project),
+            approval_policy={"requireApprovalFor": ["task_dispatch"]},
+            max_turns=8,
+        )
+
+        pending = runtime.get_loop_health(loop.loop_id)
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["current_action_type"], "memory_search")
+        self.assertEqual(pending["executable_actions"], ["run", "cancel"])
+
+        waiting = runtime.run_loop(loop.loop_id)
+        health = runtime.get_loop_health(loop.loop_id)
+
+        self.assertEqual(health["status"], "awaiting_approval")
+        self.assertEqual(health["current_action_type"], "task_dispatch")
+        self.assertEqual(health["current_step_id"], waiting.steps[-1].step_id)
+        self.assertEqual(health["pending_approval"]["action_id"], waiting.steps[-1].action.action_id)
+        self.assertEqual(health["pending_approval"]["action_type"], "task_dispatch")
+        self.assertEqual(health["executable_actions"], ["approve", "reject", "cancel", "retry"])
+        self.assertFalse(health["lease"]["active"])
+
     def test_loop_honors_host_supplied_action_plan(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
 

@@ -316,7 +316,16 @@ class OrchestratorRuntime:
 
         completed = 0
         skipped = 0
-        for subtask in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id)):
+        subtask_ids = [
+            item.subtask_id
+            for item in sorted(task.subtasks, key=lambda item: (item.wave, item.priority, item.subtask_id))
+        ]
+        for subtask_id in subtask_ids:
+            task = self.store.load_task(task.task_id)
+            subtask = next((item for item in task.subtasks if item.subtask_id == subtask_id), None)
+            if subtask is None:
+                skipped += 1
+                continue
             if subtask.status == "completed":
                 skipped += 1
                 continue

@@ -173,6 +173,15 @@ def tool_definitions() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "get_agent_loop_health",
+            "description": "Fetch a read-only health summary for a durable agent loop.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
+        {
             "name": "get_agent_loop_events",
             "description": "Fetch durable agent loop events.",
             "inputSchema": {
@@ -232,6 +241,7 @@ def agent_loop_schema() -> dict[str, Any]:
         "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
         "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
+        "inspectionActions": ["get_agent_loop", "get_agent_loop_health", "get_agent_loop_events"],
         "events": [
             "loop.started",
             "loop.next_action.selected",
@@ -276,6 +286,19 @@ def agent_loop_schema() -> dict[str, Any]:
             "provider": "across-context",
             "read": "search active memory before planning",
             "writeCandidates": "write durable summaries as pending candidates only",
+        },
+        "healthSummary": {
+            "description": "Read-only loop health snapshot; computing it must not mutate loop state or append events.",
+            "fields": [
+                "status",
+                "current_action_type",
+                "pending_approval",
+                "lease",
+                "detached_dispatch_count",
+                "recent_failure_types",
+                "executable_actions",
+                "cancellation_requested",
+            ],
         },
         "approvalPolicy": {
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
@@ -344,6 +367,8 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return loop_runtime.retry_step(arguments["loopId"], arguments["stepId"]).to_dict()
     if name == "get_agent_loop":
         return loop_runtime.get_loop(arguments["loopId"]).to_dict()
+    if name == "get_agent_loop_health":
+        return loop_runtime.get_loop_health(arguments["loopId"])
     if name == "get_agent_loop_events":
         return loop_runtime.list_loop_events(arguments["loopId"])
     raise ValueError(f"Unknown tool: {name}")

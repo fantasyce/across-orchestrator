@@ -58,6 +58,7 @@ def render_agent_card() -> dict:
                 "loopReject": "/loops/{loop_id}/actions/{action_id}/reject",
                 "loopCancel": "/loops/{loop_id}/cancel",
                 "loopRetryStep": "/loops/{loop_id}/steps/{step_id}/retry",
+                "loopHealth": "/loops/{loop_id}/health",
             },
         },
         "skills": [
