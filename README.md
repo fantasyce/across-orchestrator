@@ -13,16 +13,17 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.9` hardens the durable Agent Loop Runtime for long-running host adapter
-work. Running and approved actions now persist execution leases before adapter
-dispatch, long-running adapters can renew leases through heartbeat hooks, stale
-leases recover deterministically, cancellation reaches cooperative dispatchers,
-command adapters terminate subprocess groups, and detached dispatch guards let
-the loop finish cancelled even when an in-process custom adapter does not
-return. Failed steps, checkpoints, loop events, task events, and task metadata
-now preserve the root `failure_type` for timeout, environment-blocked, quality,
-lease, approval, max-turn, and adapter failures. Metadata-driven `agentRouting`
-also lets hosts route dispatch by action type or latest failed quality gate.
+`v0.6.10` makes task execution idempotent after terminal Agent Loop outcomes.
+Cancelled, rejected, and failed tasks now remain terminal when `run_task()` is
+called again, and older persisted task rows with the former `stopped` task
+status are normalized to `failed` without emitting duplicate events. The durable
+Agent Loop Runtime still persists execution leases before adapter dispatch,
+allows long-running adapters to renew leases through heartbeat hooks, recovers
+stale leases deterministically, routes cancellation to cooperative dispatchers,
+terminates command adapter subprocess groups, and preserves root `failure_type`
+metadata across failed steps, checkpoints, loop events, task events, and task
+metadata. Metadata-driven `agentRouting` also lets hosts route dispatch by
+action type or latest failed quality gate.
 The runtime still keeps loop state, step checkpoints, approval gates,
 declarative agent adapters, adapter-backed memory hooks, host-supplied action
 plans, dynamic remediation dispatch, host-owned loop controls, and final output
@@ -101,7 +102,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.9/across_orchestrator-0.6.9-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.10/across_orchestrator-0.6.10-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -273,8 +274,9 @@ example routing `remediation_dispatch.browser_e2e` to a browser specialist.
 
 ### Agent Loop Post-Release Backlog
 
-The `v0.6.9` Agent Loop runtime covers the release-blocking durability,
-cancellation, routing, and terminal failure propagation semantics. Follow-up
+The `v0.6.10` Agent Loop runtime covers the release-blocking durability,
+cancellation, routing, terminal failure propagation, and terminal task
+idempotency semantics. Follow-up
 work is tracked separately from this release:
 
 - Add a loop health summary for hosts and UI surfaces, including last heartbeat,

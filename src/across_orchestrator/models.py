@@ -7,6 +7,11 @@ import time
 import uuid
 
 
+LEGACY_TASK_STATUS_ALIASES = {
+    "stopped": "failed",
+}
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
@@ -161,11 +166,12 @@ class Task:
             item.setdefault("dependencies", [])
             item.setdefault("priority", 1)
             subtasks.append(SubTask(**{key: value for key, value in item.items() if key in subtask_fields}))
+        status = str(data.get("status", "pending") or "pending")
         task = cls(
             task_id=data["task_id"],
             goal=data["goal"],
             project_root=data["project_root"],
-            status=data.get("status", "pending"),
+            status=LEGACY_TASK_STATUS_ALIASES.get(status, status),
             agent=data.get("agent", "demo"),
             subtasks=subtasks,
             contract=data.get("contract", {}),
