@@ -141,10 +141,16 @@ class HttpTests(unittest.TestCase):
 
         events = self.get(f"/tasks/{task_id}/events")
         self.assertIn("task.completed", [event["type"] for event in events])
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertTrue(all(event["event_id"].startswith("task-event-") for event in events))
+        self.assertTrue(all(event["correlation_id"] for event in events))
 
         stream = request.urlopen(self.base + f"/tasks/{task_id}/events/stream", timeout=5)
         body = stream.read().decode("utf-8")
         self.assertIn("event: task.completed", body)
+        self.assertIn('"event_id":', body)
+        self.assertIn('"sequence":', body)
+        self.assertIn('"correlation_id":', body)
 
     def test_http_declared_agent_adapter_executes_arbitrary_agent(self):
         agent_script = self.project / "http_agent_adapter.py"
@@ -217,9 +223,17 @@ class HttpTests(unittest.TestCase):
 
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertTrue(all(event["event_id"].startswith("loop-event-") for event in events))
+        self.assertTrue(all(event["correlation_id"] for event in events))
+        heartbeat = next(event for event in events if event["type"] == "loop.step.heartbeat")
+        self.assertEqual(heartbeat["correlation_id"], f"step:{heartbeat['step_id']}")
 
         stream = self.get_text(f"/loops/{loop_id}/events/stream")
         self.assertIn("event: loop.completed", stream)
+        self.assertIn('"event_id":', stream)
+        self.assertIn('"sequence":', stream)
+        self.assertIn('"correlation_id":', stream)
         self.assertIn('"loop_id":', stream)
 
     def test_http_agent_loop_persists_all_loop_created_subtasks(self):

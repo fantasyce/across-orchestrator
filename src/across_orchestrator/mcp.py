@@ -264,6 +264,31 @@ def agent_loop_schema() -> dict[str, Any]:
             "loop.failed",
             "loop.cancelled",
         ],
+        "eventMetadata": {
+            "description": (
+                "Every newly appended loop event carries stable audit metadata in addition to "
+                "type, loop_id, timestamp, and payload; task events emitted from bound tasks "
+                "carry the same event_id, sequence, and correlation_id contract."
+            ),
+            "fields": [
+                "event_id",
+                "sequence",
+                "correlation_id",
+                "step_id",
+                "action_id",
+                "task_id",
+                "causation_id",
+            ],
+            "correlationId": (
+                "step:{step_id}, action:{action_id}, task:{task_id}, or loop:{loop_id}, "
+                "in that precedence order."
+            ),
+            "sequence": "Monotonic per-loop append order for durable JSONL events.",
+            "causationId": (
+                "Optional passthrough when a future producer includes causation_id, causationId, "
+                "parent_event_id, or parentEventId in the payload."
+            ),
+        },
         "checkpoint": {
             "execution": {
                 "description": "Optional execution lease block on running, completed, and failed action checkpoints.",

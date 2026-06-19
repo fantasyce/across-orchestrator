@@ -55,6 +55,12 @@ class RuntimeTests(unittest.TestCase):
             "subtask.created",
             "subtask.created",
         ])
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertTrue(all(event["event_id"].startswith("task-event-") for event in events))
+        self.assertTrue(all(event["loop_id"] == task.metadata["agent_loop"]["loop_id"] for event in events))
+        self.assertEqual(events[0]["correlation_id"], f"loop:{task.metadata['agent_loop']['loop_id']}")
+        subtask_events = [event for event in events if event["type"] == "subtask.created"]
+        self.assertTrue(all(event["correlation_id"].startswith("subtask:") for event in subtask_events))
 
     def test_submit_task_preserves_explicit_serial_plan(self):
         from across_orchestrator.runtime import OrchestratorRuntime

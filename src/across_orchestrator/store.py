@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import time
+import uuid
 
 from .models import Task
 from .paths import component_data_home, expand_user, safe_runtime_override
@@ -56,15 +57,24 @@ class LocalStore:
         return sorted(path.stem for path in self.tasks_dir.glob("task-*.json"))
 
     def append_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        event = {
-            "type": event_type,
-            "task_id": task_id,
-            "timestamp": time.time(),
-            "payload": payload or {},
-        }
         path = self.events_dir / f"{task_id}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True) + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                sequence = sum(1 for line in handle if line.strip()) + 1
+                event = _build_task_event(
+                    task_id,
+                    event_type,
+                    payload,
+                    sequence=sequence,
+                    loop_id=self._task_loop_id(task_id),
+                )
+                handle.seek(0, os.SEEK_END)
+                handle.write(json.dumps(event, sort_keys=True) + "\n")
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return event
 
     def list_events(self, task_id: str) -> list[dict[str, Any]]:
@@ -104,16 +114,33 @@ class LocalStore:
     def list_loop_ids(self) -> list[str]:
         return sorted(path.stem for path in self.loops_dir.glob("loop-*.json"))
 
+    def _task_loop_id(self, task_id: str) -> str | None:
+        path = self.tasks_dir / f"{task_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        metadata = data.get("metadata") if isinstance(data, Mapping) else None
+        agent_loop = metadata.get("agent_loop") if isinstance(metadata, Mapping) else None
+        if not isinstance(agent_loop, Mapping):
+            return None
+        return _clean_string(agent_loop.get("loop_id"))
+
     def append_loop_event(self, loop_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        event = {
-            "type": event_type,
-            "loop_id": loop_id,
-            "timestamp": time.time(),
-            "payload": payload or {},
-        }
         path = self.loop_events_dir / f"{loop_id}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True) + "\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                sequence = sum(1 for line in handle if line.strip()) + 1
+                event = _build_loop_event(loop_id, event_type, payload, sequence=sequence)
+                handle.seek(0, os.SEEK_END)
+                handle.write(json.dumps(event, sort_keys=True) + "\n")
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return event
 
     def list_loop_events(self, loop_id: str) -> list[dict[str, Any]]:
@@ -156,3 +183,107 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         tmp_path = Path(handle.name)
         handle.write(text)
     os.replace(tmp_path, path)
+
+
+def _build_task_event(
+    task_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None,
+    *,
+    sequence: int,
+    loop_id: str | None = None,
+) -> dict[str, Any]:
+    event_payload = dict(payload or {})
+    payload_loop_id = _first_string_for_key(event_payload, ("loop_id", "loopId"))
+    subtask_id = _first_string_for_key(event_payload, ("subtask_id", "subtaskId"))
+    effective_loop_id = loop_id or payload_loop_id
+    event: dict[str, Any] = {
+        "event_id": f"task-event-{uuid.uuid4().hex}",
+        "sequence": sequence,
+        "type": event_type,
+        "task_id": task_id,
+        "timestamp": time.time(),
+        "payload": event_payload,
+    }
+    if effective_loop_id:
+        event["loop_id"] = effective_loop_id
+    if subtask_id:
+        event["subtask_id"] = subtask_id
+        event["correlation_id"] = f"subtask:{subtask_id}"
+    elif effective_loop_id:
+        event["correlation_id"] = f"loop:{effective_loop_id}"
+    else:
+        event["correlation_id"] = f"task:{task_id}"
+    causation_id = _first_string_for_key(
+        event_payload,
+        ("causation_id", "causationId", "parent_event_id", "parentEventId"),
+    )
+    if causation_id:
+        event["causation_id"] = causation_id
+    return event
+
+
+def _build_loop_event(
+    loop_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None,
+    *,
+    sequence: int,
+) -> dict[str, Any]:
+    event_payload = dict(payload or {})
+    event: dict[str, Any] = {
+        "event_id": f"loop-event-{uuid.uuid4().hex}",
+        "sequence": sequence,
+        "type": event_type,
+        "loop_id": loop_id,
+        "timestamp": time.time(),
+        "payload": event_payload,
+    }
+    step_id = _first_string_for_key(event_payload, ("step_id",))
+    action_id = _first_string_for_key(event_payload, ("action_id",))
+    task_id = _first_string_for_key(event_payload, ("task_id", "taskId"))
+    if step_id:
+        event["step_id"] = step_id
+        event["correlation_id"] = f"step:{step_id}"
+    elif action_id:
+        event["correlation_id"] = f"action:{action_id}"
+    elif task_id:
+        event["correlation_id"] = f"task:{task_id}"
+    else:
+        event["correlation_id"] = f"loop:{loop_id}"
+    if action_id:
+        event["action_id"] = action_id
+    if task_id:
+        event["task_id"] = task_id
+    causation_id = _first_string_for_key(
+        event_payload,
+        ("causation_id", "causationId", "parent_event_id", "parentEventId"),
+    )
+    if causation_id:
+        event["causation_id"] = causation_id
+    return event
+
+
+def _first_string_for_key(value: Any, keys: tuple[str, ...]) -> str | None:
+    if isinstance(value, Mapping):
+        for key in keys:
+            found = _clean_string(value.get(key))
+            if found:
+                return found
+        for nested in value.values():
+            found = _first_string_for_key(nested, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _first_string_for_key(item, keys)
+            if found:
+                return found
+    return None
+
+
+def _clean_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
