@@ -13,9 +13,14 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.15` adds compact Agent Loop evidence summaries for hosts that need
+`v0.6.16` promotes compact Agent Loop evidence into host release evidence. CLI,
+HTTP, and MCP evidence summaries now include `host_release_evidence` with
+readiness, checks, risks, and next actions derived from durable event audit,
+routing, recovery, memory-candidate, and cancellation signals.
+
+`v0.6.15` added compact Agent Loop evidence summaries for hosts that need
 release or audit views without parsing full event streams. CLI, HTTP, and MCP
-now expose routing outcomes, recovery decisions, memory-candidate counts,
+expose routing outcomes, recovery decisions, memory-candidate counts,
 cancellation category, and event audit coverage without raw transcripts, memory
 text, logs, or stack traces.
 
@@ -127,7 +132,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.15/across_orchestrator-0.6.15-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.16/across_orchestrator-0.6.16-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -373,7 +378,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.6.15` Agent Loop runtime covers the release-blocking durability,
+The `v0.6.16` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
