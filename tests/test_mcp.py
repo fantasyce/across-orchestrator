@@ -156,6 +156,8 @@ class McpTests(unittest.TestCase):
         )
         self.assertIn("cancellation_category", schema["healthSummary"]["fields"])
         self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
+        self.assertIn("host_release_evidence", schema["evidenceSummary"]["fields"])
+        self.assertEqual(schema["evidenceSummary"]["hostReleaseEvidence"]["readiness"], ["ready", "attention", "blocked"])
         self.assertEqual(schema["memoryPolicy"]["candidateSchema"], "agent-loop-memory-candidate/1.0")
         self.assertIn("failure_types", schema["memoryPolicy"]["candidateFields"])
         execution = schema["checkpoint"]["execution"]

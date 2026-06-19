@@ -613,6 +613,15 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(summary["recovery"]["decisions"][0]["recovery_action"], "retry")
         self.assertEqual(summary["recovery"]["decisions"][0]["failure_type"], "adapter_error")
         self.assertEqual(summary["recovery"]["recovered_steps"][0]["next_action"], "task_dispatch")
+        release_evidence = summary["host_release_evidence"]
+        self.assertEqual(release_evidence["readiness"], "attention")
+        self.assertEqual(
+            [check["id"] for check in release_evidence["checks"]],
+            ["event_audit", "capability_routing", "recovery", "memory_candidates", "cancellation"],
+        )
+        recovery_check = next(check for check in release_evidence["checks"] if check["id"] == "recovery")
+        self.assertEqual(recovery_check["status"], "attention")
+        self.assertIn("recovery_applied", [risk["id"] for risk in release_evidence["risks"]])
 
     def test_recovery_policy_stops_after_retry_budget_is_exhausted(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -651,6 +660,11 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(len(recovered), 1)
         self.assertFalse(decisions[-1]["payload"]["applied"])
         self.assertEqual(decisions[-1]["payload"]["blocked_reason"], "max_retries_exceeded")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["host_release_evidence"]["readiness"], "blocked")
+        recovery_check = next(check for check in summary["host_release_evidence"]["checks"] if check["id"] == "recovery")
+        self.assertEqual(recovery_check["status"], "blocked")
+        self.assertIn("recovery_blocked", [risk["id"] for risk in summary["host_release_evidence"]["risks"]])
 
     def test_recovery_policy_schedules_remediation_for_quality_failure(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -1121,6 +1135,14 @@ class AgentLoopV2Tests(unittest.TestCase):
         )
         self.assertEqual(summary["routing"]["outcomes"][1]["matched_gate"], "browser_e2e")
         self.assertEqual(summary["routing"]["outcomes"][1]["capability_hint"], "browser_automation")
+        release_evidence = summary["host_release_evidence"]
+        self.assertEqual(release_evidence["readiness"], "ready")
+        routing_check = next(check for check in release_evidence["checks"] if check["id"] == "capability_routing")
+        self.assertEqual(routing_check["status"], "passed")
+        self.assertEqual(routing_check["routed_action_count"], 2)
+        self.assertEqual(routing_check["capability_hint_route_count"], 2)
+        memory_check = next(check for check in release_evidence["checks"] if check["id"] == "memory_candidates")
+        self.assertEqual(memory_check["status"], "passed")
 
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

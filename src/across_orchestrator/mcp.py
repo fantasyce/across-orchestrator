@@ -372,8 +372,8 @@ def agent_loop_schema() -> dict[str, Any]:
         "evidenceSummary": {
             "description": (
                 "Read-only compact loop evidence derived from durable state; it exposes routing outcomes, "
-                "recovery decisions, memory candidate counts, cancellation category, and event audit coverage "
-                "without raw logs, transcripts, memory text, or stack traces."
+                "recovery decisions, memory candidate counts, cancellation category, event audit coverage, "
+                "and host release evidence without raw logs, transcripts, memory text, or stack traces."
             ),
             "schemaVersion": "0.1",
             "fields": [
@@ -382,7 +382,13 @@ def agent_loop_schema() -> dict[str, Any]:
                 "recovery",
                 "memory_candidates",
                 "cancellation",
+                "host_release_evidence",
             ],
+            "hostReleaseEvidence": {
+                "description": "High-level readiness, checks, risks, and next actions derived from compact evidence.",
+                "readiness": ["ready", "attention", "blocked"],
+                "checkStatuses": ["passed", "attention", "blocked"],
+            },
         },
         "approvalPolicy": {
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
