@@ -13,12 +13,18 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.12` adds opt-in Agent Loop recovery policy, host capability-hint routing,
-and structured memory write-candidate summaries. Loop metadata can now declare
-bounded retry, remediation, or human-handoff behavior for failed steps; hosts
-can provide non-secret capability hints so Orchestrator can pick a compatible
-adapter; and `memory_write_candidate` emits a compact JSON summary for Across
-Context review.
+`v0.6.13` adds durable Agent Loop event audit metadata and structured
+`cancel_category` values. Loop and task events now expose `event_id`,
+monotonic `sequence`, and `correlation_id` fields so hosts can reconstruct
+step, heartbeat, task, and cancellation chains without parsing nested payloads.
+Cancellation keeps the existing free-form reason text and adds a stable
+category for UI, health, and MCP consumers.
+`v0.6.12` added opt-in Agent Loop recovery policy, host capability-hint
+routing, and structured memory write-candidate summaries. Loop metadata can
+declare bounded retry, remediation, or human-handoff behavior for failed steps;
+hosts can provide non-secret capability hints so Orchestrator can pick a
+compatible adapter; and `memory_write_candidate` emits a compact JSON summary
+for Across Context review.
 `v0.6.11` added the read-only Agent Loop health surface for hosts that need to
 inspect durable loop state without mutating it. CLI, HTTP, MCP, the plugin
 manifest, and the public agent card expose loop health summaries with the
@@ -110,7 +116,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.12/across_orchestrator-0.6.12-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.13/across_orchestrator-0.6.13-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -346,14 +352,15 @@ new candidates always start as `pending`.
 
 ### Agent Loop Follow-Up Backlog
 
-The `v0.6.12` Agent Loop runtime covers the release-blocking durability,
-cancellation, routing, terminal failure propagation, terminal task idempotency,
-read-only loop health inspection, opt-in recovery policy, capability-hint
-routing, and structured memory candidate semantics. Follow-up work is tracked
-separately from this release:
+The `v0.6.13` Agent Loop runtime covers the release-blocking durability,
+cancellation, structured cancel categories, event audit metadata, routing,
+terminal failure propagation, terminal task idempotency, read-only loop health
+inspection, opt-in recovery policy, capability-hint routing, and structured
+memory candidate semantics. Follow-up work is tracked separately from this
+release:
 
-- Add richer host UI affordances on top of loop health, such as health detail
-  popovers, stale markers, and lease refresh cadence.
+- Add optional live timeline consumers on top of durable event snapshots for
+  hosts that need real-time loop observability.
 - Promote recovery decisions and capability routing outcomes into higher-level
   host release evidence once enough runtime data exists.
 
