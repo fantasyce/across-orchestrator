@@ -25,7 +25,9 @@ SUPPORTED_LOOP_ACTION_TYPES = {
 }
 SUPPORTED_RECOVERY_ACTIONS = {"stop", "retry", "remediation", "require_human"}
 RECOVERY_NEXT_ACTION_METADATA_KEY = "_recoveryNextAction"
-CANCEL_CATEGORIES = {"user_cancelled", "shutdown", "superseded", "timeout_cancelled"}
+CANCEL_CATEGORY_VALUES = ("user_cancelled", "shutdown", "superseded", "timeout_cancelled")
+CANCEL_CATEGORIES = set(CANCEL_CATEGORY_VALUES)
+CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES = frozenset({"shutdown", "timeout_cancelled"})
 CANCEL_CATEGORY_ALIASES = {
     "user": "user_cancelled",
     "cancelled": "user_cancelled",
@@ -76,6 +78,15 @@ def normalize_cancel_category(category: Any = None, reason: Any = None) -> str:
     if "timeout" in reason_text:
         return "timeout_cancelled"
     return "user_cancelled"
+
+
+def cancel_category_release_status(category: Any = None, reason: Any = None) -> str:
+    normalized = normalize_cancel_category(category, reason)
+    return "blocked" if normalized in CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES else "attention"
+
+
+def cancel_category_release_risk_severity(category: Any = None, reason: Any = None) -> str:
+    return "high" if cancel_category_release_status(category, reason) == "blocked" else "medium"
 
 
 class NullMemoryProvider:
@@ -1333,7 +1344,7 @@ class AgentLoopRuntime:
 
         if cancellation.get("requested"):
             category = str(cancellation.get("category") or "user_cancelled")
-            status = "blocked" if category in {"shutdown", "timeout_cancelled"} else "attention"
+            status = cancel_category_release_status(category)
             add_check(
                 "cancellation",
                 status,
@@ -1343,7 +1354,7 @@ class AgentLoopRuntime:
             risks.append(
                 {
                     "id": f"cancelled_{category}",
-                    "severity": "high" if status == "blocked" else "medium",
+                    "severity": cancel_category_release_risk_severity(category),
                     "summary": "Cancellation affected loop completion evidence.",
                 }
             )

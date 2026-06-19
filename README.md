@@ -17,6 +17,9 @@ quality gates, evidence, and protocol surfaces.
 HTTP, and MCP evidence summaries now include `host_release_evidence` with
 readiness, checks, risks, and next actions derived from durable event audit,
 routing, recovery, memory-candidate, and cancellation signals.
+`healthSummary` remains the loop runtime-state surface for stale leases,
+current actions, cancellation state, and executable controls; host release
+evidence is the release-readiness surface derived from durable evidence.
 
 `v0.6.15` added compact Agent Loop evidence summaries for hosts that need
 release or audit views without parsing full event streams. CLI, HTTP, and MCP
@@ -281,7 +284,10 @@ subprocess group before raising the cancellation error.
 Cancellation preserves the free-form reason text and also records a structured
 `cancel_category`: `user_cancelled`, `shutdown`, `superseded`, or
 `timeout_cancelled`. If omitted, the category is inferred from the reason and
-defaults to `user_cancelled`.
+defaults to `user_cancelled`. CLI, HTTP, MCP schemas, health, and release
+evidence all use the same runtime cancel category policy; `shutdown` and
+`timeout_cancelled` are treated as release-blocking categories, while
+`user_cancelled` and `superseded` require host attention.
 
 The dispatch cancellation guard invokes host dispatch adapters behind a managed
 runtime wait loop. This lets the Agent Loop finish as `cancelled` even when a

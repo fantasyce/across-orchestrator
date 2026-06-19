@@ -666,6 +666,39 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(recovery_check["status"], "blocked")
         self.assertIn("recovery_blocked", [risk["id"] for risk in summary["host_release_evidence"]["risks"]])
 
+    def test_host_release_evidence_uses_cancel_category_policy(self):
+        from across_orchestrator.agent_loop import (
+            CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES,
+            CANCEL_CATEGORY_VALUES,
+            AgentLoopRuntime,
+        )
+
+        runtime = AgentLoopRuntime()
+        self.assertEqual(
+            tuple(CANCEL_CATEGORY_VALUES),
+            ("user_cancelled", "shutdown", "superseded", "timeout_cancelled"),
+        )
+
+        for category in CANCEL_CATEGORY_VALUES:
+            loop = runtime.start_loop(
+                goal=f"Cancel loop with {category}",
+                project_root=str(self.project),
+                max_turns=3,
+                memory_policy={"read": False, "writeCandidates": False},
+            )
+
+            runtime.cancel_loop(loop.loop_id, reason=f"{category} requested", cancel_category=category)
+            summary = runtime.get_loop_evidence_summary(loop.loop_id)
+            release_evidence = summary["host_release_evidence"]
+            cancellation_check = next(check for check in release_evidence["checks"] if check["id"] == "cancellation")
+            cancellation_risk = next(risk for risk in release_evidence["risks"] if risk["id"] == f"cancelled_{category}")
+            expected_status = "blocked" if category in CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES else "attention"
+
+            self.assertEqual(release_evidence["readiness"], expected_status)
+            self.assertEqual(cancellation_check["status"], expected_status)
+            self.assertEqual(cancellation_check["category"], category)
+            self.assertEqual(cancellation_risk["severity"], "high" if expected_status == "blocked" else "medium")
+
     def test_recovery_policy_schedules_remediation_for_quality_failure(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
