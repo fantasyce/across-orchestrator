@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
     loop_cancel = sub.add_parser("loop-cancel", help="Cancel a pending or running agent loop")
     loop_cancel.add_argument("loop_id")
     loop_cancel.add_argument("--reason", default="cancelled")
+    loop_cancel.add_argument(
+        "--category",
+        choices=["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+        default=None,
+    )
     loop_cancel.add_argument("--json", action="store_true")
 
     loop_retry = sub.add_parser("loop-retry", help="Retry an agent loop from a selected step")
@@ -263,7 +268,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "loop-cancel":
-        _print(loop_runtime.cancel_loop(args.loop_id, reason=args.reason).to_dict(), args.json)
+        _print(
+            loop_runtime.cancel_loop(args.loop_id, reason=args.reason, cancel_category=args.category).to_dict(),
+            args.json,
+        )
         return 0
 
     if args.command == "loop-retry":

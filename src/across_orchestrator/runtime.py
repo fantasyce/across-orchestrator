@@ -5,7 +5,14 @@ from typing import Any
 
 from .app_grade import APP_GRADE_RELEASE_E2E_ENGINE, build_release_e2e_payload, run_release_e2e_payload
 from .adapters import adapter_for, normalize_agent_adapter_specs
-from .agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultFinalizer, DefaultQualityGate, HostLoopDispatcher
+from .agent_loop import (
+    AgentLoopAdapters,
+    AgentLoopRuntime,
+    DefaultFinalizer,
+    DefaultQualityGate,
+    HostLoopDispatcher,
+    normalize_cancel_category,
+)
 from .cancellation import ActionCancelledError
 from .evidence import build_evidence_bundle, build_quality
 from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
@@ -371,12 +378,21 @@ class OrchestratorRuntime:
             if cancellation is not None:
                 cancellation.raise_if_cancelled()
         except ActionCancelledError as exc:
+            cancel_category = normalize_cancel_category(exc.category, exc.reason)
             subtask.status = "cancelled"
             subtask.error = exc.reason
             task.status = "cancelled"
-            self.store.append_event(task.task_id, "subtask.cancelled", subtask.__dict__)
+            self.store.append_event(
+                task.task_id,
+                "subtask.cancelled",
+                {**subtask.__dict__, "cancel_category": cancel_category},
+            )
             self.store.save_task(task)
-            self.store.append_event(task.task_id, "task.cancelled", {"error": exc.reason})
+            self.store.append_event(
+                task.task_id,
+                "task.cancelled",
+                {"error": exc.reason, "cancel_category": cancel_category},
+            )
             raise
         except Exception as exc:
             failure_type = failure_type_for_exception(exc)

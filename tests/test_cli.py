@@ -375,11 +375,19 @@ class CliTests(unittest.TestCase):
             cancel_loop["loop_id"],
             "--reason",
             "no longer needed",
+            "--category",
+            "superseded",
             "--json",
         )
 
         self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
         self.assertEqual(json.loads(cancelled.stdout)["status"], "cancelled")
+        cancel_events = self.run_cli("loop-events", cancel_loop["loop_id"], "--json")
+        self.assertEqual(cancel_events.returncode, 0, cancel_events.stderr)
+        self.assertEqual(
+            next(event for event in json.loads(cancel_events.stdout) if event["type"] == "loop.cancel_requested")["payload"]["cancel_category"],
+            "superseded",
+        )
 
         reject_start = self.run_cli(
             "loop-start",

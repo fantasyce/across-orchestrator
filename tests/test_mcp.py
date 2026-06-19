@@ -150,6 +150,11 @@ class McpTests(unittest.TestCase):
         self.assertIn("event_id", schema["eventMetadata"]["fields"])
         self.assertIn("sequence", schema["eventMetadata"]["fields"])
         self.assertIn("correlation_id", schema["eventMetadata"]["fields"])
+        self.assertEqual(
+            schema["cancelCategories"],
+            ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+        )
+        self.assertIn("cancellation_category", schema["healthSummary"]["fields"])
         self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
         self.assertEqual(schema["memoryPolicy"]["candidateSchema"], "agent-loop-memory-candidate/1.0")
         self.assertIn("failure_types", schema["memoryPolicy"]["candidateFields"])
@@ -412,8 +417,14 @@ class McpTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 rpc(2, "tools/call", {
                     "name": "cancel_agent_loop",
-                    "arguments": {"loopId": loop["loop_id"], "reason": "mcp user cancelled"},
+                    "arguments": {
+                        "loopId": loop["loop_id"],
+                        "reason": "mcp user cancelled",
+                        "cancelCategory": "user_cancelled",
+                    },
                 }),
+                rpc(3, "tools/call", {"name": "get_agent_loop_health", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(4, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"]}}),
             ]
             cancelled_process = subprocess.run(
                 [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
@@ -430,6 +441,14 @@ class McpTests(unittest.TestCase):
             cancelled = json.loads([json.loads(line) for line in cancelled_process.stdout.splitlines() if line.strip()][1]["result"]["content"][0]["text"])
             self.assertEqual(cancelled["status"], "cancelled")
             self.assertEqual(cancelled["error"], "mcp user cancelled")
+            responses = [json.loads(line) for line in cancelled_process.stdout.splitlines() if line.strip()]
+            health = json.loads(responses[2]["result"]["content"][0]["text"])
+            events = json.loads(responses[3]["result"]["content"][0]["text"])
+            self.assertEqual(health["cancellation_category"], "user_cancelled")
+            self.assertEqual(
+                next(event for event in events if event["type"] == "loop.cancel_requested")["payload"]["cancel_category"],
+                "user_cancelled",
+            )
 
     def test_mcp_submit_release_e2e_task(self):
         with tempfile.TemporaryDirectory() as tempdir:

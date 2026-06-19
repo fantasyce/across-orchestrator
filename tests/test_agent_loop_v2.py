@@ -1165,7 +1165,11 @@ class AgentLoopV2Tests(unittest.TestCase):
         thread.start()
         self.assertTrue(dispatcher.started.wait(timeout=2))
 
-        requested = runtime.cancel_loop(loop.loop_id, reason="stop running adapter")
+        requested = runtime.cancel_loop(
+            loop.loop_id,
+            reason="stop running adapter",
+            cancel_category="shutdown",
+        )
 
         thread.join(timeout=3)
         self.assertFalse(thread.is_alive())
@@ -1175,13 +1179,16 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(results[0].error, "stop running adapter")
         self.assertEqual(results[0].steps[0].status, "cancelled")
         self.assertEqual(results[0].steps[0].observation.payload["reason"], "stop running adapter")
+        self.assertEqual(results[0].steps[0].observation.payload["cancel_category"], "shutdown")
         self.assertEqual(dispatcher.actions, ["task_dispatch"])
         final_loop = runtime.get_loop(loop.loop_id)
         self.assertEqual(final_loop.status, "cancelled")
         self.assertEqual([step.action.type for step in final_loop.steps], ["task_dispatch"])
-        event_types = [event["type"] for event in runtime.list_loop_events(loop.loop_id)]
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
         self.assertIn("loop.cancel_requested", event_types)
         self.assertIn("loop.cancelled", event_types)
+        self.assertEqual(events[-1]["payload"]["cancel_category"], "shutdown")
 
     def test_cancel_running_loop_releases_runtime_from_noncooperative_dispatcher(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

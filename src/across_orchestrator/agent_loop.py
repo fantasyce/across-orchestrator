@@ -25,6 +25,17 @@ SUPPORTED_LOOP_ACTION_TYPES = {
 }
 SUPPORTED_RECOVERY_ACTIONS = {"stop", "retry", "remediation", "require_human"}
 RECOVERY_NEXT_ACTION_METADATA_KEY = "_recoveryNextAction"
+CANCEL_CATEGORIES = {"user_cancelled", "shutdown", "superseded", "timeout_cancelled"}
+CANCEL_CATEGORY_ALIASES = {
+    "user": "user_cancelled",
+    "cancelled": "user_cancelled",
+    "user_cancelled": "user_cancelled",
+    "shutdown": "shutdown",
+    "shutting_down": "shutdown",
+    "superseded": "superseded",
+    "timeout": "timeout_cancelled",
+    "timeout_cancelled": "timeout_cancelled",
+}
 
 
 class MemoryProvider(Protocol):
@@ -48,6 +59,23 @@ class QualityGate(Protocol):
 class Finalizer(Protocol):
     def finalize(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
         ...
+
+
+def normalize_cancel_category(category: Any = None, reason: Any = None) -> str:
+    raw = str(category or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw:
+        normalized = CANCEL_CATEGORY_ALIASES.get(raw)
+        if normalized:
+            return normalized
+        raise ValueError(f"Unsupported cancel category: {category}")
+    reason_text = str(reason or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if "shutdown" in reason_text:
+        return "shutdown"
+    if "superseded" in reason_text:
+        return "superseded"
+    if "timeout" in reason_text:
+        return "timeout_cancelled"
+    return "user_cancelled"
 
 
 class NullMemoryProvider:
@@ -100,14 +128,19 @@ class LoopCancellationToken:
         request = self.request() or {}
         return str(request.get("reason") or "cancelled")
 
+    def category(self) -> str:
+        request = self.request() or {}
+        return normalize_cancel_category(request.get("cancel_category"), request.get("reason"))
+
     def raise_if_cancelled(self) -> None:
         if self.is_cancelled():
-            raise ActionCancelledError(self.reason())
+            raise ActionCancelledError(self.reason(), category=self.category())
 
     def _latch(self, request: dict[str, Any]) -> dict[str, Any]:
         clean = dict(request)
         clean["loop_id"] = self.loop_id
         clean["reason"] = str(clean.get("reason") or "cancelled")
+        clean["cancel_category"] = normalize_cancel_category(clean.get("cancel_category"), clean.get("reason"))
         clean.setdefault("requested_at", time.time())
         with self._lock:
             if self._cancel_request is None:
@@ -396,6 +429,7 @@ class AgentLoopRuntime:
         current_action_type, current_step_id = self._current_action(loop)
         failure_counts = self._recent_failure_type_counts(events)
         cancel_request = self.store.load_loop_cancel_request(loop_id)
+        cancel_category = self._cancel_category_for_health(cancel_request, events)
         last_event_at = events[-1]["timestamp"] if events else loop.created_at
 
         return {
@@ -414,6 +448,7 @@ class AgentLoopRuntime:
             "recent_failure_types": failure_counts,
             "executable_actions": self._executable_actions(loop, pending_approval),
             "cancellation_requested": cancel_request is not None,
+            "cancellation_category": cancel_category,
             "cancel_ack_pending": cancel_request is not None and loop.status not in TERMINAL_LOOP_STATUSES,
         }
 
@@ -428,7 +463,11 @@ class AgentLoopRuntime:
             return loop
         cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
         if cancel_request:
-            return self._cancel_loop_state(loop, str(cancel_request.get("reason") or "cancelled"))
+            return self._cancel_loop_state(
+                loop,
+                str(cancel_request.get("reason") or "cancelled"),
+                cancel_category=normalize_cancel_category(cancel_request.get("cancel_category"), cancel_request.get("reason")),
+            )
         incomplete = self._recover_or_hold_running_action(loop)
         if incomplete is not None:
             return incomplete
@@ -443,7 +482,11 @@ class AgentLoopRuntime:
         while True:
             cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
             if cancel_request:
-                return self._cancel_loop_state(loop, str(cancel_request.get("reason") or "cancelled"))
+                return self._cancel_loop_state(
+                    loop,
+                    str(cancel_request.get("reason") or "cancelled"),
+                    cancel_category=normalize_cancel_category(cancel_request.get("cancel_category"), cancel_request.get("reason")),
+                )
             action_type = self._select_next_action(loop)
             if action_type is None:
                 if loop.status in TERMINAL_LOOP_STATUSES:
@@ -481,8 +524,8 @@ class AgentLoopRuntime:
             try:
                 step = self._build_step(loop, action_type)
             except ActionCancelledError as exc:
-                self._mark_running_step_cancelled(loop, action_type, exc.reason)
-                return self._cancel_loop_state(loop, exc.reason)
+                self._mark_running_step_cancelled(loop, action_type, exc.reason, cancel_category=exc.category)
+                return self._cancel_loop_state(loop, exc.reason, cancel_category=exc.category)
             except Exception as exc:
                 failed_step = self._mark_running_step_failed(loop, action_type, exc)
                 if failed_step is None:
@@ -528,15 +571,23 @@ class AgentLoopRuntime:
         with self.store.loop_lock(loop_id):
             return self._approve_action_locked(loop_id, action_id)
 
-    def cancel_loop(self, loop_id: str, reason: str | None = None) -> LoopRun:
+    def cancel_loop(
+        self,
+        loop_id: str,
+        reason: str | None = None,
+        *,
+        cancel_category: str | None = None,
+    ) -> LoopRun:
         loop = self.get_loop(loop_id)
         if loop.status in TERMINAL_LOOP_STATUSES:
             self.store.clear_loop_cancel_request(loop.loop_id)
             return loop
         cancel_reason = reason or "cancelled"
-        request = self.store.request_loop_cancel(loop_id, cancel_reason)
+        category = normalize_cancel_category(cancel_category, cancel_reason)
+        request = self.store.request_loop_cancel(loop_id, cancel_reason, category=category)
         self.store.append_loop_event(loop_id, "loop.cancel_requested", {
             "reason": cancel_reason,
+            "cancel_category": category,
             "requested_at": request["requested_at"],
         })
         try:
@@ -546,7 +597,7 @@ class AgentLoopRuntime:
                 if loop.status in TERMINAL_LOOP_STATUSES:
                     self.store.clear_loop_cancel_request(loop.loop_id)
                     return loop
-                return self._cancel_loop_state(loop, cancel_reason)
+                return self._cancel_loop_state(loop, cancel_reason, cancel_category=category)
         except BlockingIOError:
             loop = self.get_loop(loop_id)
             if loop.status not in TERMINAL_LOOP_STATUSES:
@@ -573,8 +624,9 @@ class AgentLoopRuntime:
                     step.action.type,
                     exc.reason,
                     {"approval": "approved"},
+                    cancel_category=exc.category,
                 )
-                return self._cancel_loop_state(loop, exc.reason)
+                return self._cancel_loop_state(loop, exc.reason, cancel_category=exc.category)
             except Exception as exc:
                 failed_step = self._mark_running_step_failed(
                     loop,
@@ -899,14 +951,25 @@ class AgentLoopRuntime:
         action_type = str(loop.metadata.get(RECOVERY_NEXT_ACTION_METADATA_KEY) or "").strip()
         return action_type if action_type in SUPPORTED_LOOP_ACTION_TYPES else None
 
-    def _cancel_loop_state(self, loop: LoopRun, reason: str) -> LoopRun:
+    def _cancel_loop_state(
+        self,
+        loop: LoopRun,
+        reason: str,
+        *,
+        cancel_category: str | None = None,
+    ) -> LoopRun:
         cancel_reason = reason or "cancelled"
+        category = normalize_cancel_category(cancel_category, cancel_reason)
         cancelled_steps: list[LoopStep] = []
         for step in loop.steps:
             if step.status == "cancelled" and step.observation.status == "cancelled":
                 cancelled_steps.append(step)
             elif step.status == "running":
-                payload = {"action_type": step.action.type, "reason": cancel_reason}
+                payload = {
+                    "action_type": step.action.type,
+                    "reason": cancel_reason,
+                    "cancel_category": category,
+                }
                 step.status = "cancelled"
                 step.observation = LoopObservation.new("cancelled", payload)
                 step.checkpoint = self._checkpoint(
@@ -925,6 +988,7 @@ class AgentLoopRuntime:
                 step.observation = LoopObservation.new("cancelled", {
                     "approval": "cancelled",
                     "reason": cancel_reason,
+                    "cancel_category": category,
                     "action_type": step.action.type,
                 })
                 step.updated_at = time.time()
@@ -938,6 +1002,7 @@ class AgentLoopRuntime:
             self.store.append_loop_event(loop.loop_id, "loop.step.cancelled", step.to_dict())
         self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
             "reason": loop.error,
+            "cancel_category": category,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
         })
@@ -964,6 +1029,22 @@ class AgentLoopRuntime:
             "title": step.action.title,
             "approval_status": step.action.approval_status,
         }
+
+    def _cancel_category_for_health(
+        self,
+        request: dict[str, Any] | None,
+        events: list[dict[str, Any]],
+    ) -> str | None:
+        if request is not None:
+            return normalize_cancel_category(request.get("cancel_category"), request.get("reason"))
+        for event in reversed(events):
+            if event.get("type") not in {"loop.cancel_requested", "loop.cancelled", "loop.step.cancelled"}:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            category = payload.get("cancel_category")
+            if category:
+                return normalize_cancel_category(category, payload.get("reason"))
+        return None
 
     def _lease_health(self, loop: LoopRun, events: list[dict[str, Any]], now: float) -> dict[str, Any]:
         running = self._latest_running_step(loop)
@@ -1311,10 +1392,11 @@ class AgentLoopRuntime:
                         done.wait()
                         if "error" in outcome:
                             raise outcome["error"]
-                        raise ActionCancelledError(exc.reason)
+                        raise ActionCancelledError(exc.reason, category=exc.category)
                     self.store.append_loop_event(loop.loop_id, "loop.dispatch.detached", {
                         "action_type": action_type,
                         "reason": exc.reason,
+                        "cancel_category": normalize_cancel_category(exc.category, exc.reason),
                         "dispatcher": self.adapters.dispatcher.__class__.__name__,
                     })
                     raise
@@ -1652,7 +1734,10 @@ class AgentLoopRuntime:
     def _renew_running_step_lease(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
         cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
         if cancel_request:
-            raise ActionCancelledError(str(cancel_request.get("reason") or "cancelled"))
+            raise ActionCancelledError(
+                str(cancel_request.get("reason") or "cancelled"),
+                category=normalize_cancel_category(cancel_request.get("cancel_category"), cancel_request.get("reason")),
+            )
         step = self._latest_running_step(loop)
         if step is None or step.action.type != action_type:
             raise RuntimeError(f"No running action lease for {action_type}")
@@ -1714,6 +1799,8 @@ class AgentLoopRuntime:
         action_type: str,
         reason: str,
         observation_payload: dict[str, Any] | None = None,
+        *,
+        cancel_category: str | None = None,
     ) -> LoopStep | None:
         step = self._latest_running_step(loop)
         if step is None or step.action.type != action_type:
@@ -1722,6 +1809,7 @@ class AgentLoopRuntime:
             "action_type": action_type,
             **(observation_payload or {}),
             "reason": reason or "cancelled",
+            "cancel_category": normalize_cancel_category(cancel_category, reason),
         }
         step.status = "cancelled"
         step.observation = LoopObservation.new("cancelled", payload)

@@ -133,7 +133,11 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 self.respond(loop.to_dict())
                 return
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "cancel":
-                loop = self.loop_runtime.cancel_loop(parts[1], reason=payload.get("reason"))
+                loop = self.loop_runtime.cancel_loop(
+                    parts[1],
+                    reason=payload.get("reason"),
+                    cancel_category=payload.get("cancelCategory") or payload.get("cancel_category"),
+                )
                 self.respond(loop.to_dict())
                 return
             if len(parts) == 5 and parts[0] == "loops" and parts[2] == "actions" and parts[4] == "approve":

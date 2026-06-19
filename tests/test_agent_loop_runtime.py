@@ -231,12 +231,19 @@ class AgentLoopRuntimeTests(unittest.TestCase):
             max_turns=8,
         )
 
-        cancelled = runtime.cancel_loop(loop.loop_id, reason="user requested stop")
+        cancelled = runtime.cancel_loop(loop.loop_id, reason="user requested stop", cancel_category="superseded")
 
         self.assertEqual(cancelled.status, "cancelled")
         self.assertEqual(cancelled.error, "user requested stop")
         self.assertEqual(cancelled.steps, [])
-        self.assertIn("loop.cancelled", [event["type"] for event in runtime.list_loop_events(loop.loop_id)])
+        events = runtime.list_loop_events(loop.loop_id)
+        self.assertIn("loop.cancelled", [event["type"] for event in events])
+        requested_event = next(event for event in events if event["type"] == "loop.cancel_requested")
+        cancelled_event = next(event for event in events if event["type"] == "loop.cancelled")
+        self.assertEqual(requested_event["payload"]["cancel_category"], "superseded")
+        self.assertEqual(cancelled_event["payload"]["cancel_category"], "superseded")
+        health = runtime.get_loop_health(loop.loop_id)
+        self.assertEqual(health["cancellation_category"], "superseded")
         still_cancelled = runtime.run_loop(loop.loop_id)
         self.assertEqual(still_cancelled.status, "cancelled")
         self.assertEqual(still_cancelled.steps, [])

@@ -355,11 +355,34 @@ class HttpTests(unittest.TestCase):
             },
         )
 
-        cancelled = self.post(f"/loops/{cancel_loop['loop_id']}/cancel", {"reason": "user stopped it"})
+        cancelled = self.post(
+            f"/loops/{cancel_loop['loop_id']}/cancel",
+            {"reason": "user stopped it", "cancelCategory": "timeout_cancelled"},
+        )
 
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(cancelled["error"], "user stopped it")
+        cancel_events = self.get(f"/loops/{cancel_loop['loop_id']}/events")
+        self.assertEqual(
+            next(event for event in cancel_events if event["type"] == "loop.cancel_requested")["payload"]["cancel_category"],
+            "timeout_cancelled",
+        )
         self.assertEqual(self.post(f"/loops/{cancel_loop['loop_id']}/run", {})["status"], "cancelled")
+
+        invalid_cancel_loop = self.post(
+            "/loops",
+            {
+                "goal": "Reject invalid cancel category",
+                "projectRoot": str(self.project),
+                "maxTurns": 8,
+            },
+        )
+        status_code, error_payload = self.post_error(
+            f"/loops/{invalid_cancel_loop['loop_id']}/cancel",
+            {"reason": "bad category", "cancelCategory": "operator_changed_mind"},
+        )
+        self.assertEqual(status_code, 400)
+        self.assertEqual(error_payload["error"], "bad_request")
 
         reject_loop = self.post(
             "/loops",
