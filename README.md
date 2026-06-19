@@ -275,6 +275,15 @@ Failed steps, checkpoints, and failed task/loop events include a stable
 `adapter_error`, `timeout`, `quality_failed`, `approval_rejected`,
 `lease_expired`, `environment_blocked`, and `max_turns_exceeded`.
 
+Newly appended Agent Loop and task events include durable audit metadata: a
+unique `event_id`, a monotonic per-loop or per-task `sequence`, and a
+`correlation_id` derived from the event's most specific durable id. Loop events
+promote `step_id`, `action_id`, and `task_id` to top-level fields when present;
+task events promote `loop_id` from task metadata plus `subtask_id` when present.
+Hosts can reconstruct `loop.step.started -> loop.step.heartbeat ->
+loop.step.completed/failed/cancelled -> task/subtask event` chains without
+parsing nested payloads.
+
 Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
 `action_lease_seconds`. Hosts can also set `agentRouting` or `agent_routing` to
 select dispatch agents by action type or by the latest failed quality gate, for
@@ -346,9 +355,6 @@ separately from this release:
 - Standardize structured cancel categories such as `user_cancelled`, `shutdown`,
   `superseded`, and `timeout_cancelled` while preserving the existing free-form
   cancel reason text.
-- Add correlation or causality identifiers across
-  `loop.step.started -> loop.step.heartbeat -> loop.step.failed/cancelled ->
-  task event` chains for easier audit reconstruction.
 
 ## HTTP And A2A Card
 

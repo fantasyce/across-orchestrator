@@ -102,6 +102,16 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         event_types = [event["type"] for event in events]
         self.assertIn("loop.step.completed", event_types)
         self.assertIn("loop.completed", event_types)
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertEqual(len({event["event_id"] for event in events}), len(events))
+        self.assertTrue(all(event["event_id"].startswith("loop-event-") for event in events))
+        self.assertTrue(all(event["correlation_id"] for event in events))
+        heartbeat = next(event for event in events if event["type"] == "loop.step.heartbeat")
+        self.assertEqual(heartbeat["step_id"], heartbeat["payload"]["step_id"])
+        self.assertEqual(heartbeat["correlation_id"], f"step:{heartbeat['step_id']}")
+        completed_step = next(event for event in events if event["type"] == "loop.step.completed")
+        self.assertEqual(completed_step["step_id"], completed.steps[0].step_id)
+        self.assertEqual(completed_step["action_id"], completed.steps[0].action.action_id)
 
         health = runtime.get_loop_health(loop.loop_id)
         self.assertEqual(health["schema_version"], "0.1")
