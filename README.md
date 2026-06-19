@@ -13,6 +13,10 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
+`v0.6.17` centralizes Agent Loop structured cancel category policy so CLI,
+HTTP, MCP schemas, health, and host release evidence share the same category
+list and release-blocking classification.
+
 `v0.6.16` promotes compact Agent Loop evidence into host release evidence. CLI,
 HTTP, and MCP evidence summaries now include `host_release_evidence` with
 readiness, checks, risks, and next actions derived from durable event audit,
@@ -135,7 +139,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.16/across_orchestrator-0.6.16-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.17/across_orchestrator-0.6.17-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -384,7 +388,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.6.16` Agent Loop runtime covers the release-blocking durability,
+The `v0.6.17` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
