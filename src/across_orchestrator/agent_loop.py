@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
+import json
 import os
 import threading
 import time
@@ -22,6 +23,8 @@ SUPPORTED_LOOP_ACTION_TYPES = {
     "memory_write_candidate",
     "final_output",
 }
+SUPPORTED_RECOVERY_ACTIONS = {"stop", "retry", "remediation", "require_human"}
+RECOVERY_NEXT_ACTION_METADATA_KEY = "_recoveryNextAction"
 
 
 class MemoryProvider(Protocol):
@@ -445,6 +448,8 @@ class AgentLoopRuntime:
             if action_type is None:
                 if loop.status in TERMINAL_LOOP_STATUSES:
                     return loop
+                if loop.status == "awaiting_approval":
+                    return loop
                 loop.status = "completed"
                 if loop.final_output is None:
                     loop.final_output = f"Agent loop completed for: {loop.goal}"
@@ -487,6 +492,16 @@ class AgentLoopRuntime:
                 loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
                 self.store.save_loop(loop)
                 self.store.append_loop_event(loop.loop_id, "loop.step.failed", asdict(failed_step))
+                if self._apply_recovery_policy(
+                    loop,
+                    failed_step,
+                    reason=f"{action_type}_failed",
+                    error=str(exc),
+                    failure_type=str(failed_step.observation.payload.get("failure_type") or ""),
+                ):
+                    if loop.status == "awaiting_approval":
+                        return loop
+                    continue
                 return self._fail_loop(
                     loop,
                     reason=f"{action_type}_failed",
@@ -570,6 +585,14 @@ class AgentLoopRuntime:
                 loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
                 self.store.save_loop(loop)
                 self.store.append_loop_event(loop.loop_id, "loop.action.failed", asdict(failed_step))
+                if self._apply_recovery_policy(
+                    loop,
+                    failed_step,
+                    reason=f"{step.action.type}_failed",
+                    error=str(exc),
+                    failure_type=str(failed_step.observation.payload.get("failure_type") or ""),
+                ):
+                    return loop
                 return self._fail_loop(
                     loop,
                     reason=f"{step.action.type}_failed",
@@ -648,21 +671,9 @@ class AgentLoopRuntime:
     def retry_step(self, loop_id: str, step_id: str) -> LoopRun:
         with self.store.loop_lock(loop_id):
             loop = self.get_loop(loop_id)
-            retry_index = None
-            for index, step in enumerate(loop.steps):
-                if step.step_id == step_id:
-                    retry_index = index
-                    break
-            if retry_index is None:
+            removed = self._rollback_loop_to_step(loop, step_id)
+            if not removed:
                 raise KeyError(f"Step not found: {step_id}")
-
-            removed = loop.steps[retry_index:]
-            loop.steps = loop.steps[:retry_index]
-            loop.turn_count = loop.steps[-1].turn if loop.steps else 0
-            loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
-            loop.final_output = None
-            loop.error = None
-            loop.status = "running"
             self.store.save_loop(loop)
             self.store.append_loop_event(loop.loop_id, "loop.step.retry_requested", {
                 "step_id": step_id,
@@ -692,6 +703,201 @@ class AgentLoopRuntime:
             **event_payload,
         })
         return loop
+
+    def _apply_recovery_policy(
+        self,
+        loop: LoopRun,
+        failed_step: LoopStep,
+        *,
+        reason: str,
+        error: str,
+        failure_type: str | None = None,
+    ) -> bool:
+        clean_failure_type = failure_type or failure_type_for_loop(loop, reason)
+        rule = self._recovery_rule(loop, clean_failure_type)
+        if rule is None:
+            return False
+
+        recovery_action = rule["action"]
+        attempt = self._recovery_attempt_count(loop.loop_id, clean_failure_type, recovery_action) + 1
+        max_retries = int(rule["max_retries"])
+        applied = recovery_action != "stop" and attempt <= max_retries
+        decision_payload = {
+            "step_id": failed_step.step_id,
+            "action_type": failed_step.action.type,
+            "failure_type": clean_failure_type,
+            "reason": reason,
+            "error": error,
+            "recovery_action": recovery_action,
+            "attempt": attempt,
+            "max_retries": max_retries,
+            "applied": applied,
+            "source": rule["source"],
+        }
+        if not applied and recovery_action != "stop":
+            decision_payload["blocked_reason"] = "max_retries_exceeded"
+        self.store.append_loop_event(loop.loop_id, "loop.step.recovery_decision", decision_payload)
+
+        if not applied:
+            return False
+        if recovery_action == "retry":
+            removed = self._rollback_loop_to_step(loop, failed_step.step_id)
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.step.recovered", {
+                **decision_payload,
+                "recovered_from_step_id": failed_step.step_id,
+                "removed_step_count": len(removed),
+                "next_turn": loop.turn_count + 1,
+                "next_action": self._peek_next_action(loop),
+            })
+            return True
+        if recovery_action == "remediation":
+            loop.status = "running"
+            loop.error = None
+            loop.final_output = None
+            loop.metadata[RECOVERY_NEXT_ACTION_METADATA_KEY] = "remediation_dispatch"
+            self.store.save_loop(loop)
+            self.store.append_loop_event(loop.loop_id, "loop.step.recovered", {
+                **decision_payload,
+                "recovered_from_step_id": failed_step.step_id,
+                "next_turn": loop.turn_count + 1,
+                "next_action": "remediation_dispatch",
+            })
+            return True
+        if recovery_action == "require_human":
+            approval_step = self._append_recovery_approval_step(
+                loop,
+                failed_step,
+                failure_type=clean_failure_type,
+                reason=reason,
+                error=error,
+            )
+            self.store.append_loop_event(loop.loop_id, "loop.step.recovered", {
+                **decision_payload,
+                "recovered_from_step_id": failed_step.step_id,
+                "approval_step_id": approval_step.step_id,
+                "approval_action_id": approval_step.action.action_id,
+                "next_turn": approval_step.turn,
+                "next_action": approval_step.action.type,
+            })
+            return True
+        return False
+
+    def _recovery_rule(self, loop: LoopRun, failure_type: str) -> dict[str, Any] | None:
+        policy = loop.metadata.get("recoveryPolicy", loop.metadata.get("recovery_policy"))
+        if not isinstance(policy, dict):
+            return None
+        by_failure = policy.get("byFailureType", policy.get("by_failure_type", {}))
+        raw_rule: Any = None
+        source = "metadata.recoveryPolicy.defaultAction"
+        if isinstance(by_failure, dict) and failure_type in by_failure:
+            raw_rule = by_failure[failure_type]
+            source = f"metadata.recoveryPolicy.byFailureType.{failure_type}"
+        elif policy.get("defaultAction") is not None or policy.get("default_action") is not None:
+            raw_rule = {
+                "action": policy.get("defaultAction", policy.get("default_action")),
+                "maxRetries": policy.get("maxRetries", policy.get("max_retries")),
+            }
+        if raw_rule is None:
+            return None
+
+        if isinstance(raw_rule, str):
+            action = raw_rule
+            raw_max_retries = policy.get("maxRetries", policy.get("max_retries"))
+        elif isinstance(raw_rule, dict):
+            action = raw_rule.get("action", raw_rule.get("type"))
+            raw_max_retries = raw_rule.get(
+                "maxRetries",
+                raw_rule.get("max_retries", policy.get("maxRetries", policy.get("max_retries"))),
+            )
+        else:
+            return None
+
+        recovery_action = str(action or "stop").strip().lower()
+        if recovery_action not in SUPPORTED_RECOVERY_ACTIONS:
+            return None
+        default_max_retries = 0 if recovery_action == "stop" else 1
+        try:
+            max_retries = max(0, int(raw_max_retries if raw_max_retries is not None else default_max_retries))
+        except (TypeError, ValueError):
+            max_retries = default_max_retries
+        return {"action": recovery_action, "max_retries": max_retries, "source": source}
+
+    def _recovery_attempt_count(self, loop_id: str, failure_type: str, recovery_action: str) -> int:
+        count = 0
+        for event in self.store.list_loop_events(loop_id):
+            if event.get("type") != "loop.step.recovered":
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("failure_type") == failure_type and payload.get("recovery_action") == recovery_action:
+                count += 1
+        return count
+
+    def _rollback_loop_to_step(self, loop: LoopRun, step_id: str) -> list[LoopStep]:
+        retry_index = None
+        for index, step in enumerate(loop.steps):
+            if step.step_id == step_id:
+                retry_index = index
+                break
+        if retry_index is None:
+            return []
+        removed = loop.steps[retry_index:]
+        loop.steps = loop.steps[:retry_index]
+        loop.turn_count = loop.steps[-1].turn if loop.steps else 0
+        loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+        loop.final_output = None
+        loop.error = None
+        loop.status = "running"
+        return removed
+
+    def _append_recovery_approval_step(
+        self,
+        loop: LoopRun,
+        failed_step: LoopStep,
+        *,
+        failure_type: str,
+        reason: str,
+        error: str,
+    ) -> LoopStep:
+        approval_step = LoopStep.new(
+            loop_id=loop.loop_id,
+            turn=loop.turn_count + 1,
+            phase="approval",
+            status="waiting_approval",
+            action=LoopAction.new(
+                failed_step.action.type,
+                f"Approve recovery for {failed_step.action.type.replace('_', ' ')}",
+                {
+                    "recovery": "require_human",
+                    "failed_step_id": failed_step.step_id,
+                    "failure_type": failure_type,
+                    "reason": reason,
+                    "error": error,
+                    **failed_step.action.payload,
+                },
+                requires_approval=True,
+            ),
+            observation=LoopObservation.new("pending", {
+                "approval": "required",
+                "recovery": "require_human",
+                "failed_step_id": failed_step.step_id,
+                "failure_type": failure_type,
+            }),
+            checkpoint={},
+        )
+        loop.steps.append(approval_step)
+        loop.turn_count = approval_step.turn
+        loop.status = "awaiting_approval"
+        loop.error = None
+        loop.final_output = None
+        loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.approval_required", approval_step.to_dict())
+        return approval_step
+
+    def _recovery_next_action(self, loop: LoopRun) -> str | None:
+        action_type = str(loop.metadata.get(RECOVERY_NEXT_ACTION_METADATA_KEY) or "").strip()
+        return action_type if action_type in SUPPORTED_LOOP_ACTION_TYPES else None
 
     def _cancel_loop_state(self, loop: LoopRun, reason: str) -> LoopRun:
         cancel_reason = reason or "cancelled"
@@ -836,6 +1042,9 @@ class AgentLoopRuntime:
         return actions
 
     def _peek_next_action(self, loop: LoopRun) -> str | None:
+        recovery_next_action = self._recovery_next_action(loop)
+        if recovery_next_action is not None:
+            return recovery_next_action
         latest_quality = self._latest_step(loop, "quality_gate")
         latest_dispatch_index = self._latest_action_index(loop, {"task_dispatch", "remediation_dispatch"})
         latest_quality_index = self._latest_action_index(loop, {"quality_gate"})
@@ -866,11 +1075,31 @@ class AgentLoopRuntime:
         return None
 
     def _select_next_action(self, loop: LoopRun) -> str | None:
+        recovery_next_action = self._recovery_next_action(loop)
+        if recovery_next_action is not None:
+            loop.metadata.pop(RECOVERY_NEXT_ACTION_METADATA_KEY, None)
+            self.store.save_loop(loop)
+            return recovery_next_action
         action = self._peek_next_action(loop)
         if action is not None:
             return action
         latest_quality = self._latest_step(loop, "quality_gate")
         if latest_quality and self._quality_failed(latest_quality):
+            if self._apply_recovery_policy(
+                loop,
+                latest_quality,
+                reason="quality_gate_failed",
+                error="quality_gate_failed",
+                failure_type=failure_type_for_reason("quality_gate_failed"),
+            ):
+                if loop.status == "awaiting_approval":
+                    return None
+                recovery_next_action = self._recovery_next_action(loop)
+                if recovery_next_action is not None:
+                    loop.metadata.pop(RECOVERY_NEXT_ACTION_METADATA_KEY, None)
+                    self.store.save_loop(loop)
+                    return recovery_next_action
+                return self._peek_next_action(loop)
             loop.status = "failed"
             loop.error = "quality_gate_failed"
             self.store.save_loop(loop)
@@ -1100,6 +1329,8 @@ class AgentLoopRuntime:
         selected = loop.agent
         source = "loop.agent"
         matched_gate: str | None = None
+        static_selected = False
+        forbidden_agents = self._capability_hint_forbidden_agents(loop)
         routing = loop.metadata.get("agentRouting", loop.metadata.get("agent_routing"))
         if isinstance(routing, dict):
             route = routing.get(action_type, routing.get("default"))
@@ -1108,6 +1339,7 @@ class AgentLoopRuntime:
                 if candidate:
                     selected = candidate
                     source = f"metadata.agentRouting.{action_type}"
+                    static_selected = True
             elif isinstance(route, dict):
                 for gate in self._latest_failed_gates(loop):
                     candidate = self._clean_agent_id(route.get(gate))
@@ -1115,12 +1347,23 @@ class AgentLoopRuntime:
                         selected = candidate
                         matched_gate = gate
                         source = f"metadata.agentRouting.{action_type}.{gate}"
+                        static_selected = True
                         break
                 if matched_gate is None:
                     candidate = self._clean_agent_id(route.get("default"))
                     if candidate:
                         selected = candidate
                         source = f"metadata.agentRouting.{action_type}.default"
+                        static_selected = True
+        if selected in forbidden_agents:
+            selected = loop.agent if loop.agent not in forbidden_agents else selected
+            source = "metadata.agentCapabilityHints.constraints.forbid"
+            static_selected = False
+        hint_route = self._agent_capability_hint_route(loop, action_type, forbidden_agents)
+        if hint_route and not static_selected:
+            selected = hint_route["selected_agent"]
+            source = hint_route["source"]
+            matched_gate = hint_route.get("matched_gate")
         result = {
             "action_type": action_type,
             "base_agent": loop.agent,
@@ -1129,7 +1372,134 @@ class AgentLoopRuntime:
         }
         if matched_gate:
             result["matched_gate"] = matched_gate
+        if hint_route and source == hint_route["source"]:
+            result["capability_hint"] = hint_route.get("capability_hint")
         return result
+
+    def _agent_capability_hint_route(
+        self,
+        loop: LoopRun,
+        action_type: str,
+        forbidden_agents: set[str],
+    ) -> dict[str, Any] | None:
+        hints = loop.metadata.get("agentCapabilityHints", loop.metadata.get("agent_capability_hints"))
+        if not isinstance(hints, dict):
+            return None
+        preferred = hints.get("preferred") if isinstance(hints.get("preferred"), dict) else {}
+        constraints = hints.get("constraints") if isinstance(hints.get("constraints"), dict) else {}
+        required = (
+            constraints.get("requireCapability")
+            or constraints.get("require_capability")
+            if isinstance(constraints, dict)
+            else {}
+        )
+        required = required if isinstance(required, dict) else {}
+
+        queries: list[tuple[str, str, str | None]] = []
+        for gate in self._latest_failed_gates(loop):
+            for key in (f"{action_type}.{gate}", gate):
+                value = required.get(key)
+                if value:
+                    queries.append((str(value), f"metadata.agentCapabilityHints.constraints.requireCapability.{key}", gate))
+        for key in (action_type, "default"):
+            value = required.get(key)
+            if value:
+                queries.append((str(value), f"metadata.agentCapabilityHints.constraints.requireCapability.{key}", None))
+        for key in (action_type, "default"):
+            value = preferred.get(key)
+            if value:
+                queries.append((str(value), f"metadata.agentCapabilityHints.preferred.{key}", None))
+
+        for query, source, matched_gate in queries:
+            candidate = self._agent_from_capability_registry(hints, query, forbidden_agents)
+            if candidate:
+                result = {
+                    "selected_agent": candidate,
+                    "source": source,
+                    "capability_hint": query,
+                }
+                if matched_gate:
+                    result["matched_gate"] = matched_gate
+                return result
+            direct = self._clean_agent_id(query)
+            if direct and direct not in forbidden_agents:
+                return {
+                    "selected_agent": direct,
+                    "source": source,
+                    "capability_hint": query,
+                    **({"matched_gate": matched_gate} if matched_gate else {}),
+                }
+        return None
+
+    def _agent_from_capability_registry(
+        self,
+        hints: dict[str, Any],
+        query: str,
+        forbidden_agents: set[str],
+    ) -> str | None:
+        registry = hints.get("registry", hints.get("agentRegistry", hints.get("agent_registry", {})))
+        agents = registry.get("agents") if isinstance(registry, dict) else hints.get("agents")
+        if not isinstance(agents, list):
+            return None
+        query_token = self._capability_token(query)
+        if not query_token:
+            return None
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = self._clean_agent_id(agent.get("agent_id") or agent.get("agentId") or agent.get("id"))
+            if not agent_id or agent_id in forbidden_agents:
+                continue
+            if query_token in self._agent_capability_tokens(agent):
+                return agent_id
+        return None
+
+    def _agent_capability_tokens(self, agent: dict[str, Any]) -> set[str]:
+        values: list[Any] = [
+            agent.get("agent_id"),
+            agent.get("agentId"),
+            agent.get("id"),
+            agent.get("display_name"),
+            agent.get("displayName"),
+        ]
+        for key in (
+            "aliases",
+            "capabilities",
+            "capability_ids",
+            "capabilityIds",
+            "configured_skill_ids",
+            "configuredSkillIds",
+            "configured_skill_names",
+            "configuredSkillNames",
+            "enabled_plugin_ids",
+            "enabledPluginIds",
+            "enabled_tool_names",
+            "enabledToolNames",
+            "tags",
+        ):
+            value = agent.get(key)
+            if isinstance(value, list):
+                values.extend(value)
+            elif value:
+                values.append(value)
+        return {token for token in (self._capability_token(value) for value in values) if token}
+
+    def _capability_hint_forbidden_agents(self, loop: LoopRun) -> set[str]:
+        hints = loop.metadata.get("agentCapabilityHints", loop.metadata.get("agent_capability_hints"))
+        if not isinstance(hints, dict):
+            return set()
+        constraints = hints.get("constraints")
+        if not isinstance(constraints, dict):
+            return set()
+        forbidden = constraints.get("forbid") or constraints.get("forbidden") or []
+        if isinstance(forbidden, str):
+            forbidden = [forbidden]
+        if not isinstance(forbidden, list):
+            return set()
+        return {agent for agent in (self._clean_agent_id(value) for value in forbidden) if agent}
+
+    def _capability_token(self, value: Any) -> str:
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
 
     def _latest_failed_gates(self, loop: LoopRun) -> list[str]:
         latest_quality = self._latest_step(loop, "quality_gate")
@@ -1208,6 +1578,16 @@ class AgentLoopRuntime:
         loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
         self.store.save_loop(loop)
         self.store.append_loop_event(loop.loop_id, "loop.step.lease_expired", step.to_dict())
+        if self._apply_recovery_policy(
+            loop,
+            step,
+            reason="action_lease_expired",
+            error="action_lease_expired",
+            failure_type=failure_type_for_reason("action_lease_expired"),
+        ):
+            if loop.status == "awaiting_approval":
+                return loop
+            return None
         return self._fail_loop(
             loop,
             reason="action_lease_expired",
@@ -1431,11 +1811,157 @@ class AgentLoopRuntime:
         }
 
     def _memory_candidate_text(self, loop: LoopRun) -> str:
-        quality = self._latest_step(loop, "quality_gate")
-        quality_summary = ""
-        if quality:
-            quality_summary = str(quality.observation.payload.get("summary") or quality.observation.payload.get("quality") or "")
-        return f"Agent loop completed for {loop.goal}. {quality_summary}".strip()
+        return json.dumps(self._memory_candidate_summary(loop), ensure_ascii=False, sort_keys=True)
+
+    def _memory_candidate_summary(self, loop: LoopRun) -> dict[str, Any]:
+        decisions: list[dict[str, Any]] = []
+        artifacts: list[dict[str, Any]] = []
+        commands: list[dict[str, Any]] = []
+        failure_types: list[dict[str, Any]] = []
+        remediation_outcomes: list[dict[str, Any]] = []
+        memory_refs: list[dict[str, Any]] = []
+        for step in loop.steps:
+            payload = step.observation.payload if isinstance(step.observation.payload, dict) else {}
+            decision = {
+                "step_id": step.step_id,
+                "turn": step.turn,
+                "action_type": step.action.type,
+                "status": step.status,
+            }
+            summary = self._memory_step_summary(step)
+            if summary:
+                decision["summary"] = summary
+            decisions.append(decision)
+
+            for artifact in self._memory_artifacts(step, payload):
+                artifacts.append(artifact)
+            command = self._memory_command(step, payload)
+            if command:
+                commands.append(command)
+            failure_type = payload.get("failure_type") or step.checkpoint.get("failure_type")
+            if failure_type:
+                failure_types.append({
+                    "step_id": step.step_id,
+                    "action_type": step.action.type,
+                    "failure_type": self._memory_safe_string(failure_type),
+                    "gates": self._memory_safe_list(payload.get("failed_gates") or payload.get("failedGates")),
+                })
+            if step.action.type == "remediation_dispatch":
+                remediation_outcomes.append({
+                    "step_id": step.step_id,
+                    "status": step.status,
+                    "summary": summary or "remediation dispatch completed",
+                })
+            if step.action.type == "memory_search":
+                refs = [
+                    self._memory_safe_string(item.get("id"))
+                    for item in payload.get("results", [])
+                    if isinstance(item, dict) and item.get("id")
+                ]
+                if refs:
+                    memory_refs.append({
+                        "kind": "pre_loop_search",
+                        "step_id": step.step_id,
+                        "memory_ids": refs[:12],
+                    })
+        return {
+            "schema_version": "agent-loop-memory-candidate/1.0",
+            "loop_id": loop.loop_id,
+            "goal": self._memory_safe_string(loop.goal, limit=300),
+            "project_root": self._memory_safe_string(loop.project_root, limit=500),
+            "outcome": self._memory_candidate_outcome(loop),
+            "decisions": decisions,
+            "artifacts": artifacts,
+            "commands": commands,
+            "failure_types": failure_types,
+            "remediation_outcomes": remediation_outcomes,
+            "memory_refs": memory_refs,
+        }
+
+    def _memory_candidate_outcome(self, loop: LoopRun) -> str:
+        if loop.status in TERMINAL_LOOP_STATUSES:
+            return loop.status
+        latest_quality = self._latest_step(loop, "quality_gate")
+        if latest_quality is None:
+            return loop.status
+        return "failed" if self._quality_failed(latest_quality) else "passed"
+
+    def _memory_step_summary(self, step: LoopStep) -> str | None:
+        payload = step.observation.payload if isinstance(step.observation.payload, dict) else {}
+        for key in ("summary", "message", "final_output", "quality", "dispatch", "status"):
+            value = payload.get(key)
+            if value:
+                return self._memory_safe_string(value)
+        return None
+
+    def _memory_artifacts(self, step: LoopStep, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_artifacts = payload.get("artifacts") or payload.get("artifact_paths") or payload.get("artifactPaths") or []
+        if isinstance(raw_artifacts, str):
+            raw_artifacts = [raw_artifacts]
+        if not isinstance(raw_artifacts, list):
+            return []
+        artifacts: list[dict[str, Any]] = []
+        for item in raw_artifacts[:20]:
+            if isinstance(item, dict):
+                path = item.get("path") or item.get("file") or item.get("name")
+                kind = item.get("kind") or item.get("type")
+                action = item.get("action") or "mentioned"
+            else:
+                path = item
+                kind = None
+                action = "mentioned"
+            if not path:
+                continue
+            artifact = {
+                "step_id": step.step_id,
+                "path": self._memory_safe_string(path, limit=500),
+                "action": self._memory_safe_string(action, limit=80),
+            }
+            if kind:
+                artifact["kind"] = self._memory_safe_string(kind, limit=80)
+            artifacts.append(artifact)
+        return artifacts
+
+    def _memory_command(self, step: LoopStep, payload: dict[str, Any]) -> dict[str, Any] | None:
+        command = payload.get("cmd") or payload.get("command")
+        if not command:
+            return None
+        result = {
+            "step_id": step.step_id,
+            "cmd": self._memory_safe_string(command, limit=300),
+        }
+        exit_code = payload.get("exit_code", payload.get("exitCode"))
+        if exit_code is not None:
+            try:
+                result["exit_code"] = int(exit_code)
+            except (TypeError, ValueError):
+                pass
+        return result
+
+    def _memory_safe_list(self, value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [self._memory_safe_string(value)]
+        if not isinstance(value, list):
+            return []
+        return [self._memory_safe_string(item) for item in value if item is not None][:20]
+
+    def _memory_safe_string(self, value: Any, *, limit: int = 240) -> str:
+        text = " ".join(str(value or "").replace("\x00", " ").split())
+        lowered = text.lower()
+        blocked = (
+            "secret",
+            "credential",
+            "api key",
+            "apikey",
+            "token",
+            "traceback",
+            "stack trace",
+            "screenshot",
+            "temporary tool error",
+        )
+        if any(item in lowered for item in blocked):
+            return "[redacted]"
+        return text[:limit]
 
     def _adapter_name(self, action_type: str) -> str:
         if action_type == "memory_search" or action_type == "memory_write_candidate":
