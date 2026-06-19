@@ -322,8 +322,8 @@ host credentials, model keys, CLI install paths, or agent upgrade state.
 durable loop evidence for hosts that need a release or audit surface without
 parsing the full event stream. The summary includes event audit coverage,
 recovery decisions, recovered steps, routing outcomes, memory-candidate counts,
-and cancellation category, while excluding raw transcripts, memory text, logs,
-and stack traces.
+structured host release evidence, and cancellation category, while excluding
+raw transcripts, memory text, logs, and stack traces.
 
 ### Agent Loop Recovery Policy Contract
 
@@ -371,17 +371,18 @@ raw transcripts, large logs, stack traces, screenshots, credentials, and
 temporary tool errors. Across Context still owns memory storage and review state;
 new candidates always start as `pending`.
 
-### Agent Loop Follow-Up Backlog
+### Agent Loop Host Release Evidence
 
 The `v0.6.15` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
-policy, capability-hint routing, and structured memory candidate semantics.
-Follow-up work is tracked separately from this release:
-
-- Promote recovery decisions and capability routing outcomes into higher-level
-  host release evidence once enough runtime data exists.
+policy, capability-hint routing, and structured memory candidate semantics. The
+evidence summary now promotes those durable signals into `host_release_evidence`
+so host apps can display a concise release-readiness surface without re-parsing
+raw events. The release evidence includes `readiness` (`ready`, `attention`, or
+`blocked`), stable checks for event audit, capability routing, recovery, memory
+candidates, and cancellation, plus compact risks and next actions.
 
 ## HTTP And A2A Card
 

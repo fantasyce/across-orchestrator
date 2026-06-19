@@ -460,6 +460,27 @@ class AgentLoopRuntime:
         recovered_steps = self._evidence_recovered_steps(events)
         routing_outcomes = self._evidence_routing_outcomes(loop)
         memory_candidates = self._evidence_memory_candidates(loop)
+        event_audit = self._evidence_event_audit(events)
+        routing = {
+            "outcomes": routing_outcomes,
+            "routed_action_count": len(routing_outcomes),
+            "non_default_route_count": sum(
+                1 for item in routing_outcomes if item.get("source") not in {None, "loop.agent", "action.payload.agent"}
+            ),
+            "capability_hint_route_count": sum(1 for item in routing_outcomes if item.get("capability_hint")),
+        }
+        recovery = {
+            "decisions": recovery_decisions,
+            "recovered_steps": recovered_steps,
+            "decision_count": len(recovery_decisions),
+            "applied_count": sum(1 for item in recovery_decisions if item.get("applied") is True),
+            "blocked_count": sum(1 for item in recovery_decisions if item.get("applied") is False),
+        }
+        memory_summary = {
+            "candidates": memory_candidates,
+            "candidate_count": len(memory_candidates),
+        }
+        cancellation = self._evidence_cancellation(events)
 
         return {
             "schema_version": "0.1",
@@ -469,27 +490,19 @@ class AgentLoopRuntime:
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "final_output_ready": bool(loop.final_output),
-            "event_audit": self._evidence_event_audit(events),
-            "routing": {
-                "outcomes": routing_outcomes,
-                "routed_action_count": len(routing_outcomes),
-                "non_default_route_count": sum(
-                    1 for item in routing_outcomes if item.get("source") not in {None, "loop.agent", "action.payload.agent"}
-                ),
-                "capability_hint_route_count": sum(1 for item in routing_outcomes if item.get("capability_hint")),
-            },
-            "recovery": {
-                "decisions": recovery_decisions,
-                "recovered_steps": recovered_steps,
-                "decision_count": len(recovery_decisions),
-                "applied_count": sum(1 for item in recovery_decisions if item.get("applied") is True),
-                "blocked_count": sum(1 for item in recovery_decisions if item.get("applied") is False),
-            },
-            "memory_candidates": {
-                "candidates": memory_candidates,
-                "candidate_count": len(memory_candidates),
-            },
-            "cancellation": self._evidence_cancellation(events),
+            "event_audit": event_audit,
+            "routing": routing,
+            "recovery": recovery,
+            "memory_candidates": memory_summary,
+            "cancellation": cancellation,
+            "host_release_evidence": self._evidence_host_release_evidence(
+                loop=loop,
+                event_audit=event_audit,
+                routing=routing,
+                recovery=recovery,
+                memory_candidates=memory_summary,
+                cancellation=cancellation,
+            ),
         }
 
     def run_loop(self, loop_id: str) -> LoopRun:
@@ -1200,6 +1213,160 @@ class AgentLoopRuntime:
                 "reason": payload.get("reason"),
             }
         return {"requested": False, "category": None, "reason": None}
+
+    def _evidence_host_release_evidence(
+        self,
+        *,
+        loop: LoopRun,
+        event_audit: dict[str, Any],
+        routing: dict[str, Any],
+        recovery: dict[str, Any],
+        memory_candidates: dict[str, Any],
+        cancellation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Promote compact evidence into host-facing release readiness signals."""
+        checks: list[dict[str, Any]] = []
+        risks: list[dict[str, Any]] = []
+        next_actions: list[str] = []
+
+        def add_check(check_id: str, status: str, summary: str, **details: Any) -> None:
+            item = {"id": check_id, "status": status, "summary": summary}
+            item.update({key: value for key, value in details.items() if value is not None})
+            checks.append(item)
+
+        audit_passed = bool(event_audit.get("sequence_contiguous")) and bool(event_audit.get("event_id_coverage")) and bool(
+            event_audit.get("correlation_id_coverage")
+        )
+        if audit_passed:
+            add_check(
+                "event_audit",
+                "passed",
+                f"{event_audit.get('event_count', 0)} events have contiguous sequences and audit identifiers.",
+            )
+        else:
+            add_check(
+                "event_audit",
+                "blocked",
+                "Event audit metadata is incomplete.",
+                sequence_contiguous=event_audit.get("sequence_contiguous"),
+                event_id_coverage=event_audit.get("event_id_coverage"),
+                correlation_id_coverage=event_audit.get("correlation_id_coverage"),
+            )
+            risks.append(
+                {
+                    "id": "event_audit_incomplete",
+                    "severity": "high",
+                    "summary": "Loop events cannot be used as complete release evidence until audit metadata is repaired.",
+                }
+            )
+            next_actions.append("Repair loop event audit metadata before using this loop as release evidence.")
+
+        routed_count = int(routing.get("routed_action_count") or 0)
+        non_default_count = int(routing.get("non_default_route_count") or 0)
+        capability_hint_count = int(routing.get("capability_hint_route_count") or 0)
+        add_check(
+            "capability_routing",
+            "passed",
+            (
+                f"{routed_count} dispatch actions recorded; "
+                f"{non_default_count} used explicit routing and {capability_hint_count} used capability hints."
+            ),
+            routed_action_count=routed_count,
+            non_default_route_count=non_default_count,
+            capability_hint_route_count=capability_hint_count,
+        )
+
+        recovery_blocked_count = int(recovery.get("blocked_count") or 0)
+        recovery_applied_count = int(recovery.get("applied_count") or 0)
+        if recovery_blocked_count:
+            add_check(
+                "recovery",
+                "blocked",
+                f"{recovery_blocked_count} recovery decisions blocked loop completion.",
+                blocked_count=recovery_blocked_count,
+                applied_count=recovery_applied_count,
+            )
+            risks.append(
+                {
+                    "id": "recovery_blocked",
+                    "severity": "high",
+                    "summary": "At least one recovery decision could not be applied.",
+                }
+            )
+            next_actions.append("Review blocked recovery decisions before release.")
+        elif recovery_applied_count:
+            add_check(
+                "recovery",
+                "attention",
+                f"{recovery_applied_count} recovery decisions were applied successfully.",
+                applied_count=recovery_applied_count,
+            )
+            risks.append(
+                {
+                    "id": "recovery_applied",
+                    "severity": "medium",
+                    "summary": "Loop completed with recovery; verify the recovered path is expected.",
+                }
+            )
+            next_actions.append("Review applied recovery decisions for release notes or follow-up work.")
+        else:
+            add_check("recovery", "passed", "No recovery decisions were needed.", applied_count=0, blocked_count=0)
+
+        candidate_count = int(memory_candidates.get("candidate_count") or 0)
+        if candidate_count:
+            add_check(
+                "memory_candidates",
+                "attention",
+                f"{candidate_count} structured memory candidates are pending host review.",
+                candidate_count=candidate_count,
+            )
+            risks.append(
+                {
+                    "id": "memory_review_pending",
+                    "severity": "low",
+                    "summary": "Structured memory candidates should be reviewed before treating loop evidence as final.",
+                }
+            )
+            next_actions.append("Review pending structured memory candidates in Across Context.")
+        else:
+            add_check("memory_candidates", "passed", "No structured memory candidates require review.", candidate_count=0)
+
+        if cancellation.get("requested"):
+            category = str(cancellation.get("category") or "user_cancelled")
+            status = "blocked" if category in {"shutdown", "timeout_cancelled"} else "attention"
+            add_check(
+                "cancellation",
+                status,
+                f"Loop cancellation was requested with category {category}.",
+                category=category,
+            )
+            risks.append(
+                {
+                    "id": f"cancelled_{category}",
+                    "severity": "high" if status == "blocked" else "medium",
+                    "summary": "Cancellation affected loop completion evidence.",
+                }
+            )
+            next_actions.append("Confirm the cancellation category is expected before release.")
+        else:
+            add_check("cancellation", "passed", "No cancellation request affected this loop.", category=None)
+
+        if any(item["status"] == "blocked" for item in checks):
+            readiness = "blocked"
+        elif any(item["status"] == "attention" for item in checks):
+            readiness = "attention"
+        else:
+            readiness = "ready"
+
+        return {
+            "schema_version": "0.1",
+            "readiness": readiness,
+            "loop_status": loop.status,
+            "checks": checks,
+            "risks": risks,
+            "risk_count": len(risks),
+            "next_actions": list(dict.fromkeys(next_actions)),
+        }
 
     def _evidence_event_ref(self, event: dict[str, Any]) -> dict[str, Any]:
         return {

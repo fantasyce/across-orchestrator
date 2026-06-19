@@ -287,6 +287,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(summary_payload["schema_version"], "0.1")
         self.assertEqual(summary_payload["status"], "completed")
         self.assertTrue(summary_payload["event_audit"]["sequence_contiguous"])
+        self.assertEqual(summary_payload["host_release_evidence"]["readiness"], "attention")
+        self.assertEqual(
+            next(
+                check
+                for check in summary_payload["host_release_evidence"]["checks"]
+                if check["id"] == "memory_candidates"
+            )["status"],
+            "attention",
+        )
 
         events = self.run_cli("loop-events", loop["loop_id"], "--json")
         self.assertEqual(events.returncode, 0, events.stderr)

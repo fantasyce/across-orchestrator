@@ -230,6 +230,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(summary["routing"]["routed_action_count"], 1)
         self.assertEqual(summary["routing"]["outcomes"][0]["selected_agent"], "owner")
         self.assertEqual(summary["memory_candidates"]["candidate_count"], 1)
+        self.assertEqual(summary["host_release_evidence"]["readiness"], "attention")
+        self.assertEqual(summary["host_release_evidence"]["risk_count"], 1)
+        self.assertEqual(
+            next(check for check in summary["host_release_evidence"]["checks"] if check["id"] == "memory_candidates")["status"],
+            "attention",
+        )
 
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
