@@ -273,6 +273,57 @@ Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
 `action_lease_seconds`. Hosts can also set `agentRouting` or `agent_routing` to
 select dispatch agents by action type or by the latest failed quality gate, for
 example routing `remediation_dispatch.browser_e2e` to a browser specialist.
+For host-owned capability routing, `agentCapabilityHints` may include a
+declarative `registry.agents[]` snapshot plus `preferred` and
+`constraints.requireCapability` hints. The Orchestrator only matches declared
+agent ids, aliases, skills, plugins, tools, and capability labels; it never reads
+host credentials, model keys, CLI install paths, or agent upgrade state.
+
+### Agent Loop Recovery Policy Contract
+
+Recovery is opt-in. Without `metadata.recoveryPolicy`, adapter failures, quality
+failures, and expired action leases keep the existing fail-fast behavior.
+
+Hosts may attach:
+
+```json
+{
+  "recoveryPolicy": {
+    "byFailureType": {
+      "lease_expired": {"action": "retry", "maxRetries": 1},
+      "quality_failed": {"action": "remediation", "maxRetries": 1},
+      "adapter_error": {"action": "require_human", "maxRetries": 1},
+      "approval_rejected": {"action": "stop", "maxRetries": 0},
+      "environment_blocked": {"action": "stop", "maxRetries": 0},
+      "timeout": {"action": "retry", "maxRetries": 1}
+    },
+    "defaultAction": "stop"
+  }
+}
+```
+
+Supported actions are `stop`, `retry`, `remediation`, and `require_human`.
+`retry` rolls the durable loop state back to the failed step and lets the normal
+planner select the next action. `remediation` schedules one
+`remediation_dispatch` action. `require_human` adds a pending approval step for
+the failed action. `maxRetries` is counted per loop, `failure_type`, and recovery
+action, using append-only events; it never resets across retries.
+
+Each policy decision emits `loop.step.recovery_decision`. Applied recoveries also
+emit `loop.step.recovered` with the failed step id, selected recovery action,
+attempt number, and next action or approval id. Recovery never crosses loop
+boundaries and never retries indefinitely.
+
+### Agent Loop Memory Candidate Summary
+
+When `memory_policy.writeCandidates` is enabled, the `memory_write_candidate`
+action writes a pending Across Context memory whose text is a compact JSON
+summary with schema `agent-loop-memory-candidate/1.0`. The summary contains only
+durable, whitelisted fields: loop id, goal, outcome, step decisions, artifacts,
+commands, failure types, remediation outcomes, and memory references. It avoids
+raw transcripts, large logs, stack traces, screenshots, credentials, and
+temporary tool errors. Across Context still owns memory storage and review state;
+new candidates always start as `pending`.
 
 ### Agent Loop Follow-Up Backlog
 
@@ -283,9 +334,6 @@ separately from this release:
 
 - Add richer host UI affordances on top of loop health, such as health detail
   popovers, stale markers, and lease refresh cadence.
-- Add opt-in recovery policy metadata that can choose retry, remediation, or
-  human confirmation by `failure_type` without changing the default fail-fast
-  lease-expiry behavior.
 - Extend routing beyond static metadata with a host-provided agent capability
   registry that can consider quality-gate failures and historical failure types.
 - Standardize structured cancel categories such as `user_cancelled`, `shutdown`,

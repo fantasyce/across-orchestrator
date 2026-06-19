@@ -141,8 +141,14 @@ class McpTests(unittest.TestCase):
         self.assertIn("loop.cancel_requested", schema["events"])
         self.assertIn("loop.dispatch.detached", schema["events"])
         self.assertIn("loop.step.cancelled", schema["events"])
+        self.assertIn("loop.step.recovery_decision", schema["events"])
+        self.assertIn("loop.step.recovered", schema["events"])
         self.assertIn("get_agent_loop_health", schema["inspectionActions"])
         self.assertIn("healthSummary", schema)
+        self.assertIn("recoveryPolicy", schema)
+        self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
+        self.assertEqual(schema["memoryPolicy"]["candidateSchema"], "agent-loop-memory-candidate/1.0")
+        self.assertIn("failure_types", schema["memoryPolicy"]["candidateFields"])
         execution = schema["checkpoint"]["execution"]
         self.assertEqual(
             execution["fields"],

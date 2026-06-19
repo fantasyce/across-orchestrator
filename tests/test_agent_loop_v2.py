@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -115,6 +116,21 @@ class AlwaysFailingQualityGate:
 class ExplodingDispatcher:
     def dispatch(self, *, loop, action_type, context):
         raise RuntimeError(f"{action_type} adapter unavailable")
+
+
+class FailingOnceDispatcher:
+    def __init__(self):
+        self.actions = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.actions.append(action_type)
+        if len(self.actions) == 1:
+            raise RuntimeError(f"{action_type} adapter unavailable")
+        return {
+            "dispatch": "completed",
+            "adapter": "failing-once-dispatcher",
+            "message": "Dispatch succeeded after recovery retry.",
+        }
 
 
 class EnvironmentBlockedError(RuntimeError):
@@ -302,6 +318,14 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(quality.calls, 2)
         self.assertEqual(memory.searches[0]["query"], "Ship a serial task with remediation")
         self.assertEqual(memory.candidates[0]["status"], "pending")
+        candidate = json.loads(memory.candidates[0]["text"])
+        self.assertEqual(candidate["schema_version"], "agent-loop-memory-candidate/1.0")
+        self.assertEqual(candidate["outcome"], "passed")
+        self.assertEqual(candidate["goal"], "Ship a serial task with remediation")
+        self.assertIn("memory_search", [item["action_type"] for item in candidate["decisions"]])
+        self.assertEqual(candidate["memory_refs"][0]["memory_ids"], ["mem-active-1"])
+        self.assertEqual(candidate["remediation_outcomes"][0]["status"], "completed")
+        self.assertNotIn("traceback", json.dumps(candidate).lower())
         self.assertIn("All gates passed after remediation", completed.final_output)
         self.assertTrue(all(step.checkpoint.get("adapter") for step in completed.steps))
         self.assertIn(
@@ -541,6 +565,163 @@ class AgentLoopV2Tests(unittest.TestCase):
                 self.assertEqual(event["type"], "loop.failed")
                 self.assertEqual(event["payload"]["failure_type"], expected_failure_type)
 
+    def test_recovery_policy_retries_adapter_failure_once(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = FailingOnceDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Retry adapter failure once",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "recoveryPolicy": {
+                    "byFailureType": {
+                        "adapter_error": {"action": "retry", "maxRetries": 1}
+                    },
+                    "defaultAction": "stop",
+                }
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(dispatcher.actions[:2], ["task_dispatch", "task_dispatch"])
+        self.assertEqual(completed.steps[0].action.type, "task_dispatch")
+        self.assertEqual(completed.steps[0].status, "completed")
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertIn("loop.step.recovery_decision", event_types)
+        self.assertIn("loop.step.recovered", event_types)
+        recovered = [event for event in events if event["type"] == "loop.step.recovered"]
+        self.assertEqual(recovered[0]["payload"]["recovery_action"], "retry")
+        self.assertEqual(recovered[0]["payload"]["failure_type"], "adapter_error")
+
+    def test_recovery_policy_stops_after_retry_budget_is_exhausted(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = ExplodingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Stop after one adapter retry",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "recoveryPolicy": {
+                    "byFailureType": {
+                        "adapter_error": {"action": "retry", "maxRetries": 1}
+                    },
+                    "defaultAction": "stop",
+                }
+            },
+        )
+
+        failed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "task_dispatch_failed")
+        events = runtime.list_loop_events(loop.loop_id)
+        decisions = [event for event in events if event["type"] == "loop.step.recovery_decision"]
+        recovered = [event for event in events if event["type"] == "loop.step.recovered"]
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(len(recovered), 1)
+        self.assertFalse(decisions[-1]["payload"]["applied"])
+        self.assertEqual(decisions[-1]["payload"]["blocked_reason"], "max_retries_exceeded")
+
+    def test_recovery_policy_schedules_remediation_for_quality_failure(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = RemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Recover failed quality with remediation",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "maxRemediationTurns": 0,
+                "recoveryPolicy": {
+                    "byFailureType": {
+                        "quality_failed": {"action": "remediation", "maxRetries": 1}
+                    },
+                    "defaultAction": "stop",
+                },
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(dispatcher.actions, ["task_dispatch", "remediation_dispatch"])
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            ["task_dispatch", "quality_gate", "remediation_dispatch", "quality_gate", "final_output"],
+        )
+        recovered = [
+            event for event in runtime.list_loop_events(loop.loop_id)
+            if event["type"] == "loop.step.recovered"
+        ]
+        self.assertEqual(recovered[0]["payload"]["recovery_action"], "remediation")
+        self.assertEqual(recovered[0]["payload"]["next_action"], "remediation_dispatch")
+
+    def test_recovery_policy_requires_human_for_adapter_failure(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=ExplodingDispatcher(),
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Hold adapter failure for human recovery",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "recoveryPolicy": {
+                    "byFailureType": {
+                        "adapter_error": {"action": "require_human", "maxRetries": 1}
+                    },
+                    "defaultAction": "stop",
+                }
+            },
+        )
+
+        waiting = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(waiting.status, "awaiting_approval")
+        self.assertEqual([step.status for step in waiting.steps], ["failed", "waiting_approval"])
+        self.assertEqual(waiting.steps[-1].action.type, "task_dispatch")
+        self.assertEqual(waiting.steps[-1].action.approval_status, "pending")
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertIn("loop.step.recovery_decision", event_types)
+        self.assertIn("loop.step.recovered", event_types)
+        self.assertIn("loop.approval_required", event_types)
+
     def test_dispatch_action_persists_running_step_lease_before_adapter_returns(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
@@ -685,6 +866,77 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertIn("loop.failed", event_types)
         self.assertEqual(events[-1]["payload"]["failure_type"], "lease_expired")
 
+    def test_recovery_policy_retries_expired_running_action_lease(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, LoopAction, LoopObservation, LoopStep
+
+        dispatcher = RemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Retry an expired running action",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "recoveryPolicy": {
+                    "byFailureType": {
+                        "lease_expired": {"action": "retry", "maxRetries": 1}
+                    },
+                    "defaultAction": "stop",
+                }
+            },
+        )
+        started_at = time.time() - 60
+        running_step = LoopStep.new(
+            loop_id=loop.loop_id,
+            turn=1,
+            phase="act",
+            status="running",
+            action=LoopAction.new("task_dispatch", "Dispatch work through host adapter"),
+            observation=LoopObservation.new("running", {"action_type": "task_dispatch"}),
+            checkpoint={
+                "loop_id": loop.loop_id,
+                "turn": 1,
+                "action_type": "task_dispatch",
+                "status": "running",
+                "adapter": "RemediationDispatcher",
+                "observation_status": "running",
+                "execution": {
+                    "lease_id": "lease-expired",
+                    "started_at": started_at,
+                    "heartbeat_at": started_at,
+                    "lease_seconds": 0.01,
+                    "lease_expires_at": started_at + 0.01,
+                },
+            },
+        )
+        loop.status = "running"
+        loop.turn_count = 1
+        loop.steps.append(running_step)
+        loop.checkpoint_count = 1
+        runtime.store.save_loop(loop)
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(dispatcher.actions, ["task_dispatch", "remediation_dispatch"])
+        self.assertEqual(completed.steps[0].action.type, "task_dispatch")
+        self.assertEqual(completed.steps[0].status, "completed")
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertIn("loop.step.lease_expired", event_types)
+        self.assertIn("loop.step.recovery_decision", event_types)
+        self.assertIn("loop.step.recovered", event_types)
+        self.assertEqual(
+            [event for event in events if event["type"] == "loop.step.recovered"][0]["payload"]["failure_type"],
+            "lease_expired",
+        )
+
     def test_invalid_host_action_plan_is_rejected_instead_of_silently_ignored(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
 
@@ -784,6 +1036,67 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(remediation_call["routing"]["matched_gate"], "browser_e2e")
         self.assertEqual(completed.steps[0].action.payload["agent"], "builder")
         self.assertEqual(completed.steps[2].action.payload["agent"], "browser-specialist")
+
+    def test_dispatch_can_route_agent_from_capability_hints_registry(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = AgentRoutingDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Route via host capability hints",
+            project_root=str(self.project),
+            agent="owner",
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={
+                "agentCapabilityHints": {
+                    "preferred": {
+                        "task_dispatch": "implementation",
+                    },
+                    "constraints": {
+                        "requireCapability": {
+                            "remediation_dispatch.browser_e2e": "browser_automation",
+                        },
+                    },
+                    "registry": {
+                        "agents": [
+                            {
+                                "agent_id": "builder",
+                                "aliases": ["implementation"],
+                                "capabilities": ["general_execution"],
+                            },
+                            {
+                                "agent_id": "browser-specialist",
+                                "aliases": ["browser-specialist"],
+                                "capabilities": ["browser_automation", "frontend_design"],
+                            },
+                        ],
+                    },
+                }
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [(call["action_type"], call["agent"]) for call in dispatcher.calls],
+            [("task_dispatch", "builder"), ("remediation_dispatch", "browser-specialist")],
+        )
+        self.assertEqual(dispatcher.calls[0]["routing"]["source"], "metadata.agentCapabilityHints.preferred.task_dispatch")
+        remediation_routing = dispatcher.calls[1]["routing"]
+        self.assertEqual(
+            remediation_routing["source"],
+            "metadata.agentCapabilityHints.constraints.requireCapability.remediation_dispatch.browser_e2e",
+        )
+        self.assertEqual(remediation_routing["matched_gate"], "browser_e2e")
+        self.assertEqual(remediation_routing["capability_hint"], "browser_automation")
 
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
