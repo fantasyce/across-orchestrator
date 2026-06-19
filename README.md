@@ -13,9 +13,15 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.11` adds a read-only Agent Loop health surface for hosts that need to
+`v0.6.12` adds opt-in Agent Loop recovery policy, host capability-hint routing,
+and structured memory write-candidate summaries. Loop metadata can now declare
+bounded retry, remediation, or human-handoff behavior for failed steps; hosts
+can provide non-secret capability hints so Orchestrator can pick a compatible
+adapter; and `memory_write_candidate` emits a compact JSON summary for Across
+Context review.
+`v0.6.11` added the read-only Agent Loop health surface for hosts that need to
 inspect durable loop state without mutating it. CLI, HTTP, MCP, the plugin
-manifest, and the public agent card now expose loop health summaries with the
+manifest, and the public agent card expose loop health summaries with the
 current action, pending approval, execution lease, detached dispatch count,
 recent `failure_type` counts, cancellation state, and executable controls.
 The durable Agent Loop Runtime still persists execution leases before adapter
@@ -104,7 +110,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.11/across_orchestrator-0.6.11-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.12/across_orchestrator-0.6.12-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -327,15 +333,16 @@ new candidates always start as `pending`.
 
 ### Agent Loop Follow-Up Backlog
 
-The `v0.6.11` Agent Loop runtime covers the release-blocking durability,
+The `v0.6.12` Agent Loop runtime covers the release-blocking durability,
 cancellation, routing, terminal failure propagation, terminal task idempotency,
-and read-only loop health inspection semantics. Follow-up work is tracked
+read-only loop health inspection, opt-in recovery policy, capability-hint
+routing, and structured memory candidate semantics. Follow-up work is tracked
 separately from this release:
 
 - Add richer host UI affordances on top of loop health, such as health detail
   popovers, stale markers, and lease refresh cadence.
-- Extend routing beyond static metadata with a host-provided agent capability
-  registry that can consider quality-gate failures and historical failure types.
+- Promote recovery decisions and capability routing outcomes into higher-level
+  host release evidence once enough runtime data exists.
 - Standardize structured cancel categories such as `user_cancelled`, `shutdown`,
   `superseded`, and `timeout_cancelled` while preserving the existing free-form
   cancel reason text.

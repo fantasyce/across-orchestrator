@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "across-orchestrator"
-version = "0.6.11"
+version = "0.6.12"
 description = "Local-first task orchestration runtime for agent-to-agent delivery work."
 requires-python = ">=3.11"
 dependencies = []

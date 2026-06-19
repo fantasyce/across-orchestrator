@@ -1,7 +1,7 @@
 {
   "name": "across-orchestrator",
   "private": true,
-  "version": "0.6.11",
+  "version": "0.6.12",
   "description": "Development-only browser probe dependencies for Across Orchestrator.",
   "scripts": {
     "test:browser-deps": "node -e \"require('playwright'); console.log('playwright ready')\""
