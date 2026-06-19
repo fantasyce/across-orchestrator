@@ -147,6 +147,14 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "loopId": {"type": "string"},
                     "reason": {"type": "string"},
+                    "cancelCategory": {
+                        "type": "string",
+                        "enum": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+                    },
+                    "cancel_category": {
+                        "type": "string",
+                        "enum": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+                    },
                 },
                 "required": ["loopId"],
             },
@@ -242,6 +250,7 @@ def agent_loop_schema() -> dict[str, Any]:
         "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
         "inspectionActions": ["get_agent_loop", "get_agent_loop_health", "get_agent_loop_events"],
+        "cancelCategories": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
         "events": [
             "loop.started",
             "loop.next_action.selected",
@@ -343,6 +352,7 @@ def agent_loop_schema() -> dict[str, Any]:
                 "recent_failure_types",
                 "executable_actions",
                 "cancellation_requested",
+                "cancellation_category",
             ],
         },
         "approvalPolicy": {
@@ -411,7 +421,11 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
             reason=arguments.get("reason"),
         ).to_dict()
     if name == "cancel_agent_loop":
-        return loop_runtime.cancel_loop(arguments["loopId"], reason=arguments.get("reason")).to_dict()
+        return loop_runtime.cancel_loop(
+            arguments["loopId"],
+            reason=arguments.get("reason"),
+            cancel_category=arguments.get("cancelCategory") or arguments.get("cancel_category"),
+        ).to_dict()
     if name == "retry_agent_loop_step":
         return loop_runtime.retry_step(arguments["loopId"], arguments["stepId"]).to_dict()
     if name == "get_agent_loop":

@@ -97,7 +97,8 @@ class CommandAgentAdapter(AgentAdapter):
         while True:
             if cancellation is not None and cancellation.is_cancelled():
                 _terminate_process_tree(process)
-                raise ActionCancelledError(cancellation.reason())
+                category = cancellation.category() if hasattr(cancellation, "category") else None
+                raise ActionCancelledError(cancellation.reason(), category=category)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _terminate_process_tree(process)

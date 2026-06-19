@@ -153,10 +153,17 @@ class LocalStore:
                 events.append(json.loads(line))
         return events
 
-    def request_loop_cancel(self, loop_id: str, reason: str | None = None) -> dict[str, Any]:
+    def request_loop_cancel(
+        self,
+        loop_id: str,
+        reason: str | None = None,
+        *,
+        category: str | None = None,
+    ) -> dict[str, Any]:
         request = {
             "loop_id": loop_id,
             "reason": reason or "cancelled",
+            "cancel_category": category or "user_cancelled",
             "requested_at": time.time(),
         }
         _atomic_write_json(self.loop_cancel_requests_dir / f"{loop_id}.json", request)

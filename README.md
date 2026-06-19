@@ -222,7 +222,7 @@ across-orchestrator loop-start "Refactor checkout flow" --project . --json
 across-orchestrator loop-run <loop-id> --json
 across-orchestrator loop-approve <loop-id> <action-id> --json
 across-orchestrator loop-reject <loop-id> <action-id> --reason "Needs a safer plan" --json
-across-orchestrator loop-cancel <loop-id> --reason "User stopped the run" --json
+across-orchestrator loop-cancel <loop-id> --reason "User stopped the run" --category user_cancelled --json
 across-orchestrator loop-retry <loop-id> <step-id> --json
 across-orchestrator loop-status <loop-id> --json
 across-orchestrator loop-events <loop-id> --json
@@ -250,12 +250,16 @@ marks the step failed, emits `loop.step.lease_expired`, and fails the loop with
 `action_lease_expired`.
 
 Dispatch adapters also receive a `cancellation` token with `is_cancelled()`,
-`reason()`, and `raise_if_cancelled()`. `loop-cancel` records a
+`reason()`, `category()`, and `raise_if_cancelled()`. `loop-cancel` records a
 `loop.cancel_requested` marker outside the loop execution lock, so running
 adapters can observe it while work is still active. When the token is raised, the
 runtime marks the running step `cancelled`, emits `loop.step.cancelled`, clears
 the lease, and finishes the loop as `cancelled`. Command adapters terminate their
 subprocess group before raising the cancellation error.
+Cancellation preserves the free-form reason text and also records a structured
+`cancel_category`: `user_cancelled`, `shutdown`, `superseded`, or
+`timeout_cancelled`. If omitted, the category is inferred from the reason and
+defaults to `user_cancelled`.
 
 The dispatch cancellation guard invokes host dispatch adapters behind a managed
 runtime wait loop. This lets the Agent Loop finish as `cancelled` even when a
@@ -352,9 +356,6 @@ separately from this release:
   popovers, stale markers, and lease refresh cadence.
 - Promote recovery decisions and capability routing outcomes into higher-level
   host release evidence once enough runtime data exists.
-- Standardize structured cancel categories such as `user_cancelled`, `shutdown`,
-  `superseded`, and `timeout_cancelled` while preserving the existing free-form
-  cancel reason text.
 
 ## HTTP And A2A Card
 
