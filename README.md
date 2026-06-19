@@ -13,7 +13,12 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.13` adds durable Agent Loop event audit metadata and structured
+`v0.6.14` adds true live Agent Loop timeline streaming. The loop events stream
+keeps the existing finite SSE snapshot by default, and hosts can opt into
+`?follow=true` to receive newly appended durable loop events until the loop
+reaches a terminal state, pauses for approval, or idles out.
+
+`v0.6.13` added durable Agent Loop event audit metadata and structured
 `cancel_category` values. Loop and task events now expose `event_id`,
 monotonic `sequence`, and `correlation_id` fields so hosts can reconstruct
 step, heartbeat, task, and cancellation chains without parsing nested payloads.
@@ -116,7 +121,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.13/across_orchestrator-0.6.13-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.14/across_orchestrator-0.6.14-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -356,15 +361,13 @@ new candidates always start as `pending`.
 
 ### Agent Loop Follow-Up Backlog
 
-The `v0.6.13` Agent Loop runtime covers the release-blocking durability,
-cancellation, structured cancel categories, event audit metadata, routing,
-terminal failure propagation, terminal task idempotency, read-only loop health
-inspection, opt-in recovery policy, capability-hint routing, and structured
-memory candidate semantics. Follow-up work is tracked separately from this
-release:
+The `v0.6.14` Agent Loop runtime covers the release-blocking durability,
+cancellation, structured cancel categories, event audit metadata, live timeline
+streaming, routing, terminal failure propagation, terminal task idempotency,
+read-only loop health inspection, opt-in recovery policy, capability-hint
+routing, and structured memory candidate semantics. Follow-up work is tracked
+separately from this release:
 
-- Add optional live timeline consumers on top of durable event snapshots for
-  hosts that need real-time loop observability.
 - Promote recovery decisions and capability routing outcomes into higher-level
   host release evidence once enough runtime data exists.
 
