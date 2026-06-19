@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .agent_card import render_agent_card
+from .agent_loop import CANCEL_CATEGORY_VALUES
 from .host_conformance import evaluate_host_conformance, load_host_contract
 from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .runtime import OrchestratorRuntime
@@ -109,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop_cancel.add_argument("--reason", default="cancelled")
     loop_cancel.add_argument(
         "--category",
-        choices=["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+        choices=list(CANCEL_CATEGORY_VALUES),
         default=None,
     )
     loop_cancel.add_argument("--json", action="store_true")

@@ -6,6 +6,7 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
+from .agent_loop import CANCEL_CATEGORY_VALUES
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
@@ -149,11 +150,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "reason": {"type": "string"},
                     "cancelCategory": {
                         "type": "string",
-                        "enum": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+                        "enum": list(CANCEL_CATEGORY_VALUES),
                     },
                     "cancel_category": {
                         "type": "string",
-                        "enum": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+                        "enum": list(CANCEL_CATEGORY_VALUES),
                     },
                 },
                 "required": ["loopId"],
@@ -264,7 +265,7 @@ def agent_loop_schema() -> dict[str, Any]:
             "get_agent_loop_events",
             "get_agent_loop_evidence_summary",
         ],
-        "cancelCategories": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+        "cancelCategories": list(CANCEL_CATEGORY_VALUES),
         "events": [
             "loop.started",
             "loop.next_action.selected",
