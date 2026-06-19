@@ -604,6 +604,15 @@ class AgentLoopV2Tests(unittest.TestCase):
         recovered = [event for event in events if event["type"] == "loop.step.recovered"]
         self.assertEqual(recovered[0]["payload"]["recovery_action"], "retry")
         self.assertEqual(recovered[0]["payload"]["failure_type"], "adapter_error")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["schema_version"], "0.1")
+        self.assertTrue(summary["event_audit"]["sequence_contiguous"])
+        self.assertTrue(summary["event_audit"]["event_id_coverage"])
+        self.assertEqual(summary["recovery"]["decision_count"], 1)
+        self.assertEqual(summary["recovery"]["applied_count"], 1)
+        self.assertEqual(summary["recovery"]["decisions"][0]["recovery_action"], "retry")
+        self.assertEqual(summary["recovery"]["decisions"][0]["failure_type"], "adapter_error")
+        self.assertEqual(summary["recovery"]["recovered_steps"][0]["next_action"], "task_dispatch")
 
     def test_recovery_policy_stops_after_retry_budget_is_exhausted(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -1097,6 +1106,21 @@ class AgentLoopV2Tests(unittest.TestCase):
         )
         self.assertEqual(remediation_routing["matched_gate"], "browser_e2e")
         self.assertEqual(remediation_routing["capability_hint"], "browser_automation")
+        self.assertEqual(completed.steps[0].action.payload["routing"]["source"], "metadata.agentCapabilityHints.preferred.task_dispatch")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["routing"]["routed_action_count"], 2)
+        self.assertEqual(summary["routing"]["non_default_route_count"], 2)
+        self.assertEqual(summary["routing"]["capability_hint_route_count"], 2)
+        self.assertEqual(
+            [item["selected_agent"] for item in summary["routing"]["outcomes"]],
+            ["builder", "browser-specialist"],
+        )
+        self.assertEqual(
+            summary["routing"]["outcomes"][1]["source"],
+            "metadata.agentCapabilityHints.constraints.requireCapability.remediation_dispatch.browser_e2e",
+        )
+        self.assertEqual(summary["routing"]["outcomes"][1]["matched_gate"], "browser_e2e")
+        self.assertEqual(summary["routing"]["outcomes"][1]["capability_hint"], "browser_automation")
 
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

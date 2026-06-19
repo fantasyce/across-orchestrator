@@ -312,6 +312,12 @@ declarative `registry.agents[]` snapshot plus `preferred` and
 `constraints.requireCapability` hints. The Orchestrator only matches declared
 agent ids, aliases, skills, plugins, tools, and capability labels; it never reads
 host credentials, model keys, CLI install paths, or agent upgrade state.
+`GET /loops/{loop_id}/evidence-summary` exposes a compact read-only summary of
+durable loop evidence for hosts that need a release or audit surface without
+parsing the full event stream. The summary includes event audit coverage,
+recovery decisions, recovered steps, routing outcomes, memory-candidate counts,
+and cancellation category, while excluding raw transcripts, memory text, logs,
+and stack traces.
 
 ### Agent Loop Recovery Policy Contract
 
@@ -400,6 +406,7 @@ Endpoints:
 - `POST /loops/{loop_id}/steps/{step_id}/retry`
 - `GET /loops/{loop_id}`
 - `GET /loops/{loop_id}/health`
+- `GET /loops/{loop_id}/evidence-summary`
 - `GET /loops/{loop_id}/events`
 - `GET /loops/{loop_id}/events/stream`
 
@@ -421,6 +428,7 @@ The MCP server exposes:
 - `retry_agent_loop_step`
 - `get_agent_loop`
 - `get_agent_loop_health`
+- `get_agent_loop_evidence_summary`
 - `get_agent_loop_events`
 
 It also exposes resources:

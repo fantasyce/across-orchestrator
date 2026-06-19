@@ -127,6 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
     loop_health.add_argument("loop_id")
     loop_health.add_argument("--json", action="store_true")
 
+    loop_evidence_summary = sub.add_parser("loop-evidence-summary", help="Show compact agent loop evidence summary")
+    loop_evidence_summary.add_argument("loop_id")
+    loop_evidence_summary.add_argument("--json", action="store_true")
+
     loop_events = sub.add_parser("loop-events", help="Show agent loop events")
     loop_events.add_argument("loop_id")
     loop_events.add_argument("--json", action="store_true")
@@ -284,6 +288,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "loop-health":
         _print(loop_runtime.get_loop_health(args.loop_id), args.json)
+        return 0
+
+    if args.command == "loop-evidence-summary":
+        _print(loop_runtime.get_loop_evidence_summary(args.loop_id), args.json)
         return 0
 
     if args.command == "loop-events":

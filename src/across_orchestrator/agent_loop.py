@@ -452,6 +452,46 @@ class AgentLoopRuntime:
             "cancel_ack_pending": cancel_request is not None and loop.status not in TERMINAL_LOOP_STATUSES,
         }
 
+    def get_loop_evidence_summary(self, loop_id: str) -> dict[str, Any]:
+        """Return a compact, read-only evidence summary derived from durable loop state."""
+        loop = self.get_loop(loop_id)
+        events = self.store.list_loop_events(loop_id)
+        recovery_decisions = self._evidence_recovery_decisions(events)
+        recovered_steps = self._evidence_recovered_steps(events)
+        routing_outcomes = self._evidence_routing_outcomes(loop)
+        memory_candidates = self._evidence_memory_candidates(loop)
+
+        return {
+            "schema_version": "0.1",
+            "loop_id": loop.loop_id,
+            "status": loop.status,
+            "agent": loop.agent,
+            "turn_count": loop.turn_count,
+            "checkpoint_count": loop.checkpoint_count,
+            "final_output_ready": bool(loop.final_output),
+            "event_audit": self._evidence_event_audit(events),
+            "routing": {
+                "outcomes": routing_outcomes,
+                "routed_action_count": len(routing_outcomes),
+                "non_default_route_count": sum(
+                    1 for item in routing_outcomes if item.get("source") not in {None, "loop.agent", "action.payload.agent"}
+                ),
+                "capability_hint_route_count": sum(1 for item in routing_outcomes if item.get("capability_hint")),
+            },
+            "recovery": {
+                "decisions": recovery_decisions,
+                "recovered_steps": recovered_steps,
+                "decision_count": len(recovery_decisions),
+                "applied_count": sum(1 for item in recovery_decisions if item.get("applied") is True),
+                "blocked_count": sum(1 for item in recovery_decisions if item.get("applied") is False),
+            },
+            "memory_candidates": {
+                "candidates": memory_candidates,
+                "candidate_count": len(memory_candidates),
+            },
+            "cancellation": self._evidence_cancellation(events),
+        }
+
     def run_loop(self, loop_id: str) -> LoopRun:
         with self.store.loop_lock(loop_id):
             return self._run_loop_locked(loop_id)
@@ -1046,6 +1086,129 @@ class AgentLoopRuntime:
                 return normalize_cancel_category(category, payload.get("reason"))
         return None
 
+    def _evidence_event_audit(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        sequences = [event.get("sequence") for event in events]
+        numeric_sequences = [item for item in sequences if isinstance(item, int)]
+        return {
+            "event_count": len(events),
+            "first_sequence": numeric_sequences[0] if numeric_sequences else None,
+            "last_sequence": numeric_sequences[-1] if numeric_sequences else None,
+            "sequence_contiguous": numeric_sequences == list(range(1, len(events) + 1)),
+            "event_id_coverage": all(bool(event.get("event_id")) for event in events) if events else True,
+            "correlation_id_coverage": all(bool(event.get("correlation_id")) for event in events) if events else True,
+        }
+
+    def _evidence_recovery_decisions(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        decisions: list[dict[str, Any]] = []
+        fields = (
+            "step_id",
+            "action_type",
+            "failure_type",
+            "reason",
+            "recovery_action",
+            "attempt",
+            "max_retries",
+            "applied",
+            "blocked_reason",
+            "source",
+        )
+        for event in events:
+            if event.get("type") != "loop.step.recovery_decision":
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            item = self._evidence_event_ref(event)
+            for field in fields:
+                if field in payload:
+                    item[field] = payload[field]
+            decisions.append(item)
+        return decisions
+
+    def _evidence_recovered_steps(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        recovered: list[dict[str, Any]] = []
+        fields = (
+            "step_id",
+            "action_type",
+            "failure_type",
+            "recovery_action",
+            "attempt",
+            "recovered_from_step_id",
+            "next_action",
+            "next_turn",
+        )
+        for event in events:
+            if event.get("type") != "loop.step.recovered":
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            item = self._evidence_event_ref(event)
+            for field in fields:
+                if field in payload:
+                    item[field] = payload[field]
+            recovered.append(item)
+        return recovered
+
+    def _evidence_routing_outcomes(self, loop: LoopRun) -> list[dict[str, Any]]:
+        outcomes: list[dict[str, Any]] = []
+        for step in loop.steps:
+            if step.action.type not in {"task_dispatch", "remediation_dispatch"}:
+                continue
+            payload = step.action.payload if isinstance(step.action.payload, dict) else {}
+            routing = payload.get("routing") if isinstance(payload.get("routing"), dict) else {}
+            item = {
+                "step_id": step.step_id,
+                "turn": step.turn,
+                "action_type": step.action.type,
+                "status": step.status,
+                "base_agent": routing.get("base_agent") or loop.agent,
+                "selected_agent": routing.get("selected_agent") or payload.get("agent"),
+                "source": routing.get("source") or "action.payload.agent",
+            }
+            for field in ("matched_gate", "capability_hint"):
+                if routing.get(field):
+                    item[field] = routing[field]
+            outcomes.append(item)
+        return outcomes
+
+    def _evidence_memory_candidates(self, loop: LoopRun) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for step in loop.steps:
+            if step.action.type != "memory_write_candidate":
+                continue
+            action_payload = step.action.payload if isinstance(step.action.payload, dict) else {}
+            observation_payload = step.observation.payload if isinstance(step.observation.payload, dict) else {}
+            memory = observation_payload.get("memory") if isinstance(observation_payload.get("memory"), dict) else {}
+            item = {
+                "step_id": step.step_id,
+                "turn": step.turn,
+                "status": step.status,
+                "provider": action_payload.get("provider") or observation_payload.get("provider"),
+                "memory_status": memory.get("status") or observation_payload.get("status"),
+            }
+            if memory.get("id"):
+                item["memory_id"] = memory["id"]
+            candidates.append({key: value for key, value in item.items() if value is not None})
+        return candidates
+
+    def _evidence_cancellation(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        for event in reversed(events):
+            if event.get("type") not in {"loop.cancel_requested", "loop.cancelled", "loop.step.cancelled"}:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            return {
+                **self._evidence_event_ref(event),
+                "requested": True,
+                "category": normalize_cancel_category(payload.get("cancel_category"), payload.get("reason")),
+                "reason": payload.get("reason"),
+            }
+        return {"requested": False, "category": None, "reason": None}
+
+    def _evidence_event_ref(self, event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "event_id": event.get("event_id"),
+            "sequence": event.get("sequence"),
+            "timestamp": event.get("timestamp"),
+            "correlation_id": event.get("correlation_id"),
+        }
+
     def _lease_health(self, loop: LoopRun, events: list[dict[str, Any]], now: float) -> dict[str, Any]:
         running = self._latest_running_step(loop)
         execution = self._execution_from_checkpoint(running) if running is not None else {}
@@ -1303,10 +1466,21 @@ class AgentLoopRuntime:
             return {"query": loop.goal, "provider": loop.memory_policy.get("provider", "across-context")}
         if action_type == "task_dispatch":
             routing = self._agent_routing(loop, action_type)
-            return {"agent": routing["selected_agent"], "project_root": loop.project_root, "host_adapter": "provided-by-host"}
+            return {
+                "agent": routing["selected_agent"],
+                "project_root": loop.project_root,
+                "host_adapter": "provided-by-host",
+                "routing": routing,
+            }
         if action_type == "remediation_dispatch":
             routing = self._agent_routing(loop, action_type)
-            return {"agent": routing["selected_agent"], "project_root": loop.project_root, "host_adapter": "provided-by-host", "mode": "remediation"}
+            return {
+                "agent": routing["selected_agent"],
+                "project_root": loop.project_root,
+                "host_adapter": "provided-by-host",
+                "mode": "remediation",
+                "routing": routing,
+            }
         if action_type == "quality_gate":
             return {"required": ["artifact_integrity", "evidence_bundle", "memory_policy"]}
         if action_type == "memory_write_candidate":
