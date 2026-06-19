@@ -4,6 +4,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -235,6 +236,36 @@ class HttpTests(unittest.TestCase):
         self.assertIn('"sequence":', stream)
         self.assertIn('"correlation_id":', stream)
         self.assertIn('"loop_id":', stream)
+
+    def test_http_agent_loop_event_stream_follows_running_loop(self):
+        loop = self.post(
+            "/loops",
+            {
+                "goal": "Stream live loop events",
+                "projectRoot": str(self.project),
+                "agent": "owner",
+                "maxTurns": 5,
+            },
+        )
+        loop_id = loop["loop_id"]
+        stream_result = {}
+
+        def read_stream():
+            stream_result["body"] = self.get_text(f"/loops/{loop_id}/events/stream?follow=true")
+
+        thread = threading.Thread(target=read_stream)
+        thread.start()
+        time.sleep(0.2)
+
+        completed = self.post(f"/loops/{loop_id}/run", {})
+        thread.join(timeout=10)
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertFalse(thread.is_alive(), "follow stream should close after terminal loop event")
+        body = stream_result.get("body", "")
+        self.assertIn("event: loop.started", body)
+        self.assertIn("event: loop.completed", body)
+        self.assertLess(body.index("event: loop.started"), body.index("event: loop.completed"))
 
     def test_http_agent_loop_persists_all_loop_created_subtasks(self):
         loop = self.post(
