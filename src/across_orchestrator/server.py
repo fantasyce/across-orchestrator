@@ -3,7 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import json
 import os
 import time
@@ -14,6 +14,15 @@ from .host_conformance import evaluate_host_conformance
 from .paths import COMPONENT_ID, contains_protected_user_reference, is_developer_mode, is_product_mode, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
+
+
+LOOP_STREAM_CLOSING_EVENT_TYPES = {
+    "loop.approval_required",
+    "loop.completed",
+    "loop.failed",
+    "loop.stopped",
+    "loop.cancelled",
+}
 
 
 class OrchestratorHandler(BaseHTTPRequestHandler):
@@ -33,6 +42,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        query = parse_qs(parsed.query)
         try:
             if path == "/health":
                 self.respond(render_plugin_health())
@@ -69,6 +79,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 self.respond(self.loop_runtime.list_loop_events(parts[1]))
                 return
             if len(parts) == 4 and parts[0] == "loops" and parts[2] == "events" and parts[3] == "stream":
+                if _query_truthy(query.get("follow", [""])[0]):
+                    self.respond_loop_sse(parts[1])
+                    return
                 self.respond_sse(self.loop_runtime.list_loop_events(parts[1]))
                 return
             self.respond({"error": "not_found"}, status=404)
@@ -188,12 +201,68 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def respond_loop_sse(self, loop_id: str) -> None:
+        self.loop_runtime.get_loop(loop_id)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        sent_keys: set[str] = set()
+        idle_deadline = time.time() + 30
+        while True:
+            events = self.loop_runtime.list_loop_events(loop_id)
+            new_events = [event for event in events if _event_key(event) not in sent_keys]
+            if new_events:
+                idle_deadline = time.time() + 30
+
+            closing_seen = False
+            for event in new_events:
+                sent_keys.add(_event_key(event))
+                if not self.write_sse_event(event):
+                    return
+                if event.get("type") in LOOP_STREAM_CLOSING_EVENT_TYPES:
+                    closing_seen = True
+
+            if closing_seen:
+                return
+            if time.time() >= idle_deadline:
+                self.write_sse_comment("idle_timeout")
+                return
+            time.sleep(0.1)
+
+    def write_sse_event(self, event: dict[str, Any]) -> bool:
+        event_type = str(event.get("type") or "message")
+        chunk = f"event: {event_type}\ndata: {json.dumps(event, sort_keys=True)}\n\n".encode("utf-8")
+        try:
+            self.wfile.write(chunk)
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+
+    def write_sse_comment(self, comment: str) -> bool:
+        try:
+            self.wfile.write(f": {comment}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+
 
 class OrchestratorHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int]):
         super().__init__(server_address, OrchestratorHandler)
         self.runtime = OrchestratorRuntime()
         self.loop_runtime = self.runtime.loop_runtime
+
+
+def _query_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _event_key(event: dict[str, Any]) -> str:
+    return str(event.get("event_id") or event.get("sequence") or json.dumps(event, sort_keys=True))
 
 
 def _runtime_info_path(runtime_id: str, runtime_info: str | None = None) -> Path:

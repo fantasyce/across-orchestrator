@@ -293,6 +293,10 @@ task events promote `loop_id` from task metadata plus `subtask_id` when present.
 Hosts can reconstruct `loop.step.started -> loop.step.heartbeat ->
 loop.step.completed/failed/cancelled -> task/subtask event` chains without
 parsing nested payloads.
+`GET /loops/{loop_id}/events/stream` keeps the existing finite SSE snapshot
+shape. Hosts that need live timeline updates can add `?follow=true`; the
+sidecar then tails durable loop events until the loop completes, fails, stops,
+is cancelled, reaches an approval wait, or the stream is idle for 30 seconds.
 
 Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
 `action_lease_seconds`. Hosts can also set `agentRouting` or `agent_routing` to
