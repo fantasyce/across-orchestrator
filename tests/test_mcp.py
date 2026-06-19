@@ -235,6 +235,7 @@ class McpTests(unittest.TestCase):
                 rpc(2, "tools/call", {"name": "run_agent_loop", "arguments": {"loopId": loop["loop_id"]}}),
                 rpc(3, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"]}}),
                 rpc(4, "tools/call", {"name": "get_agent_loop_health", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(5, "tools/call", {"name": "get_agent_loop_evidence_summary", "arguments": {"loopId": loop["loop_id"]}}),
             ]
             process2 = subprocess.run(
                 [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
@@ -256,6 +257,10 @@ class McpTests(unittest.TestCase):
             health = json.loads(second[3]["result"]["content"][0]["text"])
             self.assertEqual(health["status"], "completed")
             self.assertEqual(health["loop_id"], loop["loop_id"])
+            summary = json.loads(second[4]["result"]["content"][0]["text"])
+            self.assertEqual(summary["schema_version"], "0.1")
+            self.assertEqual(summary["status"], "completed")
+            self.assertTrue(summary["event_audit"]["sequence_contiguous"])
 
     def test_mcp_agent_loop_reports_invalid_action_plan(self):
         with tempfile.TemporaryDirectory() as tempdir:

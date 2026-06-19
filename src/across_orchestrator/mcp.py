@@ -198,6 +198,15 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "required": ["loopId"],
             },
         },
+        {
+            "name": "get_agent_loop_evidence_summary",
+            "description": "Fetch a compact read-only Agent Loop evidence summary for routing, recovery, memory candidates, and event audit coverage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
     ]
 
 
@@ -243,13 +252,18 @@ def text_result(payload: Any) -> dict[str, Any]:
 
 def agent_loop_schema() -> dict[str, Any]:
     return {
-        "schemaVersion": "0.3",
+        "schemaVersion": "0.4",
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
         "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed", "cancelled"],
         "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
         "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
-        "inspectionActions": ["get_agent_loop", "get_agent_loop_health", "get_agent_loop_events"],
+        "inspectionActions": [
+            "get_agent_loop",
+            "get_agent_loop_health",
+            "get_agent_loop_events",
+            "get_agent_loop_evidence_summary",
+        ],
         "cancelCategories": ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
         "events": [
             "loop.started",
@@ -355,6 +369,21 @@ def agent_loop_schema() -> dict[str, Any]:
                 "cancellation_category",
             ],
         },
+        "evidenceSummary": {
+            "description": (
+                "Read-only compact loop evidence derived from durable state; it exposes routing outcomes, "
+                "recovery decisions, memory candidate counts, cancellation category, and event audit coverage "
+                "without raw logs, transcripts, memory text, or stack traces."
+            ),
+            "schemaVersion": "0.1",
+            "fields": [
+                "event_audit",
+                "routing",
+                "recovery",
+                "memory_candidates",
+                "cancellation",
+            ],
+        },
         "approvalPolicy": {
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
         },
@@ -434,6 +463,8 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return loop_runtime.get_loop_health(arguments["loopId"])
     if name == "get_agent_loop_events":
         return loop_runtime.list_loop_events(arguments["loopId"])
+    if name == "get_agent_loop_evidence_summary":
+        return loop_runtime.get_loop_evidence_summary(arguments["loopId"])
     raise ValueError(f"Unknown tool: {name}")
 
 

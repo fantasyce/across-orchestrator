@@ -222,6 +222,15 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(health["executable_actions"], [])
         self.assertFalse(health["lease"]["active"])
 
+        summary = self.get(f"/loops/{loop_id}/evidence-summary")
+        self.assertEqual(summary["schema_version"], "0.1")
+        self.assertEqual(summary["loop_id"], loop_id)
+        self.assertEqual(summary["status"], "completed")
+        self.assertTrue(summary["event_audit"]["sequence_contiguous"])
+        self.assertEqual(summary["routing"]["routed_action_count"], 1)
+        self.assertEqual(summary["routing"]["outcomes"][0]["selected_agent"], "owner")
+        self.assertEqual(summary["memory_candidates"]["candidate_count"], 1)
+
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
         self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))

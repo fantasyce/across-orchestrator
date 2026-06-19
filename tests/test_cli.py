@@ -281,6 +281,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(health_payload["loop_id"], loop["loop_id"])
         self.assertEqual(health_payload["recent_failure_types"], {})
 
+        summary = self.run_cli("loop-evidence-summary", loop["loop_id"], "--json")
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        summary_payload = json.loads(summary.stdout)
+        self.assertEqual(summary_payload["schema_version"], "0.1")
+        self.assertEqual(summary_payload["status"], "completed")
+        self.assertTrue(summary_payload["event_audit"]["sequence_contiguous"])
+
         events = self.run_cli("loop-events", loop["loop_id"], "--json")
         self.assertEqual(events.returncode, 0, events.stderr)
         self.assertIn("loop.completed", [event["type"] for event in json.loads(events.stdout)])
