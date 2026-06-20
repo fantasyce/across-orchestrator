@@ -301,6 +301,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(events.returncode, 0, events.stderr)
         self.assertIn("loop.completed", [event["type"] for event in json.loads(events.stdout)])
 
+        resumed_events = self.run_cli("loop-events", loop["loop_id"], "--after-sequence", "1", "--json")
+        self.assertEqual(resumed_events.returncode, 0, resumed_events.stderr)
+        resumed_payload = json.loads(resumed_events.stdout)
+        self.assertTrue(resumed_payload)
+        self.assertTrue(all(event["sequence"] > 1 for event in resumed_payload))
+
+        telemetry = self.run_cli("loop-telemetry", loop["loop_id"], "--json")
+        self.assertEqual(telemetry.returncode, 0, telemetry.stderr)
+        telemetry_payload = json.loads(telemetry.stdout)
+        self.assertEqual(telemetry_payload["schema_version"], "agent-loop-telemetry/1.0")
+        self.assertEqual(telemetry_payload["loop_id"], loop["loop_id"])
+
     def test_cli_agent_loop_approval_lifecycle(self):
         start = self.run_cli(
             "loop-start",

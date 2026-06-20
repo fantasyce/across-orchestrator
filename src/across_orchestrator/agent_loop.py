@@ -25,9 +25,9 @@ SUPPORTED_LOOP_ACTION_TYPES = {
 }
 SUPPORTED_RECOVERY_ACTIONS = {"stop", "retry", "remediation", "require_human"}
 RECOVERY_NEXT_ACTION_METADATA_KEY = "_recoveryNextAction"
-CANCEL_CATEGORY_VALUES = ("user_cancelled", "shutdown", "superseded", "timeout_cancelled")
+CANCEL_CATEGORY_VALUES = ("user_cancelled", "shutdown", "superseded", "timeout_cancelled", "budget_exceeded")
 CANCEL_CATEGORIES = set(CANCEL_CATEGORY_VALUES)
-CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES = frozenset({"shutdown", "timeout_cancelled"})
+CANCEL_CATEGORY_RELEASE_BLOCKING_VALUES = frozenset({"shutdown", "timeout_cancelled", "budget_exceeded"})
 CANCEL_CATEGORY_ALIASES = {
     "user": "user_cancelled",
     "cancelled": "user_cancelled",
@@ -37,6 +37,8 @@ CANCEL_CATEGORY_ALIASES = {
     "superseded": "superseded",
     "timeout": "timeout_cancelled",
     "timeout_cancelled": "timeout_cancelled",
+    "budget": "budget_exceeded",
+    "budget_exceeded": "budget_exceeded",
 }
 
 
@@ -77,7 +79,18 @@ def normalize_cancel_category(category: Any = None, reason: Any = None) -> str:
         return "superseded"
     if "timeout" in reason_text:
         return "timeout_cancelled"
+    if "budget" in reason_text:
+        return "budget_exceeded"
     return "user_cancelled"
+
+
+class AgentLoopConcurrencyError(ValueError):
+    """Raised when starting a loop would exceed an explicit host budget."""
+
+    def __init__(self, *, active_count: int, max_concurrent_loops: int):
+        super().__init__("max_concurrent_loops_exceeded")
+        self.active_count = active_count
+        self.max_concurrent_loops = max_concurrent_loops
 
 
 def cancel_category_release_status(category: Any = None, reason: Any = None) -> str:
@@ -408,12 +421,14 @@ class AgentLoopRuntime:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
         clean_metadata = self._validated_metadata(metadata)
+        self._enforce_start_concurrency_budget(clean_metadata)
+        effective_max_turns = self._budget_max_turns(clean_metadata) or max_turns
         Path(project_root).expanduser().resolve().mkdir(parents=True, exist_ok=True)
         loop = LoopRun.new(
             goal=goal,
             project_root=project_root,
             agent=agent,
-            max_turns=max_turns,
+            max_turns=effective_max_turns,
             memory_policy=memory_policy,
             approval_policy=approval_policy,
             metadata=clean_metadata,
@@ -423,14 +438,15 @@ class AgentLoopRuntime:
             "goal": loop.goal,
             "agent": loop.agent,
             "memory_policy": loop.memory_policy,
+            "budget": self._budget_policy(loop),
         })
         return loop
 
     def get_loop(self, loop_id: str) -> LoopRun:
         return LoopRun.from_dict(self.store.load_loop_dict(loop_id))
 
-    def list_loop_events(self, loop_id: str) -> list[dict[str, Any]]:
-        return self.store.list_loop_events(loop_id)
+    def list_loop_events(self, loop_id: str, *, after_sequence: int | None = None) -> list[dict[str, Any]]:
+        return self._events_after_sequence(self.store.list_loop_events(loop_id), after_sequence)
 
     def get_loop_health(self, loop_id: str) -> dict[str, Any]:
         loop = self.get_loop(loop_id)
@@ -461,6 +477,7 @@ class AgentLoopRuntime:
             "cancellation_requested": cancel_request is not None,
             "cancellation_category": cancel_category,
             "cancel_ack_pending": cancel_request is not None and loop.status not in TERMINAL_LOOP_STATUSES,
+            "budget": self._budget_policy(loop),
         }
 
     def get_loop_evidence_summary(self, loop_id: str) -> dict[str, Any]:
@@ -492,6 +509,7 @@ class AgentLoopRuntime:
             "candidate_count": len(memory_candidates),
         }
         cancellation = self._evidence_cancellation(events)
+        budget = self._budget_policy(loop)
 
         return {
             "schema_version": "0.1",
@@ -506,6 +524,7 @@ class AgentLoopRuntime:
             "recovery": recovery,
             "memory_candidates": memory_summary,
             "cancellation": cancellation,
+            "budget": budget,
             "host_release_evidence": self._evidence_host_release_evidence(
                 loop=loop,
                 event_audit=event_audit,
@@ -513,7 +532,97 @@ class AgentLoopRuntime:
                 recovery=recovery,
                 memory_candidates=memory_summary,
                 cancellation=cancellation,
+                budget=budget,
             ),
+        }
+
+    def get_loop_telemetry(self, loop_id: str) -> dict[str, Any]:
+        """Return bounded Agent Loop telemetry without raw observations or memory text."""
+        loop = self.get_loop(loop_id)
+        events = self.store.list_loop_events(loop_id)
+        summary = self.get_loop_evidence_summary(loop_id)
+        budget = self._budget_policy(loop)
+        first_timestamp = self._float_or_none(events[0].get("timestamp")) if events else loop.created_at
+        last_timestamp = self._float_or_none(events[-1].get("timestamp")) if events else loop.updated_at
+        if loop.status not in TERMINAL_LOOP_STATUSES:
+            last_timestamp = max(last_timestamp or loop.updated_at, time.time())
+        duration_ms = max(0, int(round(((last_timestamp or loop.updated_at) - (first_timestamp or loop.created_at)) * 1000)))
+
+        telemetry_cancel_category = summary["cancellation"].get("category") or self._budget_cancel_category_from_events(events)
+        if telemetry_cancel_category is None and loop.error in {
+            "max_turns_exceeded",
+            "max_runtime_exceeded",
+            "budget_exceeded",
+        }:
+            telemetry_cancel_category = "budget_exceeded"
+        dimensions = {
+            "status": loop.status,
+            "agent": loop.agent,
+            "terminal": loop.status in TERMINAL_LOOP_STATUSES,
+            "cancel_category": telemetry_cancel_category,
+        }
+        routing = summary["routing"]
+        recovery = summary["recovery"]
+        memory_candidates = summary["memory_candidates"]
+        event_audit = summary["event_audit"]
+        metrics = [
+            self._telemetry_metric("loop.duration_ms", duration_ms, "ms", dimensions),
+            self._telemetry_metric("loop.turn_count", loop.turn_count, "count", dimensions),
+            self._telemetry_metric("loop.event_count", event_audit.get("event_count", 0), "count", dimensions),
+            self._telemetry_metric("loop.routing.outcome_count", routing.get("routed_action_count", 0), "count", dimensions),
+            self._telemetry_metric(
+                "loop.routing.capability_hint_route_count",
+                routing.get("capability_hint_route_count", 0),
+                "count",
+                dimensions,
+            ),
+            self._telemetry_metric(
+                "loop.routing.non_default_route_count",
+                routing.get("non_default_route_count", 0),
+                "count",
+                dimensions,
+            ),
+            self._telemetry_metric("loop.recovery.decision_count", recovery.get("decision_count", 0), "count", dimensions),
+            self._telemetry_metric("loop.recovery.applied_count", recovery.get("applied_count", 0), "count", dimensions),
+            self._telemetry_metric(
+                "loop.memory_candidate.produced_count",
+                memory_candidates.get("candidate_count", 0),
+                "count",
+                dimensions,
+            ),
+            self._telemetry_metric(
+                "loop.cancellation.requested_count",
+                1 if summary["cancellation"].get("requested") else 0,
+                "count",
+                dimensions,
+            ),
+            self._telemetry_metric("loop.budget.turns_remaining", budget.get("turns_remaining", 0), "count", dimensions),
+        ]
+        if budget.get("max_runtime_seconds") is not None:
+            metrics.append(
+                self._telemetry_metric(
+                    "loop.budget.runtime_remaining_ms",
+                    budget.get("runtime_remaining_ms"),
+                    "ms",
+                    dimensions,
+                )
+            )
+        return {
+            "schema_version": "agent-loop-telemetry/1.0",
+            "loop_id": loop.loop_id,
+            "status": loop.status,
+            "latest_sequence": event_audit.get("last_sequence"),
+            "budget": budget,
+            "summary": {
+                "duration_ms": duration_ms,
+                "turn_count": loop.turn_count,
+                "event_count": event_audit.get("event_count", 0),
+                "routing_outcome_count": routing.get("routed_action_count", 0),
+                "memory_candidate_count": memory_candidates.get("candidate_count", 0),
+                "recovery_decision_count": recovery.get("decision_count", 0),
+                "cancel_category": telemetry_cancel_category,
+            },
+            "metrics": metrics,
         }
 
     def run_loop(self, loop_id: str) -> LoopRun:
@@ -525,6 +634,9 @@ class AgentLoopRuntime:
         if loop.status in TERMINAL_LOOP_STATUSES:
             self.store.clear_loop_cancel_request(loop.loop_id)
             return loop
+        budget_reason = self._budget_exceeded_reason(loop)
+        if budget_reason:
+            return self._stop_loop_for_budget(loop, budget_reason)
         cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
         if cancel_request:
             return self._cancel_loop_state(
@@ -544,6 +656,9 @@ class AgentLoopRuntime:
         self.store.save_loop(loop)
 
         while True:
+            budget_reason = self._budget_exceeded_reason(loop)
+            if budget_reason:
+                return self._stop_loop_for_budget(loop, budget_reason)
             cancel_request = self.store.load_loop_cancel_request(loop.loop_id)
             if cancel_request:
                 return self._cancel_loop_state(
@@ -569,16 +684,7 @@ class AgentLoopRuntime:
                 return loop
 
             if loop.turn_count >= loop.max_turns:
-                loop.status = "stopped"
-                loop.error = "max_turns_exceeded"
-                self.store.save_loop(loop)
-                self.store.append_loop_event(loop.loop_id, "loop.stopped", {
-                    "reason": loop.error,
-                    "failure_type": failure_type_for_reason(loop.error),
-                    "turn_count": loop.turn_count,
-                    "max_turns": loop.max_turns,
-                })
-                return loop
+                return self._stop_loop_for_budget(loop, "max_turns_exceeded")
 
             self.store.append_loop_event(loop.loop_id, "loop.next_action.selected", {
                 "action_type": action_type,
@@ -752,6 +858,51 @@ class AgentLoopRuntime:
             raise ValueError(f"unsupported actionPlan entries: {', '.join(invalid)}")
         return clean
 
+    def _budget_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        for key in ("agentLoopBudget", "agent_loop_budget", "budget"):
+            raw = metadata.get(key)
+            if isinstance(raw, dict):
+                return dict(raw)
+        return {}
+
+    def _budget_max_turns(self, metadata: dict[str, Any]) -> int | None:
+        budget = self._budget_metadata(metadata)
+        raw = (
+            budget.get("maxTurnsPerLoop")
+            or budget.get("max_turns_per_loop")
+            or budget.get("maxTurns")
+            or budget.get("max_turns")
+        )
+        parsed = self._positive_int_or_none(raw)
+        return parsed
+
+    def _budget_max_runtime_seconds(self, metadata: dict[str, Any]) -> float | None:
+        budget = self._budget_metadata(metadata)
+        return self._positive_float_or_none(budget.get("maxRuntimeSeconds") or budget.get("max_runtime_seconds"))
+
+    def _budget_max_concurrent_loops(self, metadata: dict[str, Any]) -> int | None:
+        budget = self._budget_metadata(metadata)
+        return self._positive_int_or_none(budget.get("maxConcurrentLoops") or budget.get("max_concurrent_loops"), allow_zero=True)
+
+    def _enforce_start_concurrency_budget(self, metadata: dict[str, Any]) -> None:
+        max_concurrent = self._budget_max_concurrent_loops(metadata)
+        if max_concurrent is None:
+            return
+        active = self._active_loop_count()
+        if active >= max_concurrent:
+            raise AgentLoopConcurrencyError(active_count=active, max_concurrent_loops=max_concurrent)
+
+    def _active_loop_count(self) -> int:
+        count = 0
+        for loop_id in self.store.list_loop_ids():
+            try:
+                loop = self.get_loop(loop_id)
+            except Exception:
+                continue
+            if loop.status not in TERMINAL_LOOP_STATUSES:
+                count += 1
+        return count
+
     def reject_action(self, loop_id: str, action_id: str, reason: str | None = None) -> LoopRun:
         with self.store.loop_lock(loop_id):
             loop = self.get_loop(loop_id)
@@ -817,6 +968,30 @@ class AgentLoopRuntime:
             "reason": reason,
             "error": error,
             **event_payload,
+        })
+        return loop
+
+    def _stop_loop_for_budget(self, loop: LoopRun, reason: str) -> LoopRun:
+        clean_reason = reason or "budget_exceeded"
+        loop.status = "stopped"
+        loop.error = clean_reason
+        budget = self._budget_policy(loop)
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.budget.exceeded", {
+            "reason": clean_reason,
+            "failure_type": failure_type_for_reason(clean_reason),
+            "cancel_category": "budget_exceeded",
+            "turn_count": loop.turn_count,
+            "max_turns": loop.max_turns,
+            "budget": budget,
+        })
+        self.store.append_loop_event(loop.loop_id, "loop.stopped", {
+            "reason": clean_reason,
+            "failure_type": failure_type_for_reason(clean_reason),
+            "cancel_category": "budget_exceeded",
+            "turn_count": loop.turn_count,
+            "max_turns": loop.max_turns,
+            "budget": budget,
         })
         return loop
 
@@ -1178,6 +1353,7 @@ class AgentLoopRuntime:
             payload = step.action.payload if isinstance(step.action.payload, dict) else {}
             routing = payload.get("routing") if isinstance(payload.get("routing"), dict) else {}
             item = {
+                "schema_version": routing.get("schema_version") or "agent-loop-routing/1.0",
                 "step_id": step.step_id,
                 "turn": step.turn,
                 "action_type": step.action.type,
@@ -1185,6 +1361,8 @@ class AgentLoopRuntime:
                 "base_agent": routing.get("base_agent") or loop.agent,
                 "selected_agent": routing.get("selected_agent") or payload.get("agent"),
                 "source": routing.get("source") or "action.payload.agent",
+                "reason": routing.get("reason"),
+                "alternatives": routing.get("alternatives") if isinstance(routing.get("alternatives"), list) else [],
             }
             for field in ("matched_gate", "capability_hint"):
                 if routing.get(field):
@@ -1225,6 +1403,19 @@ class AgentLoopRuntime:
             }
         return {"requested": False, "category": None, "reason": None}
 
+    def _budget_cancel_category_from_events(self, events: list[dict[str, Any]]) -> str | None:
+        budget_errors = {"max_turns_exceeded", "max_runtime_exceeded", "budget_exceeded"}
+        for event in reversed(events):
+            event_type = event.get("type")
+            if event_type not in {"loop.budget.exceeded", "loop.stopped"}:
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            reason = payload.get("reason")
+            failure_type = payload.get("failure_type")
+            if event_type == "loop.budget.exceeded" or reason in budget_errors or failure_type in budget_errors:
+                return normalize_cancel_category(payload.get("cancel_category"), reason)
+        return None
+
     def _evidence_host_release_evidence(
         self,
         *,
@@ -1234,6 +1425,7 @@ class AgentLoopRuntime:
         recovery: dict[str, Any],
         memory_candidates: dict[str, Any],
         cancellation: dict[str, Any],
+        budget: dict[str, Any],
     ) -> dict[str, Any]:
         """Promote compact evidence into host-facing release readiness signals."""
         checks: list[dict[str, Any]] = []
@@ -1361,6 +1553,35 @@ class AgentLoopRuntime:
             next_actions.append("Confirm the cancellation category is expected before release.")
         else:
             add_check("cancellation", "passed", "No cancellation request affected this loop.", category=None)
+
+        budget_blocked = loop.error in {"max_turns_exceeded", "max_runtime_exceeded", "budget_exceeded"}
+        if budget_blocked:
+            add_check(
+                "budget",
+                "blocked",
+                f"Loop stopped after budget limit {loop.error}.",
+                reason=loop.error,
+                turns_used=budget.get("turns_used"),
+                max_turns_per_loop=budget.get("max_turns_per_loop"),
+                max_runtime_seconds=budget.get("max_runtime_seconds"),
+            )
+            risks.append(
+                {
+                    "id": f"budget_{loop.error}",
+                    "severity": "high",
+                    "summary": "Agent Loop budget stopped the run before completion.",
+                }
+            )
+            next_actions.append("Review loop budget limits before treating this run as release-ready.")
+        else:
+            add_check(
+                "budget",
+                "passed",
+                "Loop stayed within configured budget limits.",
+                turns_used=budget.get("turns_used"),
+                max_turns_per_loop=budget.get("max_turns_per_loop"),
+                max_runtime_seconds=budget.get("max_runtime_seconds"),
+            )
 
         if any(item["status"] == "blocked" for item in checks):
             readiness = "blocked"
@@ -1735,7 +1956,21 @@ class AgentLoopRuntime:
         )
         worker.start()
         cancellation = context.get("cancellation")
+        source_loop = getattr(loop, "_source_loop", loop)
+        budget_event_emitted = False
         while not done.wait(0.05):
+            budget_reason = self._budget_exceeded_reason(source_loop)
+            if budget_reason:
+                if not budget_event_emitted:
+                    self.store.append_loop_event(source_loop.loop_id, "loop.budget.exceeded", {
+                        "reason": budget_reason,
+                        "failure_type": failure_type_for_reason(budget_reason),
+                        "cancel_category": "budget_exceeded",
+                        "action_type": action_type,
+                        "budget": self._budget_policy(source_loop),
+                    })
+                    budget_event_emitted = True
+                raise ActionCancelledError(budget_reason, category="budget_exceeded")
             if cancellation is not None:
                 try:
                     cancellation.raise_if_cancelled()
@@ -1762,9 +1997,11 @@ class AgentLoopRuntime:
     def _agent_routing(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
         selected = loop.agent
         source = "loop.agent"
+        reason = "Using the loop owner agent because no routing rule matched."
         matched_gate: str | None = None
         static_selected = False
         forbidden_agents = self._capability_hint_forbidden_agents(loop)
+        alternatives = self._routing_alternatives_from_ids([loop.agent], selected_agent=selected)
         routing = loop.metadata.get("agentRouting", loop.metadata.get("agent_routing"))
         if isinstance(routing, dict):
             route = routing.get(action_type, routing.get("default"))
@@ -1773,7 +2010,9 @@ class AgentLoopRuntime:
                 if candidate:
                     selected = candidate
                     source = f"metadata.agentRouting.{action_type}"
+                    reason = f"Selected {candidate} from static routing metadata for {action_type}."
                     static_selected = True
+                    alternatives = self._routing_alternatives_from_ids([candidate, loop.agent], selected_agent=selected)
             elif isinstance(route, dict):
                 for gate in self._latest_failed_gates(loop):
                     candidate = self._clean_agent_id(route.get(gate))
@@ -1781,28 +2020,39 @@ class AgentLoopRuntime:
                         selected = candidate
                         matched_gate = gate
                         source = f"metadata.agentRouting.{action_type}.{gate}"
+                        reason = f"Selected {candidate} because failed gate {gate} has an explicit route."
                         static_selected = True
+                        alternatives = self._routing_alternatives_from_ids([candidate, loop.agent], selected_agent=selected)
                         break
                 if matched_gate is None:
                     candidate = self._clean_agent_id(route.get("default"))
                     if candidate:
                         selected = candidate
                         source = f"metadata.agentRouting.{action_type}.default"
+                        reason = f"Selected {candidate} from default static routing metadata for {action_type}."
                         static_selected = True
+                        alternatives = self._routing_alternatives_from_ids([candidate, loop.agent], selected_agent=selected)
         if selected in forbidden_agents:
             selected = loop.agent if loop.agent not in forbidden_agents else selected
             source = "metadata.agentCapabilityHints.constraints.forbid"
+            reason = "Selected agent was forbidden by host capability constraints; falling back to the loop owner when possible."
             static_selected = False
+            alternatives = self._routing_alternatives_from_ids([selected, *sorted(forbidden_agents)], selected_agent=selected)
         hint_route = self._agent_capability_hint_route(loop, action_type, forbidden_agents)
         if hint_route and not static_selected:
             selected = hint_route["selected_agent"]
             source = hint_route["source"]
             matched_gate = hint_route.get("matched_gate")
+            reason = hint_route.get("reason") or reason
+            alternatives = hint_route.get("alternatives") or alternatives
         result = {
+            "schema_version": "agent-loop-routing/1.0",
             "action_type": action_type,
             "base_agent": loop.agent,
             "selected_agent": selected,
             "source": source,
+            "reason": reason,
+            "alternatives": alternatives,
         }
         if matched_gate:
             result["matched_gate"] = matched_gate
@@ -1845,12 +2095,15 @@ class AgentLoopRuntime:
                 queries.append((str(value), f"metadata.agentCapabilityHints.preferred.{key}", None))
 
         for query, source, matched_gate in queries:
+            alternatives = self._agent_capability_alternatives(hints, query, forbidden_agents)
             candidate = self._agent_from_capability_registry(hints, query, forbidden_agents)
             if candidate:
                 result = {
                     "selected_agent": candidate,
                     "source": source,
                     "capability_hint": query,
+                    "reason": f"Selected {candidate} because it matched capability hint {query}.",
+                    "alternatives": self._mark_selected_alternative(alternatives, candidate),
                 }
                 if matched_gate:
                     result["matched_gate"] = matched_gate
@@ -1861,9 +2114,68 @@ class AgentLoopRuntime:
                     "selected_agent": direct,
                     "source": source,
                     "capability_hint": query,
+                    "reason": f"Selected direct capability hint target {direct}.",
+                    "alternatives": self._mark_selected_alternative(alternatives or self._routing_alternatives_from_ids([direct], selected_agent=direct), direct),
                     **({"matched_gate": matched_gate} if matched_gate else {}),
                 }
         return None
+
+    def _routing_alternatives_from_ids(self, agent_ids: list[str], *, selected_agent: str) -> list[dict[str, Any]]:
+        alternatives: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in agent_ids:
+            agent_id = self._clean_agent_id(raw)
+            if not agent_id or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            alternatives.append({
+                "agent_id": agent_id,
+                "selected": agent_id == selected_agent,
+            })
+        return alternatives[:12]
+
+    def _mark_selected_alternative(self, alternatives: list[dict[str, Any]], selected_agent: str) -> list[dict[str, Any]]:
+        if not alternatives:
+            return self._routing_alternatives_from_ids([selected_agent], selected_agent=selected_agent)
+        marked = []
+        selected_seen = False
+        for item in alternatives[:12]:
+            clean = dict(item)
+            clean["selected"] = clean.get("agent_id") == selected_agent
+            selected_seen = selected_seen or bool(clean["selected"])
+            marked.append(clean)
+        if not selected_seen:
+            marked.insert(0, {"agent_id": selected_agent, "selected": True})
+        return marked[:12]
+
+    def _agent_capability_alternatives(
+        self,
+        hints: dict[str, Any],
+        query: str,
+        forbidden_agents: set[str],
+    ) -> list[dict[str, Any]]:
+        registry = hints.get("registry", hints.get("agentRegistry", hints.get("agent_registry", {})))
+        agents = registry.get("agents") if isinstance(registry, dict) else hints.get("agents")
+        if not isinstance(agents, list):
+            return []
+        query_token = self._capability_token(query)
+        alternatives: list[dict[str, Any]] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = self._clean_agent_id(agent.get("agent_id") or agent.get("agentId") or agent.get("id"))
+            if not agent_id:
+                continue
+            tokens = self._agent_capability_tokens(agent)
+            matched = bool(query_token and query_token in tokens)
+            alternatives.append({
+                "agent_id": agent_id,
+                "matched": matched,
+                "forbidden": agent_id in forbidden_agents,
+                "capability_count": len(tokens),
+                **({"matched_capability": query} if matched else {}),
+            })
+        return alternatives[:12]
 
     def _agent_from_capability_registry(
         self,
@@ -2211,6 +2523,78 @@ class AgentLoopRuntime:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    def _positive_float_or_none(self, value: Any) -> float | None:
+        parsed = self._float_or_none(value)
+        if parsed is None or parsed <= 0:
+            return None
+        return parsed
+
+    def _positive_int_or_none(self, value: Any, *, allow_zero: bool = False) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        if allow_zero and parsed == 0:
+            return 0
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _events_after_sequence(self, events: list[dict[str, Any]], after_sequence: int | None) -> list[dict[str, Any]]:
+        if after_sequence is None:
+            return events
+        try:
+            cursor = int(after_sequence)
+        except (TypeError, ValueError):
+            raise ValueError("after_sequence must be an integer")
+        if cursor < 0:
+            raise ValueError("after_sequence must be non-negative")
+        return [event for event in events if int(event.get("sequence") or 0) > cursor]
+
+    def _budget_policy(self, loop: LoopRun) -> dict[str, Any]:
+        max_runtime_seconds = self._budget_max_runtime_seconds(loop.metadata)
+        runtime_seconds = max(0.0, time.time() - loop.created_at)
+        runtime_remaining_ms = None
+        if max_runtime_seconds is not None:
+            runtime_remaining_ms = max(0, int(round((max_runtime_seconds - runtime_seconds) * 1000)))
+        max_concurrent = self._budget_max_concurrent_loops(loop.metadata)
+        turns_remaining = max(0, loop.max_turns - loop.turn_count)
+        return {
+            "schema_version": "agent-loop-budget/1.0",
+            "max_concurrent_loops": max_concurrent,
+            "max_turns_per_loop": loop.max_turns,
+            "turns_used": loop.turn_count,
+            "turns_remaining": turns_remaining,
+            "max_runtime_seconds": max_runtime_seconds,
+            "runtime_seconds": round(runtime_seconds, 3),
+            "runtime_remaining_ms": runtime_remaining_ms,
+            "action_lease_seconds": self._action_lease_seconds(loop),
+            "timeout_cancel_category": "timeout_cancelled",
+            "budget_exceeded_category": "budget_exceeded",
+            "enforced": {
+                "concurrency": max_concurrent is not None,
+                "turns": True,
+                "runtime": max_runtime_seconds is not None,
+            },
+        }
+
+    def _budget_exceeded_reason(self, loop: LoopRun) -> str | None:
+        max_runtime_seconds = self._budget_max_runtime_seconds(loop.metadata)
+        if max_runtime_seconds is not None and (time.time() - loop.created_at) >= max_runtime_seconds:
+            return "max_runtime_exceeded"
+        if loop.turn_count >= loop.max_turns and self._peek_next_action(loop) is not None:
+            return "max_turns_exceeded"
+        return None
+
+    def _telemetry_metric(self, metric: str, value: Any, unit: str, dimensions: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "agent-loop-telemetry-metric/1.0",
+            "metric": metric,
+            "value": value,
+            "unit": unit,
+            "dimensions": {key: value for key, value in dimensions.items() if value is not None},
+        }
 
     def _host_action_plan(self, loop: LoopRun) -> list[str]:
         raw_plan = loop.metadata.get("actionPlan")

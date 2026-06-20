@@ -13,6 +13,12 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
+Next release completes the current Agent Loop runtime contract with bounded
+telemetry, `after_sequence` event resume for HTTP/CLI/MCP consumers,
+host-declared budget and concurrency enforcement, structured
+`budget_exceeded` cancellation, and routing evidence that includes reasons plus
+candidate alternatives.
+
 `v0.6.17` centralizes Agent Loop structured cancel category policy so CLI,
 HTTP, MCP schemas, health, and host release evidence share the same category
 list and release-blocking classification.
@@ -116,10 +122,10 @@ Validated in this repository:
 Across Orchestrator still does not own model keys, macOS permissions, or local
 agent installation. Those remain host responsibilities by design.
 
-The remaining Agent Loop runtime work is tracked in
-[Agent Loop Runtime RFCs](AGENT_LOOP_RFC.md). Telemetry, stream resume, cost and
-concurrency policy, and multi-agent routing must start from those RFCs rather
-than ad hoc runtime changes.
+The current Agent Loop runtime contracts are summarized in
+[Agent Loop Runtime RFCs](AGENT_LOOP_RFC.md). Further multi-agent product UX or
+automation behavior should start from a new product spec rather than ad hoc
+runtime changes.
 
 ## Why It Exists
 
@@ -260,6 +266,8 @@ across-orchestrator loop-cancel <loop-id> --reason "User stopped the run" --cate
 across-orchestrator loop-retry <loop-id> <step-id> --json
 across-orchestrator loop-status <loop-id> --json
 across-orchestrator loop-events <loop-id> --json
+across-orchestrator loop-events <loop-id> --after-sequence 42 --json
+across-orchestrator loop-telemetry <loop-id> --json
 across-orchestrator agent-card --json
 across-orchestrator plugin-manifest --json
 across-orchestrator plugin-status --json
@@ -291,12 +299,13 @@ runtime marks the running step `cancelled`, emits `loop.step.cancelled`, clears
 the lease, and finishes the loop as `cancelled`. Command adapters terminate their
 subprocess group before raising the cancellation error.
 Cancellation preserves the free-form reason text and also records a structured
-`cancel_category`: `user_cancelled`, `shutdown`, `superseded`, or
-`timeout_cancelled`. If omitted, the category is inferred from the reason and
-defaults to `user_cancelled`. CLI, HTTP, MCP schemas, health, and release
-evidence all use the same runtime cancel category policy; `shutdown` and
-`timeout_cancelled` are treated as release-blocking categories, while
-`user_cancelled` and `superseded` require host attention.
+`cancel_category`: `user_cancelled`, `shutdown`, `superseded`,
+`timeout_cancelled`, or `budget_exceeded`. If omitted, the category is inferred
+from the reason and defaults to `user_cancelled`. CLI, HTTP, MCP schemas,
+health, telemetry, and release evidence all use the same runtime cancel category
+policy; `shutdown`, `timeout_cancelled`, and `budget_exceeded` are treated as
+release-blocking categories, while `user_cancelled` and `superseded` require
+host attention.
 
 The dispatch cancellation guard invokes host dispatch adapters behind a managed
 runtime wait loop. This lets the Agent Loop finish as `cancelled` even when a
@@ -324,10 +333,13 @@ task events promote `loop_id` from task metadata plus `subtask_id` when present.
 Hosts can reconstruct `loop.step.started -> loop.step.heartbeat ->
 loop.step.completed/failed/cancelled -> task/subtask event` chains without
 parsing nested payloads.
-`GET /loops/{loop_id}/events/stream` keeps the existing finite SSE snapshot
-shape. Hosts that need live timeline updates can add `?follow=true`; the
-sidecar then tails durable loop events until the loop completes, fails, stops,
-is cancelled, reaches an approval wait, or the stream is idle for 30 seconds.
+`GET /loops/{loop_id}/events` and
+`GET /loops/{loop_id}/events/stream` accept `after_sequence=N` so hosts can
+resume from the highest sequence they have already rendered. The stream keeps
+the existing finite SSE snapshot shape. Hosts that need live timeline updates
+can add `?follow=true`; the sidecar then tails durable loop events until the
+loop completes, fails, stops, is cancelled, reaches an approval wait, or the
+stream is idle for 30 seconds.
 
 Hosts can tune the lease with loop metadata `actionLeaseSeconds` or
 `action_lease_seconds`. Hosts can also set `agentRouting` or `agent_routing` to
@@ -344,6 +356,18 @@ parsing the full event stream. The summary includes event audit coverage,
 recovery decisions, recovered steps, routing outcomes, memory-candidate counts,
 structured host release evidence, and cancellation category, while excluding
 raw transcripts, memory text, logs, and stack traces.
+
+`GET /loops/{loop_id}/telemetry` exposes bounded runtime metrics for host
+diagnostics and release review. The telemetry surface includes compact status,
+duration, recovery, routing, memory-candidate, cancellation, and budget signals
+without raw observations, memory text, logs, stack traces, provider keys, or
+local absolute paths.
+
+Hosts can declare loop budgets through metadata `agentLoopBudget`,
+`agent_loop_budget`, or `budget`. Supported fields include
+`maxConcurrentLoops`, `maxTurnsPerLoop`, and `maxRuntimeSeconds` with snake-case
+aliases. Excess concurrent starts are rejected with a structured `409`; turn or
+runtime exhaustion stops the loop with `cancel_category: budget_exceeded`.
 
 ### Agent Loop Recovery Policy Contract
 
@@ -434,6 +458,7 @@ Endpoints:
 - `GET /loops/{loop_id}`
 - `GET /loops/{loop_id}/health`
 - `GET /loops/{loop_id}/evidence-summary`
+- `GET /loops/{loop_id}/telemetry`
 - `GET /loops/{loop_id}/events`
 - `GET /loops/{loop_id}/events/stream`
 
@@ -456,6 +481,7 @@ The MCP server exposes:
 - `get_agent_loop`
 - `get_agent_loop_health`
 - `get_agent_loop_evidence_summary`
+- `get_agent_loop_telemetry`
 - `get_agent_loop_events`
 
 It also exposes resources:

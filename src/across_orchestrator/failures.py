@@ -7,8 +7,10 @@ from typing import Any
 FAILURE_TYPES = [
     "adapter_error",
     "approval_rejected",
+    "budget_exceeded",
     "environment_blocked",
     "lease_expired",
+    "max_runtime_exceeded",
     "max_turns_exceeded",
     "quality_failed",
     "timeout",
@@ -23,6 +25,10 @@ def failure_type_for_reason(reason: str | None) -> str:
         return "quality_failed"
     if value == "approval_rejected":
         return "approval_rejected"
+    if value == "budget_exceeded":
+        return "budget_exceeded"
+    if value == "max_runtime_exceeded":
+        return "max_runtime_exceeded"
     if value == "max_turns_exceeded":
         return "max_turns_exceeded"
     if value in FAILURE_TYPES:
