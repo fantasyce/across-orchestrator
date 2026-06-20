@@ -135,9 +135,17 @@ boundaries:
 - Across Agents Assistant: host app and control panel
 - Across Context: shared memory plugin
 - Across Orchestrator: task orchestration plugin
+- Across Autopilot: autonomous review and candidate-planning controller
 
 This lets the task runtime evolve independently and lets other hosts reuse the
 same contract, quality, and evidence loop.
+
+Across Autopilot integrates with Orchestrator through declared capabilities and
+candidate execution contracts. Autopilot generates review, candidate-plan, and
+promotion-report payloads; Orchestrator remains the owner of task execution,
+agent routing, quality gates, evidence, and durable Agent Loop state. Autopilot
+does not receive model credentials, signing assets, release authority, or host
+permissions through this integration.
 
 ## Install From Source
 
