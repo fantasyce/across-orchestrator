@@ -13,7 +13,7 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-Next release completes the current Agent Loop runtime contract with bounded
+`v0.6.18` completes the current Agent Loop runtime contract with bounded
 telemetry, `after_sequence` event resume for HTTP/CLI/MCP consumers,
 host-declared budget and concurrency enforcement, structured
 `budget_exceeded` cancellation, and routing evidence that includes reasons plus
@@ -150,7 +150,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.17/across_orchestrator-0.6.17-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.18/across_orchestrator-0.6.18-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -417,16 +417,18 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.6.17` Agent Loop runtime covers the release-blocking durability,
+The `v0.6.18` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
-policy, capability-hint routing, and structured memory candidate semantics. The
-evidence summary now promotes those durable signals into `host_release_evidence`
-so host apps can display a concise release-readiness surface without re-parsing
-raw events. The release evidence includes `readiness` (`ready`, `attention`, or
+policy, capability-hint routing, structured memory candidate semantics, bounded
+telemetry, event stream resume, and runtime budget/concurrency guardrails. The
+evidence summary promotes those durable signals into `host_release_evidence` so
+host apps can display a concise release-readiness surface without re-parsing raw
+events. The release evidence includes `readiness` (`ready`, `attention`, or
 `blocked`), stable checks for event audit, capability routing, recovery, memory
-candidates, and cancellation, plus compact risks and next actions.
+candidates, cancellation, telemetry, resume readiness, and budget/concurrency,
+plus compact risks and next actions.
 
 ## HTTP And A2A Card
 
