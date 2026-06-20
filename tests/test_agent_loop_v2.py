@@ -281,7 +281,7 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_agent_loop_uses_adapters_and_branches_to_remediation(self):
-        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultQualityGate
 
         memory = RecordingMemoryProvider()
         dispatcher = RemediationDispatcher()
@@ -334,7 +334,7 @@ class AgentLoopV2Tests(unittest.TestCase):
         )
 
     def test_approval_resume_executes_the_approved_adapter_action(self):
-        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultQualityGate
 
         dispatcher = RemediationDispatcher()
         runtime = AgentLoopRuntime(
@@ -617,7 +617,7 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(release_evidence["readiness"], "attention")
         self.assertEqual(
             [check["id"] for check in release_evidence["checks"]],
-            ["event_audit", "capability_routing", "recovery", "memory_candidates", "cancellation"],
+            ["event_audit", "capability_routing", "recovery", "memory_candidates", "cancellation", "budget"],
         )
         recovery_check = next(check for check in release_evidence["checks"] if check["id"] == "recovery")
         self.assertEqual(recovery_check["status"], "attention")
@@ -676,7 +676,7 @@ class AgentLoopV2Tests(unittest.TestCase):
         runtime = AgentLoopRuntime()
         self.assertEqual(
             tuple(CANCEL_CATEGORY_VALUES),
-            ("user_cancelled", "shutdown", "superseded", "timeout_cancelled"),
+            ("user_cancelled", "shutdown", "superseded", "timeout_cancelled", "budget_exceeded"),
         )
 
         for category in CANCEL_CATEGORY_VALUES:
@@ -698,6 +698,59 @@ class AgentLoopV2Tests(unittest.TestCase):
             self.assertEqual(cancellation_check["status"], expected_status)
             self.assertEqual(cancellation_check["category"], category)
             self.assertEqual(cancellation_risk["severity"], "high" if expected_status == "blocked" else "medium")
+
+    def test_budget_policy_rejects_excess_concurrent_loop_start(self):
+        from across_orchestrator.agent_loop import AgentLoopConcurrencyError, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        runtime.start_loop(
+            goal="Hold the first active loop",
+            project_root=str(self.project),
+            max_turns=8,
+            metadata={"agentLoopBudget": {"maxConcurrentLoops": 1}},
+        )
+
+        with self.assertRaises(AgentLoopConcurrencyError) as ctx:
+            runtime.start_loop(
+                goal="Reject the second active loop",
+                project_root=str(self.project),
+                max_turns=8,
+                metadata={"agentLoopBudget": {"maxConcurrentLoops": 1}},
+            )
+
+        self.assertEqual(ctx.exception.active_count, 1)
+        self.assertEqual(ctx.exception.max_concurrent_loops, 1)
+
+    def test_runtime_budget_stops_loop_with_release_evidence(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Stop after runtime budget",
+            project_root=str(self.project),
+            max_turns=8,
+            metadata={"agentLoopBudget": {"maxRuntimeSeconds": 0.001}},
+        )
+        time.sleep(0.01)
+
+        stopped = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(stopped.status, "stopped")
+        self.assertEqual(stopped.error, "max_runtime_exceeded")
+        events = runtime.list_loop_events(loop.loop_id)
+        self.assertIn("loop.budget.exceeded", [event["type"] for event in events])
+        budget_event = next(event for event in events if event["type"] == "loop.budget.exceeded")
+        self.assertEqual(budget_event["payload"]["cancel_category"], "budget_exceeded")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        budget_check = next(check for check in summary["host_release_evidence"]["checks"] if check["id"] == "budget")
+        self.assertEqual(budget_check["status"], "blocked")
+        self.assertEqual(summary["host_release_evidence"]["readiness"], "blocked")
+        telemetry = runtime.get_loop_telemetry(loop.loop_id)
+        self.assertEqual(telemetry["summary"]["cancel_category"], "budget_exceeded")
+        self.assertIn(
+            "budget_exceeded",
+            {metric.get("dimensions", {}).get("cancel_category") for metric in telemetry["metrics"]},
+        )
 
     def test_recovery_policy_schedules_remediation_for_quality_failure(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -1146,6 +1199,9 @@ class AgentLoopV2Tests(unittest.TestCase):
             [("task_dispatch", "builder"), ("remediation_dispatch", "browser-specialist")],
         )
         self.assertEqual(dispatcher.calls[0]["routing"]["source"], "metadata.agentCapabilityHints.preferred.task_dispatch")
+        self.assertEqual(dispatcher.calls[0]["routing"]["schema_version"], "agent-loop-routing/1.0")
+        self.assertIn("reason", dispatcher.calls[0]["routing"])
+        self.assertTrue(dispatcher.calls[0]["routing"]["alternatives"])
         remediation_routing = dispatcher.calls[1]["routing"]
         self.assertEqual(
             remediation_routing["source"],
@@ -1168,6 +1224,8 @@ class AgentLoopV2Tests(unittest.TestCase):
         )
         self.assertEqual(summary["routing"]["outcomes"][1]["matched_gate"], "browser_e2e")
         self.assertEqual(summary["routing"]["outcomes"][1]["capability_hint"], "browser_automation")
+        self.assertEqual(summary["routing"]["outcomes"][1]["schema_version"], "agent-loop-routing/1.0")
+        self.assertTrue(summary["routing"]["outcomes"][1]["alternatives"])
         release_evidence = summary["host_release_evidence"]
         self.assertEqual(release_evidence["readiness"], "ready")
         routing_check = next(check for check in release_evidence["checks"] if check["id"] == "capability_routing")
@@ -1176,6 +1234,33 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(routing_check["capability_hint_route_count"], 2)
         memory_check = next(check for check in release_evidence["checks"] if check["id"] == "memory_candidates")
         self.assertEqual(memory_check["status"], "passed")
+
+    def test_loop_telemetry_is_bounded_and_excludes_raw_memory_text(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultQualityGate
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=RemediationDispatcher(),
+                quality_gate=DefaultQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Measure loop telemetry",
+            project_root=str(self.project),
+            max_turns=8,
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+        telemetry = runtime.get_loop_telemetry(loop.loop_id)
+        raw = json.dumps(telemetry, sort_keys=True)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(telemetry["schema_version"], "agent-loop-telemetry/1.0")
+        self.assertEqual(telemetry["loop_id"], loop.loop_id)
+        self.assertIn("loop.duration_ms", [item["metric"] for item in telemetry["metrics"]])
+        self.assertEqual(telemetry["summary"]["memory_candidate_count"], 1)
+        self.assertNotIn("Reuse the existing serial delivery contract", raw)
 
     def test_concurrent_run_loop_executes_dispatch_once(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

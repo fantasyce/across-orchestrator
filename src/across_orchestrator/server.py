@@ -9,7 +9,7 @@ import os
 import time
 
 from .agent_card import render_agent_card
-from .agent_loop import AgentLoopRuntime
+from .agent_loop import AgentLoopConcurrencyError, AgentLoopRuntime
 from .host_conformance import evaluate_host_conformance
 from .paths import COMPONENT_ID, contains_protected_user_reference, is_developer_mode, is_product_mode, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
@@ -78,18 +78,31 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "evidence-summary":
                 self.respond(self.loop_runtime.get_loop_evidence_summary(parts[1]))
                 return
+            if len(parts) == 3 and parts[0] == "loops" and parts[2] == "telemetry":
+                self.respond(self.loop_runtime.get_loop_telemetry(parts[1]))
+                return
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "events":
-                self.respond(self.loop_runtime.list_loop_events(parts[1]))
+                self.respond(self.loop_runtime.list_loop_events(parts[1], after_sequence=_query_int(query, "after_sequence")))
                 return
             if len(parts) == 4 and parts[0] == "loops" and parts[2] == "events" and parts[3] == "stream":
+                after_sequence = _query_int(query, "after_sequence")
                 if _query_truthy(query.get("follow", [""])[0]):
-                    self.respond_loop_sse(parts[1])
+                    self.respond_loop_sse(parts[1], after_sequence=after_sequence)
                     return
-                self.respond_sse(self.loop_runtime.list_loop_events(parts[1]))
+                self.respond_sse(self.loop_runtime.list_loop_events(parts[1], after_sequence=after_sequence))
                 return
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
+        except AgentLoopConcurrencyError as exc:
+            self.respond(
+                {
+                    "error": "max_concurrent_loops_exceeded",
+                    "active_count": exc.active_count,
+                    "max_concurrent_loops": exc.max_concurrent_loops,
+                },
+                status=409,
+            )
         except ValueError as exc:
             self.respond({"error": "bad_request", "detail": str(exc)}, status=400)
         except Exception:
@@ -171,6 +184,15 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             self.respond({"error": "not_found"}, status=404)
         except KeyError:
             self.respond({"error": "not_found"}, status=404)
+        except AgentLoopConcurrencyError as exc:
+            self.respond(
+                {
+                    "error": "max_concurrent_loops_exceeded",
+                    "active_count": exc.active_count,
+                    "max_concurrent_loops": exc.max_concurrent_loops,
+                },
+                status=409,
+            )
         except ValueError as exc:
             self.respond({"error": "bad_request", "detail": str(exc)}, status=400)
         except Exception:
@@ -204,7 +226,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def respond_loop_sse(self, loop_id: str) -> None:
+    def respond_loop_sse(self, loop_id: str, *, after_sequence: int | None = None) -> None:
         self.loop_runtime.get_loop(loop_id)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -214,7 +236,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
         sent_keys: set[str] = set()
         idle_deadline = time.time() + 30
         while True:
-            events = self.loop_runtime.list_loop_events(loop_id)
+            events = self.loop_runtime.list_loop_events(loop_id, after_sequence=after_sequence)
             new_events = [event for event in events if _event_key(event) not in sent_keys]
             if new_events:
                 idle_deadline = time.time() + 30
@@ -262,6 +284,13 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
 
 def _query_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _query_int(query: dict[str, list[str]], key: str) -> int | None:
+    raw_values = query.get(key) or []
+    if not raw_values or raw_values[0] == "":
+        return None
+    return int(raw_values[0])
 
 
 def _event_key(event: dict[str, Any]) -> str:

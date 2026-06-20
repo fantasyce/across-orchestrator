@@ -245,12 +245,25 @@ class HttpTests(unittest.TestCase):
         heartbeat = next(event for event in events if event["type"] == "loop.step.heartbeat")
         self.assertEqual(heartbeat["correlation_id"], f"step:{heartbeat['step_id']}")
 
+        resumed_events = self.get(f"/loops/{loop_id}/events?after_sequence=1")
+        self.assertTrue(resumed_events)
+        self.assertTrue(all(event["sequence"] > 1 for event in resumed_events))
+
         stream = self.get_text(f"/loops/{loop_id}/events/stream")
         self.assertIn("event: loop.completed", stream)
         self.assertIn('"event_id":', stream)
         self.assertIn('"sequence":', stream)
         self.assertIn('"correlation_id":', stream)
         self.assertIn('"loop_id":', stream)
+
+        resumed_stream = self.get_text(f"/loops/{loop_id}/events/stream?after_sequence={events[-2]['sequence']}")
+        self.assertIn("event: loop.completed", resumed_stream)
+        self.assertNotIn("event: loop.started", resumed_stream)
+
+        telemetry = self.get(f"/loops/{loop_id}/telemetry")
+        self.assertEqual(telemetry["schema_version"], "agent-loop-telemetry/1.0")
+        self.assertEqual(telemetry["loop_id"], loop_id)
+        self.assertIn("loop.duration_ms", [metric["metric"] for metric in telemetry["metrics"]])
 
     def test_http_agent_loop_event_stream_follows_running_loop(self):
         loop = self.post(
@@ -281,6 +294,30 @@ class HttpTests(unittest.TestCase):
         self.assertIn("event: loop.started", body)
         self.assertIn("event: loop.completed", body)
         self.assertLess(body.index("event: loop.started"), body.index("event: loop.completed"))
+
+    def test_http_agent_loop_concurrency_budget_returns_409(self):
+        first = self.post(
+            "/loops",
+            {
+                "goal": "First budgeted loop",
+                "projectRoot": str(self.project),
+                "metadata": {"agentLoopBudget": {"maxConcurrentLoops": 1}},
+            },
+        )
+        self.assertEqual(first["status"], "pending")
+
+        status, payload = self.post_error(
+            "/loops",
+            {
+                "goal": "Second budgeted loop",
+                "projectRoot": str(self.project),
+                "metadata": {"agentLoopBudget": {"maxConcurrentLoops": 1}},
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "max_concurrent_loops_exceeded")
+        self.assertEqual(payload["active_count"], 1)
 
     def test_http_agent_loop_persists_all_loop_created_subtasks(self):
         loop = self.post(

@@ -140,10 +140,12 @@ class McpTests(unittest.TestCase):
         self.assertIn("loop.step.lease_expired", schema["events"])
         self.assertIn("loop.cancel_requested", schema["events"])
         self.assertIn("loop.dispatch.detached", schema["events"])
+        self.assertIn("loop.budget.exceeded", schema["events"])
         self.assertIn("loop.step.cancelled", schema["events"])
         self.assertIn("loop.step.recovery_decision", schema["events"])
         self.assertIn("loop.step.recovered", schema["events"])
         self.assertIn("get_agent_loop_health", schema["inspectionActions"])
+        self.assertIn("get_agent_loop_telemetry", schema["inspectionActions"])
         self.assertIn("healthSummary", schema)
         self.assertIn("recoveryPolicy", schema)
         self.assertIn("eventMetadata", schema)
@@ -152,7 +154,7 @@ class McpTests(unittest.TestCase):
         self.assertIn("correlation_id", schema["eventMetadata"]["fields"])
         self.assertEqual(
             schema["cancelCategories"],
-            ["user_cancelled", "shutdown", "superseded", "timeout_cancelled"],
+            ["user_cancelled", "shutdown", "superseded", "timeout_cancelled", "budget_exceeded"],
         )
         self.assertIn("cancellation_category", schema["healthSummary"]["fields"])
         self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
@@ -183,13 +185,18 @@ class McpTests(unittest.TestCase):
             [
                 "adapter_error",
                 "approval_rejected",
+                "budget_exceeded",
                 "environment_blocked",
                 "lease_expired",
+                "max_runtime_exceeded",
                 "max_turns_exceeded",
                 "quality_failed",
                 "timeout",
             ],
         )
+        self.assertEqual(schema["telemetry"]["schemaVersion"], "agent-loop-telemetry/1.0")
+        self.assertEqual(schema["budgetPolicy"]["schemaVersion"], "agent-loop-budget/1.0")
+        self.assertIn("afterSequence", schema["streamResume"]["mcpTool"])
 
     def test_mcp_agent_loop_tools(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -238,6 +245,8 @@ class McpTests(unittest.TestCase):
                 rpc(3, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"]}}),
                 rpc(4, "tools/call", {"name": "get_agent_loop_health", "arguments": {"loopId": loop["loop_id"]}}),
                 rpc(5, "tools/call", {"name": "get_agent_loop_evidence_summary", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(6, "tools/call", {"name": "get_agent_loop_telemetry", "arguments": {"loopId": loop["loop_id"]}}),
+                rpc(7, "tools/call", {"name": "get_agent_loop_events", "arguments": {"loopId": loop["loop_id"], "afterSequence": 1}}),
             ]
             process2 = subprocess.run(
                 [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
@@ -263,6 +272,11 @@ class McpTests(unittest.TestCase):
             self.assertEqual(summary["schema_version"], "0.1")
             self.assertEqual(summary["status"], "completed")
             self.assertTrue(summary["event_audit"]["sequence_contiguous"])
+            telemetry = json.loads(second[5]["result"]["content"][0]["text"])
+            self.assertEqual(telemetry["schema_version"], "agent-loop-telemetry/1.0")
+            resumed_events = json.loads(second[6]["result"]["content"][0]["text"])
+            self.assertTrue(resumed_events)
+            self.assertTrue(all(event["sequence"] > 1 for event in resumed_events))
 
     def test_mcp_agent_loop_reports_invalid_action_plan(self):
         with tempfile.TemporaryDirectory() as tempdir:

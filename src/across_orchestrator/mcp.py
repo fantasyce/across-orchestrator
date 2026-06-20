@@ -195,13 +195,26 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": "Fetch durable agent loop events.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"loopId": {"type": "string"}},
+                "properties": {
+                    "loopId": {"type": "string"},
+                    "afterSequence": {"type": "integer"},
+                    "after_sequence": {"type": "integer"},
+                },
                 "required": ["loopId"],
             },
         },
         {
             "name": "get_agent_loop_evidence_summary",
             "description": "Fetch a compact read-only Agent Loop evidence summary for routing, recovery, memory candidates, and event audit coverage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"loopId": {"type": "string"}},
+                "required": ["loopId"],
+            },
+        },
+        {
+            "name": "get_agent_loop_telemetry",
+            "description": "Fetch bounded Agent Loop telemetry metrics without raw observations or memory text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"loopId": {"type": "string"}},
@@ -264,6 +277,7 @@ def agent_loop_schema() -> dict[str, Any]:
             "get_agent_loop_health",
             "get_agent_loop_events",
             "get_agent_loop_evidence_summary",
+            "get_agent_loop_telemetry",
         ],
         "cancelCategories": list(CANCEL_CATEGORY_VALUES),
         "events": [
@@ -271,6 +285,7 @@ def agent_loop_schema() -> dict[str, Any]:
             "loop.next_action.selected",
             "loop.cancel_requested",
             "loop.dispatch.detached",
+            "loop.budget.exceeded",
             "loop.step.started",
             "loop.step.heartbeat",
             "loop.step.completed",
@@ -329,7 +344,10 @@ def agent_loop_schema() -> dict[str, Any]:
             }
         },
         "context": {
-            "routing": "dispatch context block describing selected_agent, base_agent, source, and optional matched_gate",
+            "routing": (
+                "dispatch context block with schema agent-loop-routing/1.0, selected_agent, "
+                "base_agent, source, reason, alternatives, and optional matched_gate"
+            ),
             "heartbeat": "callable lease renewal hook for long-running dispatch adapters",
             "cancellation": "cooperative token with is_cancelled(), reason(), and raise_if_cancelled() for running dispatch adapters",
         },
@@ -390,6 +408,34 @@ def agent_loop_schema() -> dict[str, Any]:
                 "readiness": ["ready", "attention", "blocked"],
                 "checkStatuses": ["passed", "attention", "blocked"],
             },
+        },
+        "telemetry": {
+            "schemaVersion": "agent-loop-telemetry/1.0",
+            "description": "Bounded aggregate loop metrics; excludes prompts, raw memory text, stack traces, logs, and local absolute paths.",
+            "metrics": [
+                "loop.duration_ms",
+                "loop.turn_count",
+                "loop.event_count",
+                "loop.routing.outcome_count",
+                "loop.routing.capability_hint_route_count",
+                "loop.routing.non_default_route_count",
+                "loop.recovery.decision_count",
+                "loop.recovery.applied_count",
+                "loop.memory_candidate.produced_count",
+                "loop.cancellation.requested_count",
+                "loop.budget.turns_remaining",
+            ],
+        },
+        "streamResume": {
+            "events": "GET /loops/{loop_id}/events?after_sequence=N",
+            "stream": "GET /loops/{loop_id}/events/stream?follow=true&after_sequence=N",
+            "mcpTool": "get_agent_loop_events accepts afterSequence.",
+        },
+        "budgetPolicy": {
+            "schemaVersion": "agent-loop-budget/1.0",
+            "metadataKeys": ["agentLoopBudget", "agent_loop_budget", "budget"],
+            "fields": ["maxConcurrentLoops", "maxTurnsPerLoop", "maxRuntimeSeconds"],
+            "budgetExceededCategory": "budget_exceeded",
         },
         "approvalPolicy": {
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
@@ -469,9 +515,14 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
     if name == "get_agent_loop_health":
         return loop_runtime.get_loop_health(arguments["loopId"])
     if name == "get_agent_loop_events":
-        return loop_runtime.list_loop_events(arguments["loopId"])
+        return loop_runtime.list_loop_events(
+            arguments["loopId"],
+            after_sequence=arguments.get("afterSequence") or arguments.get("after_sequence"),
+        )
     if name == "get_agent_loop_evidence_summary":
         return loop_runtime.get_loop_evidence_summary(arguments["loopId"])
+    if name == "get_agent_loop_telemetry":
+        return loop_runtime.get_loop_telemetry(arguments["loopId"])
     raise ValueError(f"Unknown tool: {name}")
 
 

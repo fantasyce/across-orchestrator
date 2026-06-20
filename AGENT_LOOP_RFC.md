@@ -1,184 +1,150 @@
-# Agent Loop Runtime RFCs
+# Agent Loop Runtime Contracts
 
-This document records the runtime-owned Agent Loop work that remains after the
-Across Agents Assistant `v0.8.28` host-side closeout.
+This document records the accepted Agent Loop runtime contracts implemented by
+Across Orchestrator after the Across Agents Assistant `v0.8.28` host-side
+closeout. Future product behavior should start from a new RFC instead of
+silently extending these contracts.
 
-These are specification gates. Do not implement runtime behavior from this file
-until the corresponding RFC section is accepted and tests are planned.
+Across Orchestrator owns loop lifecycle, event audit, recovery, routing
+evidence, budget enforcement, bounded telemetry, and protocol surfaces. Hosts own
+UI, credentials, local agent processes, explicit user controls, and release
+approval. Across Context owns memory policy and pending review.
 
-## RFC 1: Telemetry Schema
+## Acceptance Decision
 
-Owner: Across Orchestrator.
+Accepted: 2026-06-20.
 
-Consumers: Across Agents Assistant, release verification, future ecosystem
-automation.
+Decision owner: product owner request in the Agent Loop closeout cycle.
 
-### Goals
+Decision: implement RFC 1 telemetry, RFC 2 event resume, RFC 3 budget and
+concurrency policy, and RFC 4 routing evidence as the final engineering scope
+for the current Agent Loop release-quality contract.
 
-- Measure loop duration distributions by task class.
-- Count terminal outcomes by status and `cancel_category`.
-- Count stream fallback and reconnect behavior without raw transcripts.
-- Count capability mismatch, recovery decisions, and recovery outcomes.
-- Count memory candidate produced/accepted/rejected rates without storing memory
-  text in telemetry.
+Acceptance criteria:
 
-### Proposed Event Envelope
+- HTTP, CLI, and MCP expose the same telemetry and event-resume contract.
+- Telemetry is bounded and excludes prompts, raw observations, raw memory text,
+  stack traces, provider keys, local absolute paths, and hidden reasoning.
+- Budget and concurrency policy is host-declared, visible to hosts, and enforced
+  by Orchestrator rather than by AAA.
+- Budget exhaustion uses structured `cancel_category: budget_exceeded` and is
+  release-blocking.
+- Routing evidence exposes source, reason, selected agent, and alternatives
+  while Orchestrator remains the routing owner.
+- AAA and Context remain consumers or policy surfaces; neither takes over
+  Orchestrator runtime decisions.
 
-```json
-{
-  "schema_version": "agent-loop-telemetry/1.0",
-  "loop_id": "loop-...",
-  "event_id": "evt-...",
-  "sequence": 12,
-  "correlation_id": "corr-...",
-  "metric": "loop.duration_ms",
-  "value": 1234,
-  "unit": "ms",
-  "dimensions": {
-    "task_class": "release_e2e",
-    "terminal_status": "completed",
-    "cancel_category": null,
-    "recovery_action": null,
-    "selected_agent": "local"
-  },
-  "observed_at": "2026-06-20T00:00:00Z"
-}
-```
+## Telemetry Contract
 
-### Privacy Rules
+Implemented surfaces:
 
-- Never include prompts, raw memory text, stack traces, local absolute paths, or
-  provider keys.
-- Use counts, categories, and stable ids only.
-- Redact agent names if a host marks them private.
+- HTTP: `GET /loops/{loop_id}/telemetry`
+- CLI: `across-orchestrator loop-telemetry <loop-id> --json`
+- MCP: `get_agent_loop_telemetry`
 
-### Acceptance Tests
+Telemetry responses use schema `agent-loop-telemetry/1.0` and include compact
+summary data, bounded metrics, latest event sequence, and budget state. Metrics
+cover terminal status, cancellation category, duration, recovery, routing,
+memory-candidate, and budget outcomes where those signals are available.
 
-- Unit test that telemetry excludes raw observation payloads.
-- Unit test that failed, cancelled, recovered, and completed loops emit bounded
-  metrics.
-- MCP/HTTP schema test that unknown metrics remain forward compatible.
+Telemetry must not include prompts, raw observations, raw memory text, stack
+traces, provider keys, local absolute paths, or hidden reasoning. Hosts should
+treat unknown metric names as forward-compatible extensions.
 
-## RFC 2: Stream Resume Protocol
+## Event Resume Contract
 
-Owner: Across Orchestrator.
+Implemented surfaces:
 
-Consumers: hosts that render `events/stream?follow=true`.
-
-### Goals
-
-- Let hosts recover after app sleep, network interruption, or process restart.
-- Preserve the existing finite snapshot default.
-- Keep resume semantics deterministic across HTTP, CLI, and MCP surfaces.
-
-### Proposed API
-
-```text
-GET /loops/{loop_id}/events/stream?follow=true&after_sequence=42
-GET /loops/{loop_id}/events?after_sequence=42
-```
+- HTTP snapshot: `GET /loops/{loop_id}/events?after_sequence=N`
+- HTTP stream: `GET /loops/{loop_id}/events/stream?follow=true&after_sequence=N`
+- CLI: `across-orchestrator loop-events <loop-id> --after-sequence N --json`
+- MCP: `get_agent_loop_events` accepts `afterSequence`
 
 Rules:
 
 - `sequence` is the primary resume cursor.
-- `event_id` is retained for audit and deduplication.
+- `event_id` remains the audit and deduplication id.
 - Hosts should fetch a snapshot first, then follow from the highest observed
   sequence.
-- If `after_sequence` is older than retained events, return a snapshot with a
-  `resume_reset` marker.
-- If `after_sequence` is beyond the current tail, return no historical events
-  and continue following new ones.
+- If `after_sequence` is beyond the current tail, the snapshot returns no
+  historical events and a follow stream waits for future events.
+- Terminal loops close the stream after all available events are delivered.
 
-### Acceptance Tests
+## Budget And Concurrency Contract
 
-- Snapshot then follow does not duplicate events.
-- Reconnect after a known sequence returns only later events.
-- Reconnect with a stale sequence emits a reset marker.
-- Terminal loops close the stream after all events are delivered.
+Hosts may attach loop metadata under `agentLoopBudget`, `agent_loop_budget`, or
+`budget`.
 
-## RFC 3: Cost And Concurrency Policy
+Supported fields:
 
-Owner: Across Orchestrator policy, with product input from host apps.
-
-### Goals
-
-- Prevent runaway loops.
-- Make budgets visible before work starts.
-- Keep cancellation categories compatible with release-blocking health.
-
-### Proposed Policy Fields
-
-```json
-{
-  "schema_version": "agent-loop-budget/1.0",
-  "max_concurrent_loops": 2,
-  "max_turns_per_loop": 12,
-  "max_runtime_seconds": 1800,
-  "max_recovery_attempts": 2,
-  "timeout_cancel_category": "timeout_cancelled",
-  "budget_exceeded_category": "budget_exceeded"
-}
-```
+- `maxConcurrentLoops` or `max_concurrent_loops`
+- `maxTurnsPerLoop`, `max_turns_per_loop`, `maxTurns`, or `max_turns`
+- `maxRuntimeSeconds` or `max_runtime_seconds`
 
 Rules:
 
-- Defaults must be conservative and host-overridable.
-- Budget exhaustion is a structured cancellation category, not a free-form
-  failure string.
-- Hosts can display budgets but should not enforce hidden local limits unless
-  Orchestrator exposes the policy.
+- Excess active loops are rejected at start with HTTP `409` and a structured
+  payload containing active and maximum loop counts.
+- Turn or runtime exhaustion stops the loop with `cancel_category:
+  budget_exceeded`.
+- Budget state is exposed through health, telemetry, evidence summaries, and
+  host release evidence.
+- Existing loops without budget metadata continue to use runtime defaults.
 
-### Acceptance Tests
+`budget_exceeded` is a stable structured cancellation category and a
+release-blocking runtime condition.
 
-- Concurrent loop limit rejects excess starts with a stable status.
-- Max turns transitions the loop to a terminal category.
-- Timeout emits structured cancellation and release evidence.
-- Existing loops without budget metadata continue using defaults.
+## Routing Evidence Contract
 
-## RFC 4: Multi-Agent Routing And UX Contract
-
-Owner: Across Orchestrator for routing; host products for UX.
-
-### Goals
-
-- Define whether multi-agent behavior is automatic routing, explicit handoff,
-  or task decomposition.
-- Keep host UI thin: display routing evidence and expose approved controls.
-- Avoid Context taking ownership of task scheduling.
-
-### Proposed Routing Evidence
+Routing evidence uses schema `agent-loop-routing/1.0`.
 
 ```json
 {
   "schema_version": "agent-loop-routing/1.0",
   "loop_id": "loop-...",
   "step_id": "step-...",
-  "base_agent": "hermes",
-  "selected_agent": "openclaw",
+  "base_agent": "local",
+  "selected_agent": "browser-specialist",
   "source": "capability_hint",
   "reason": "requires browser_e2e capability",
   "alternatives": [
-    {"agent": "hermes", "reason": "missing browser_e2e"}
+    {"agent_id": "local", "selected": false, "reason": "missing browser_e2e"}
   ]
 }
 ```
 
-### Scope Boundaries
+Rules:
 
 - Orchestrator owns routing decisions and evidence.
-- AAA owns display and explicit user controls.
-- Context owns memory policy and pending review only.
-- Plugin manifests declare capabilities, not runtime decisions.
+- Hosts display routing evidence and explicit user controls.
+- Across Context may store safe routing ids in memory candidates, but it does
+  not select agents or approve handoffs.
+- Unknown routing sources and alternative fields must remain displayable by old
+  hosts.
 
-### Acceptance Tests
+## Completion Boundary
 
-- Routing evidence is present when a non-base agent is selected.
-- Unknown routing sources remain displayable by old hosts.
-- Rejected or cancelled handoffs preserve terminal state and evidence.
-- Memory candidate summaries record routing ids, not raw handoff transcripts.
+The current Agent Loop runtime contract is complete for release-quality host
+integration:
 
-## Automation Integration
+- durable event audit metadata
+- structured cancellation policy
+- health summaries
+- compact evidence summaries and host release evidence
+- live event streaming plus resume cursors
+- bounded telemetry
+- recovery policy
+- host capability-hint routing
+- structured routing evidence
+- structured memory write candidates
+- budget and concurrency enforcement
 
-The AAA ecosystem review workflow may create issues referencing these RFCs.
-It must not auto-merge runtime changes for any RFC above. Runtime changes require
-an accepted RFC, tests, and a release plan.
+Not included in this contract:
+
+- full multi-agent task-decomposition product UX
+- long-horizon analytics dashboards
+- cryptographic evidence trust chains
+- autonomous ecosystem workflow planning or release automation
+
+Those items require separate product specs because they change user experience,
+trust, or operating policy beyond the Agent Loop runtime contract.

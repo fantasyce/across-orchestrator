@@ -132,8 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     loop_evidence_summary.add_argument("loop_id")
     loop_evidence_summary.add_argument("--json", action="store_true")
 
+    loop_telemetry = sub.add_parser("loop-telemetry", help="Show bounded agent loop telemetry metrics")
+    loop_telemetry.add_argument("loop_id")
+    loop_telemetry.add_argument("--json", action="store_true")
+
     loop_events = sub.add_parser("loop-events", help="Show agent loop events")
     loop_events.add_argument("loop_id")
+    loop_events.add_argument("--after-sequence", type=int)
     loop_events.add_argument("--json", action="store_true")
 
     card = sub.add_parser("agent-card", help="Print the A2A-style Agent Card")
@@ -295,8 +300,12 @@ def main(argv: list[str] | None = None) -> int:
         _print(loop_runtime.get_loop_evidence_summary(args.loop_id), args.json)
         return 0
 
+    if args.command == "loop-telemetry":
+        _print(loop_runtime.get_loop_telemetry(args.loop_id), args.json)
+        return 0
+
     if args.command == "loop-events":
-        _print(loop_runtime.list_loop_events(args.loop_id), args.json)
+        _print(loop_runtime.list_loop_events(args.loop_id, after_sequence=args.after_sequence), args.json)
         return 0
 
     if args.command == "agent-card":
