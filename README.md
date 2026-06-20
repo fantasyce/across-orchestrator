@@ -116,6 +116,11 @@ Validated in this repository:
 Across Orchestrator still does not own model keys, macOS permissions, or local
 agent installation. Those remain host responsibilities by design.
 
+The remaining Agent Loop runtime work is tracked in
+[Agent Loop Runtime RFCs](AGENT_LOOP_RFC.md). Telemetry, stream resume, cost and
+concurrency policy, and multi-agent routing must start from those RFCs rather
+than ad hoc runtime changes.
+
 ## Why It Exists
 
 The Across ecosystem is organized as independent modules with explicit host
