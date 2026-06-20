@@ -27,6 +27,7 @@ PLUGIN_PROVIDE_CAPABILITIES = {
     "memory_hooks": "memoryHooks",
     "evidence_bundles": "evidenceBundles",
     "quality_gates": "qualityBenchmarks",
+    "autopilot_candidate_execution": "autopilotCandidateExecution",
 }
 
 

@@ -18,6 +18,8 @@ class AgentCardTests(unittest.TestCase):
         self.assertTrue(card["capabilities"]["memoryHooks"])
         self.assertTrue(card["capabilities"]["agentLoopMemoryHooksV2"])
         self.assertTrue(card["capabilities"]["evidenceBundles"])
+        self.assertTrue(card["capabilities"]["autopilotCandidateExecution"])
+        self.assertTrue(card["capabilities"]["autonomousIterationExecution"])
         self.assertEqual(card["protocols"]["mcp"]["command"], "across-orchestrator")
         self.assertTrue(card["protocols"]["mcp"]["approveAgentLoopAction"])
         self.assertEqual(card["protocols"]["a2a"]["agentCard"], "/.well-known/agent-card.json")
@@ -26,6 +28,7 @@ class AgentCardTests(unittest.TestCase):
         self.assertEqual(card["storage"]["defaultHome"], "~/.across/data/across-orchestrator")
         self.assertEqual(card["storage"]["acrossHomeEnv"], "ACROSS_HOME")
         self.assertEqual(card["skills"][0]["id"], "agent-loop-runtime")
+        self.assertTrue(any(skill["id"] == "autopilot-candidate-execution" for skill in card["skills"]))
 
 
 if __name__ == "__main__":

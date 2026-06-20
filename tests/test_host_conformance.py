@@ -47,6 +47,7 @@ def test_host_conformance_passes_for_generic_host_contract():
     assert report["protocols"]["sdk"] is True
     assert report["missingHostProvides"] == []
     assert report["unsupportedPluginProvides"] == []
+    assert "autopilot_candidate_execution" in report["pluginProvides"]
     assert "Across Agents Assistant" not in text
     assert "AAA" not in text
     assert "Documents/projects" not in text

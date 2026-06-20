@@ -50,6 +50,8 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "hostingPlatformAdapters": True,
             "hostNeutralAgentAdapters": True,
             "declarativeAgentAdapters": True,
+            "autopilotCandidateExecution": True,
+            "autonomousIterationExecution": True,
             "localFirst": True,
         },
         "compatibility": {
@@ -198,6 +200,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "memory_hooks",
                 "evidence_bundles",
                 "quality_gates",
+                "autopilot_candidate_execution",
             ],
         },
     }

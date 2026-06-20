@@ -30,6 +30,8 @@ def render_agent_card() -> dict:
             "eventStreaming": True,
             "hostNeutralAgentAdapters": True,
             "declarativeAgentAdapters": True,
+            "autopilotCandidateExecution": True,
+            "autonomousIterationExecution": True,
             "localFirst": True,
         },
         "protocols": {
@@ -86,6 +88,11 @@ def render_agent_card() -> dict:
                 "id": "evidence-bundles",
                 "name": "Evidence Bundles",
                 "description": "Export task status, contract, artifacts, quality, and event history.",
+            },
+            {
+                "id": "autopilot-candidate-execution",
+                "name": "Autopilot Candidate Execution",
+                "description": "Execute isolated candidate implementation, validation, and evidence tasks requested by Across Autopilot.",
             },
         ],
         "storage": {
