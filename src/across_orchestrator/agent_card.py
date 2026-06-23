@@ -28,6 +28,9 @@ def render_agent_card() -> dict:
             "evidenceBundles": True,
             "qualityBenchmarks": True,
             "eventStreaming": True,
+            "autopilotMetadataContract": True,
+            "autopilotMetadataReflection": True,
+            "hostModelDecision": True,
             "hostNeutralAgentAdapters": True,
             "declarativeAgentAdapters": True,
             "localFirst": True,
@@ -59,6 +62,9 @@ def render_agent_card() -> dict:
                 "loopCancel": "/loops/{loop_id}/cancel",
                 "loopRetryStep": "/loops/{loop_id}/steps/{step_id}/retry",
                 "loopHealth": "/loops/{loop_id}/health",
+                "loopEvidenceSummary": "/loops/{loop_id}/evidence-summary",
+                "autopilotMetadata": "metadata.autopilot",
+                "hostModelDecision": "metadata.model_policy.host_model_command",
             },
         },
         "skills": [
@@ -86,6 +92,16 @@ def render_agent_card() -> dict:
                 "id": "evidence-bundles",
                 "name": "Evidence Bundles",
                 "description": "Export task status, contract, artifacts, quality, and event history.",
+            },
+            {
+                "id": "autopilot-metadata-contract",
+                "name": "Autopilot Metadata Contract",
+                "description": "Validate and reflect LoopSpec run metadata for Across Autopilot without creating a separate execution state surface.",
+            },
+            {
+                "id": "host-model-decision",
+                "name": "Host Model Decision Boundary",
+                "description": "Request model-backed loop decisions through a host-declared JSON command while keeping model credentials with the host.",
             },
         ],
         "storage": {

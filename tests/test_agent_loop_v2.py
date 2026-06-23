@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -332,6 +333,72 @@ class AgentLoopV2Tests(unittest.TestCase):
             "loop.next_action.selected",
             [event["type"] for event in runtime.list_loop_events(loop.loop_id)],
         )
+
+    def test_agent_loop_can_dispatch_to_host_model_command(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        command = self.project / "host_model.py"
+        command.write_text(
+            "import json, os, sys\n"
+            "blocked = [key for key in os.environ if key.startswith('_PYI') or key.startswith('PYTHON')]\n"
+            "if blocked:\n"
+            "    raise SystemExit('packaged host environment leaked: ' + ','.join(sorted(blocked)))\n"
+            "request = json.loads(sys.stdin.read())\n"
+            "print(json.dumps({\n"
+            "  'schema_version': 'across-host-model-decision/1.0',\n"
+            "  'model_backed': True,\n"
+            "  'provider': 'fake-host',\n"
+            "  'model': 'fake-loop-engineer',\n"
+            "  'decision_hash': 'abc123',\n"
+            "  'decision': {'summary': 'Patch candidate docs.', 'patches': [\n"
+            "    {'path': 'docs/ITERATION.md', 'mode': 'overwrite', 'content': 'candidate patch'}\n"
+            "  ]},\n"
+            "  'patches': [{'path': 'docs/ITERATION.md', 'mode': 'overwrite', 'content': 'candidate patch'}]\n"
+            "}))\n",
+            encoding="utf-8",
+        )
+        previous_pyi = os.environ.get("_PYI_ARCHIVE_FILE")
+        previous_pythonpath = os.environ.get("PYTHONPATH")
+        os.environ["_PYI_ARCHIVE_FILE"] = "/Applications/Across Agents Assistant.app/Contents/Resources/backend/backend"
+        os.environ["PYTHONPATH"] = "/tmp/packaged-backend-src-that-must-not-leak"
+        runtime = AgentLoopRuntime()
+        try:
+            loop = runtime.start_loop(
+                goal="Use host model to plan a candidate patch",
+                project_root=str(self.project),
+                memory_policy={"read": False, "writeCandidates": False},
+                metadata={
+                    "actionPlan": ["task_dispatch", "quality_gate", "final_output"],
+                    "candidate_workspace": str(self.project),
+                    "model_policy": {
+                        "required": True,
+                        "host_model_command": [sys.executable, str(command)],
+                        "allowed_patch_paths": ["docs/ITERATION.md"],
+                    },
+                },
+            )
+            completed = runtime.run_loop(loop.loop_id)
+        finally:
+            if previous_pyi is None:
+                os.environ.pop("_PYI_ARCHIVE_FILE", None)
+            else:
+                os.environ["_PYI_ARCHIVE_FILE"] = previous_pyi
+            if previous_pythonpath is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = previous_pythonpath
+
+        self.assertEqual(completed.status, "completed")
+        dispatch = next(step for step in completed.steps if step.action.type == "task_dispatch")
+        quality = next(step for step in completed.steps if step.action.type == "quality_gate")
+        self.assertTrue(dispatch.observation.payload["model_backed"])
+        self.assertEqual(dispatch.observation.payload["provider"], "fake-host")
+        self.assertEqual(dispatch.observation.payload["patch_count"], 1)
+        self.assertTrue(quality.observation.payload["passed"])
+        self.assertEqual(quality.observation.payload["model_patch_count"], 1)
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["model_decision"]["provider"], "fake-host")
+        self.assertEqual(summary["model_decision"]["patch_paths"], ["docs/ITERATION.md"])
 
     def test_approval_resume_executes_the_approved_adapter_action(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime, DefaultQualityGate

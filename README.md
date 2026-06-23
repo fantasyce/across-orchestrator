@@ -13,7 +13,22 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
-`v0.6.18` completes the current Agent Loop runtime contract with bounded
+`v0.7.0` is the Loop Engineering runtime release for the Across ecosystem. It
+adds the Across Autopilot execution metadata contract: Agent Loop metadata can
+carry `metadata.autopilot` with run id, spec id, LoopSpec schema, evidence
+schema, action policy, and sandbox summary. The runtime validates that contract
+before accepting the metadata and reflects a non-secret Autopilot summary
+through loop status and evidence summaries so hosts can verify that an
+Autopilot-supervised run actually reached Orchestrator.
+
+`v0.7.0` also adds a host-declared model decision boundary for Agent Loop
+dispatch. When loop metadata includes `model_policy.required=true` and a
+`host_model_command`, Orchestrator calls that command with JSON loop context,
+records non-secret provider/model/decision-hash evidence, and keeps raw model
+credentials with the host. This enables model-backed Autopilot loops without
+coupling Orchestrator to AAA internals.
+
+The same release completes the current Agent Loop runtime contract with bounded
 telemetry, `after_sequence` event resume for HTTP/CLI/MCP consumers,
 host-declared budget and concurrency enforcement, structured
 `budget_exceeded` cancellation, and routing evidence that includes reasons plus
@@ -150,7 +165,7 @@ python3 -m pip install -e .
 Or install the current release wheel directly from GitHub Releases:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.6.18/across_orchestrator-0.6.18-py3-none-any.whl
+python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.7.0/across_orchestrator-0.7.0-py3-none-any.whl
 ```
 
 Packaged hosts should install the released wheel or pinned Git tag into a
@@ -417,7 +432,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.6.18` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.0` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
