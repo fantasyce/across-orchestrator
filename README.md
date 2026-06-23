@@ -162,15 +162,20 @@ cd across-orchestrator
 python3 -m pip install -e .
 ```
 
-Or install the current release wheel directly from GitHub Releases:
+Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install https://github.com/fantasyce/across-orchestrator/releases/download/v0.7.0/across_orchestrator-0.7.0-py3-none-any.whl
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.0"
 ```
 
-Packaged hosts should install the released wheel or pinned Git tag into a
-managed runtime under `~/.across/plugins/across-orchestrator` and expose the
-wrapper at `~/.across/bin/across-orchestrator`.
+The GitHub release is source-first. There is no attached wheel asset for
+`v0.7.0`; if a packaged host needs a wheel, build it from the pinned tag or
+attach the wheel to the release before using a wheel URL.
+
+Packaged hosts should install from the pinned Git tag or an explicitly attached
+release wheel into a managed runtime under
+`~/.across/plugins/across-orchestrator` and expose the wrapper at
+`~/.across/bin/across-orchestrator`.
 
 For development:
 
