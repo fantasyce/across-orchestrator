@@ -5,10 +5,13 @@ from pathlib import Path
 from typing import Any, Protocol
 import json
 import os
+import shlex
+import subprocess
 import threading
 import time
 
 from .cancellation import ActionCancelledError
+from .autopilot_contract import autopilot_metadata_summary, validate_autopilot_metadata
 from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
 from .models import new_id
 from .store import LocalStore
@@ -172,8 +175,176 @@ class LoopCancellationToken:
             return dict(self._cancel_request)
 
 
+def _loop_model_policy(loop: "LoopRun") -> dict[str, Any]:
+    metadata = getattr(loop, "metadata", {}) or {}
+    raw = metadata.get("model_policy")
+    if raw is None:
+        raw = metadata.get("modelPolicy")
+    autopilot = metadata.get("autopilot")
+    if raw is None and isinstance(autopilot, dict):
+        raw = autopilot.get("model_policy") or autopilot.get("modelPolicy")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _model_policy_enabled(model_policy: dict[str, Any]) -> bool:
+    return bool(
+        model_policy.get("required")
+        or model_policy.get("host_model_command")
+        or model_policy.get("hostModelCommand")
+        or os.environ.get("ACROSS_AAA_HOST_MODEL_COMMAND")
+    )
+
+
+def _host_model_command(model_policy: dict[str, Any]) -> list[str]:
+    raw = (
+        model_policy.get("host_model_command")
+        or model_policy.get("hostModelCommand")
+        or os.environ.get("ACROSS_AAA_HOST_MODEL_COMMAND")
+    )
+    if isinstance(raw, list):
+        command = [str(item) for item in raw if str(item).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.startswith("["):
+            parsed = json.loads(text)
+            if not isinstance(parsed, list):
+                raise ValueError("host_model_command JSON must be an array")
+            command = [str(item) for item in parsed if str(item).strip()]
+        else:
+            command = shlex.split(text)
+    else:
+        command = []
+    if not command:
+        raise ValueError("Host model command is required when model_policy.required=true")
+    return command
+
+
+def _host_model_command_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in list(env):
+        if (
+            key.startswith("_PYI")
+            or key.startswith("PYINSTALLER_")
+            or key.startswith("_MEIPASS")
+            or key.startswith("PYTHON")
+            or key in {
+                "__PYVENV_LAUNCHER__",
+                "VIRTUAL_ENV",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+                "LD_LIBRARY_PATH",
+            }
+        ):
+            env.pop(key, None)
+    return env
+
+
+def _dispatch_host_model_command(
+    *,
+    loop: "LoopRun",
+    action_type: str,
+    context: dict[str, Any],
+    model_policy: dict[str, Any],
+) -> dict[str, Any]:
+    command = _host_model_command(model_policy)
+    request = _host_model_request(loop=loop, action_type=action_type, context=context, model_policy=model_policy)
+    timeout = float(model_policy.get("timeout_seconds") or model_policy.get("timeoutSeconds") or 180)
+    completed = subprocess.run(
+        command,
+        input=json.dumps(request, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        env=_host_model_command_env(),
+        check=False,
+    )
+    stdout = str(completed.stdout or "").strip()
+    stderr = str(completed.stderr or "").strip()
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Host model command returned invalid JSON: {exc}") from exc
+    if completed.returncode != 0 or payload.get("status") == "failed":
+        detail = str(payload.get("error") or stderr or f"exit {completed.returncode}")
+        raise RuntimeError(f"Host model command failed: {detail[:600]}")
+    patches = payload.get("patches") or (payload.get("decision") or {}).get("patches") or []
+    if bool(model_policy.get("required")) and not patches:
+        raise RuntimeError("Host model command did not return any candidate patches")
+    return {
+        "dispatch": "completed",
+        "agent": loop.agent,
+        "adapter": "host_model_command",
+        "action_type": action_type,
+        "project_root": loop.project_root,
+        "model_backed": bool(payload.get("model_backed", True)),
+        "model_decision": payload,
+        "patches": patches,
+        "patch_count": len(patches) if isinstance(patches, list) else 0,
+        "provider": payload.get("provider"),
+        "model": payload.get("model"),
+        "decision_hash": payload.get("decision_hash"),
+        "message": (payload.get("decision") or {}).get("summary") or "Host model produced a candidate decision.",
+    }
+
+
+def _host_model_request(
+    *,
+    loop: "LoopRun",
+    action_type: str,
+    context: dict[str, Any],
+    model_policy: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = getattr(loop, "metadata", {}) or {}
+    autopilot = metadata.get("autopilot") if isinstance(metadata.get("autopilot"), dict) else {}
+    candidate_workspace = (
+        metadata.get("candidate_workspace")
+        or metadata.get("candidateWorkspace")
+        or model_policy.get("candidate_workspace")
+        or model_policy.get("candidateWorkspace")
+        or (autopilot.get("candidate_workspace") if isinstance(autopilot, dict) else None)
+        or loop.project_root
+    )
+    return {
+        "schema_version": "across-host-model-decision-request/1.0",
+        "role": model_policy.get("role") or "loop_engineer",
+        "goal": loop.goal,
+        "run_id": autopilot.get("run_id") if isinstance(autopilot, dict) else None,
+        "loop_id": loop.loop_id,
+        "action_type": action_type,
+        "candidate_workspace": candidate_workspace,
+        "source_repository": metadata.get("source_repository") or metadata.get("sourceRepository"),
+        "focus": metadata.get("focus") or model_policy.get("focus") or [],
+        "allowed_patch_paths": metadata.get("allowed_patch_paths") or metadata.get("allowedPatchPaths") or model_policy.get("allowed_patch_paths") or [],
+        "context_files": metadata.get("context_files") or metadata.get("contextFiles") or model_policy.get("context_files") or [],
+        "validation_feedback": _validation_feedback_from_context(context),
+        "model_policy": {
+            key: value
+            for key, value in model_policy.items()
+            if key not in {"host_model_command", "hostModelCommand"}
+        },
+    }
+
+
+def _validation_feedback_from_context(context: dict[str, Any]) -> list[dict[str, Any]]:
+    quality = context.get("quality")
+    if not isinstance(quality, list):
+        return []
+    return [item for item in quality if isinstance(item, dict)][:8]
+
+
+def _latest_dispatch_payload(loop: "LoopRun") -> dict[str, Any]:
+    for step in reversed(getattr(loop, "steps", []) or []):
+        if getattr(step.action, "type", None) in {"task_dispatch", "remediation_dispatch"}:
+            payload = getattr(step.observation, "payload", {})
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 class HostLoopDispatcher:
     def dispatch(self, *, loop: "LoopRun", action_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        model_policy = _loop_model_policy(loop)
+        if action_type in {"task_dispatch", "remediation_dispatch"} and _model_policy_enabled(model_policy):
+            return _dispatch_host_model_command(loop=loop, action_type=action_type, context=context, model_policy=model_policy)
         if action_type == "remediation_dispatch":
             return {
                 "dispatch": "completed",
@@ -194,6 +365,25 @@ class HostLoopDispatcher:
 class DefaultQualityGate:
     def evaluate(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
         required = list((loop.metadata.get("quality_gates") or ["artifact_integrity", "evidence_bundle", "memory_policy"]))
+        model_policy = _loop_model_policy(loop)
+        if bool(model_policy.get("required")):
+            latest_dispatch = _latest_dispatch_payload(loop)
+            patches = latest_dispatch.get("patches") if isinstance(latest_dispatch, dict) else None
+            model_backed = bool(latest_dispatch.get("model_backed")) if isinstance(latest_dispatch, dict) else False
+            passed = model_backed and isinstance(patches, list) and bool(patches)
+            return {
+                "quality": "passed" if passed else "failed",
+                "passed": passed,
+                "gate_count": len(required) + 1,
+                "required": [*required, "host_model_decision"],
+                "summary": (
+                    "Host model decision produced candidate patches."
+                    if passed
+                    else "Host model decision evidence is missing or patchless."
+                ),
+                "model_backed": model_backed,
+                "model_patch_count": len(patches or []) if isinstance(patches, list) else 0,
+            }
         return {
             "quality": "passed",
             "passed": True,
@@ -464,6 +654,9 @@ class AgentLoopRuntime:
             "loop_id": loop.loop_id,
             "status": loop.status,
             "agent": loop.agent,
+            "metadata": {
+                "autopilot": autopilot_metadata_summary(loop.metadata),
+            },
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "current_action_type": current_action_type,
@@ -510,12 +703,16 @@ class AgentLoopRuntime:
         }
         cancellation = self._evidence_cancellation(events)
         budget = self._budget_policy(loop)
+        model_decision = self._evidence_model_decision(loop)
 
         return {
             "schema_version": "0.1",
             "loop_id": loop.loop_id,
             "status": loop.status,
             "agent": loop.agent,
+            "metadata": {
+                "autopilot": autopilot_metadata_summary(loop.metadata),
+            },
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "final_output_ready": bool(loop.final_output),
@@ -523,6 +720,7 @@ class AgentLoopRuntime:
             "routing": routing,
             "recovery": recovery,
             "memory_candidates": memory_summary,
+            "model_decision": model_decision,
             "cancellation": cancellation,
             "budget": budget,
             "host_release_evidence": self._evidence_host_release_evidence(
@@ -846,6 +1044,7 @@ class AgentLoopRuntime:
 
     def _validated_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
         clean = dict(metadata or {})
+        validate_autopilot_metadata(clean)
         raw_plan = clean.get("actionPlan")
         if raw_plan is None:
             raw_plan = clean.get("action_plan")
@@ -1389,6 +1588,27 @@ class AgentLoopRuntime:
                 item["memory_id"] = memory["id"]
             candidates.append({key: value for key, value in item.items() if value is not None})
         return candidates
+
+    def _evidence_model_decision(self, loop: LoopRun) -> dict[str, Any] | None:
+        payload = _latest_dispatch_payload(loop)
+        decision = payload.get("model_decision") if isinstance(payload, dict) else None
+        if not isinstance(decision, dict):
+            return None
+        patches = decision.get("patches") or (decision.get("decision") or {}).get("patches") or []
+        patch_paths = [
+            str(item.get("path"))
+            for item in patches
+            if isinstance(item, dict) and item.get("path")
+        ]
+        return {
+            "schema_version": "agent-loop-model-decision-summary/1.0",
+            "model_backed": bool(decision.get("model_backed", payload.get("model_backed"))),
+            "provider": decision.get("provider") or payload.get("provider"),
+            "model": decision.get("model") or payload.get("model"),
+            "decision_hash": decision.get("decision_hash") or payload.get("decision_hash"),
+            "patch_count": len(patch_paths),
+            "patch_paths": patch_paths[:20],
+        }
 
     def _evidence_cancellation(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         for event in reversed(events):
