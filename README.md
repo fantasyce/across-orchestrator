@@ -13,6 +13,11 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
+`v0.7.3` is the synchronized main-branch release for the AAA plugin ecosystem.
+It keeps the generic host compatibility runtime from `v0.7.2` unchanged while
+publishing a fresh main-derived tag for hosts that pin the full plugin set
+together.
+
 `v0.7.2` is the generic host compatibility release. It makes Across
 Orchestrator explicitly reusable outside Across Agents Assistant: Codex,
 CloudCode Desktop, CloudCode CLI, Claude Desktop, Claude CLI, OpenClaw, Hermes,
@@ -195,11 +200,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.2"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.3"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.2`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.3`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -467,7 +472,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.7.2` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.3` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
