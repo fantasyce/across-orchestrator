@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
+import csv
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -26,6 +28,9 @@ SUPPORTED_LOOP_ACTION_TYPES = {
     "memory_write_candidate",
     "final_output",
 }
+HOST_DECLARED_CHECK_ACTION_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}_check$")
+VALIDATION_CONTRACT_SCHEMA = "across-validation-contract/1.0"
+VALIDATION_EVIDENCE_SCHEMA = "across-validation-evidence/1.0"
 SUPPORTED_RECOVERY_ACTIONS = {"stop", "retry", "remediation", "require_human"}
 RECOVERY_NEXT_ACTION_METADATA_KEY = "_recoveryNextAction"
 CANCEL_CATEGORY_VALUES = ("user_cancelled", "shutdown", "superseded", "timeout_cancelled", "budget_exceeded")
@@ -94,6 +99,11 @@ class AgentLoopConcurrencyError(ValueError):
         super().__init__("max_concurrent_loops_exceeded")
         self.active_count = active_count
         self.max_concurrent_loops = max_concurrent_loops
+
+
+def is_supported_loop_action_type(action_type: Any) -> bool:
+    text = str(action_type or "").strip()
+    return text in SUPPORTED_LOOP_ACTION_TYPES or bool(HOST_DECLARED_CHECK_ACTION_PATTERN.fullmatch(text))
 
 
 def cancel_category_release_status(category: Any = None, reason: Any = None) -> str:
@@ -612,7 +622,8 @@ class AgentLoopRuntime:
             raise ValueError("goal is required")
         clean_metadata = self._validated_metadata(metadata)
         self._enforce_start_concurrency_budget(clean_metadata)
-        effective_max_turns = self._budget_max_turns(clean_metadata) or max_turns
+        requested_max_turns = self._budget_max_turns(clean_metadata) or max_turns
+        effective_max_turns = self._effective_max_turns(clean_metadata, requested_max_turns)
         Path(project_root).expanduser().resolve().mkdir(parents=True, exist_ok=True)
         loop = LoopRun.new(
             goal=goal,
@@ -624,12 +635,16 @@ class AgentLoopRuntime:
             metadata=clean_metadata,
         )
         self.store.save_loop(loop)
-        self.store.append_loop_event(loop.loop_id, "loop.started", {
+        started_payload = {
             "goal": loop.goal,
             "agent": loop.agent,
             "memory_policy": loop.memory_policy,
             "budget": self._budget_policy(loop),
-        })
+        }
+        action_plan_budget = self._action_plan_budget(clean_metadata, requested_max_turns, effective_max_turns)
+        if action_plan_budget is not None:
+            started_payload["action_plan_budget"] = action_plan_budget
+        self.store.append_loop_event(loop.loop_id, "loop.started", started_payload)
         return loop
 
     def get_loop(self, loop_id: str) -> LoopRun:
@@ -704,6 +719,7 @@ class AgentLoopRuntime:
         cancellation = self._evidence_cancellation(events)
         budget = self._budget_policy(loop)
         model_decision = self._evidence_model_decision(loop)
+        action_plan = self._evidence_action_plan(loop)
 
         return {
             "schema_version": "0.1",
@@ -721,6 +737,7 @@ class AgentLoopRuntime:
             "recovery": recovery,
             "memory_candidates": memory_summary,
             "model_decision": model_decision,
+            "action_plan": action_plan,
             "cancellation": cancellation,
             "budget": budget,
             "host_release_evidence": self._evidence_host_release_evidence(
@@ -729,6 +746,7 @@ class AgentLoopRuntime:
                 routing=routing,
                 recovery=recovery,
                 memory_candidates=memory_summary,
+                action_plan=action_plan,
                 cancellation=cancellation,
                 budget=budget,
             ),
@@ -927,6 +945,32 @@ class AgentLoopRuntime:
             if not any(item.step_id == step.step_id for item in loop.steps):
                 loop.steps.append(step)
             loop.checkpoint_count = len([item for item in loop.steps if item.checkpoint])
+            if step.status == "failed":
+                self.store.append_loop_event(loop.loop_id, "loop.step.failed", asdict(step))
+                self.store.save_loop(loop)
+                failure_type = str(step.observation.payload.get("failure_type") or failure_type_for_reason("quality_gate_failed"))
+                if self._apply_recovery_policy(
+                    loop,
+                    step,
+                    reason=f"{action_type}_failed",
+                    error=str(step.observation.payload.get("summary") or f"{action_type}_failed"),
+                    failure_type=failure_type,
+                ):
+                    if loop.status == "awaiting_approval":
+                        return loop
+                    continue
+                return self._fail_loop(
+                    loop,
+                    reason=f"{action_type}_failed",
+                    error=str(step.observation.payload.get("summary") or f"{action_type}_failed"),
+                    payload={
+                        "action_type": action_type,
+                        "turn": step.turn,
+                        "step_id": step.step_id,
+                        "failure_type": failure_type,
+                        "validation": step.observation.payload,
+                    },
+                )
             if step.status == "waiting_approval":
                 loop.status = "awaiting_approval"
                 self.store.save_loop(loop)
@@ -1052,7 +1096,7 @@ class AgentLoopRuntime:
             return clean
         if not isinstance(raw_plan, list):
             raise ValueError("actionPlan must be a list of supported action types")
-        invalid = [str(item or "").strip() for item in raw_plan if str(item or "").strip() not in SUPPORTED_LOOP_ACTION_TYPES]
+        invalid = [str(item or "").strip() for item in raw_plan if not is_supported_loop_action_type(item)]
         if invalid:
             raise ValueError(f"unsupported actionPlan entries: {', '.join(invalid)}")
         return clean
@@ -1074,6 +1118,65 @@ class AgentLoopRuntime:
         )
         parsed = self._positive_int_or_none(raw)
         return parsed
+
+    def _effective_max_turns(self, metadata: dict[str, Any], requested_max_turns: int | None) -> int:
+        requested = max(1, int(requested_max_turns or 8))
+        minimum = self._action_plan_min_turns(metadata)
+        if minimum is None:
+            return requested
+        return max(requested, minimum)
+
+    def _metadata_action_plan(self, metadata: Mapping[str, Any] | None) -> list[str]:
+        if not isinstance(metadata, Mapping):
+            return []
+        raw_plan = metadata.get("actionPlan")
+        if raw_plan is None:
+            raw_plan = metadata.get("action_plan")
+        if not isinstance(raw_plan, list):
+            return []
+        plan: list[str] = []
+        for item in raw_plan:
+            action_type = str(item or "").strip()
+            if is_supported_loop_action_type(action_type):
+                plan.append(action_type)
+        return plan
+
+    def _action_plan_min_turns(self, metadata: Mapping[str, Any] | None) -> int | None:
+        action_plan = self._metadata_action_plan(metadata)
+        if not action_plan:
+            return None
+        return len(action_plan) + self._implicit_quality_turn_count(action_plan)
+
+    def _implicit_quality_turn_count(self, action_plan: list[str]) -> int:
+        implicit_turns = 0
+        for index, action_type in enumerate(action_plan):
+            if action_type not in {"task_dispatch", "remediation_dispatch"}:
+                continue
+            next_action = action_plan[index + 1] if index + 1 < len(action_plan) else None
+            if next_action != "quality_gate":
+                implicit_turns += 1
+        return implicit_turns
+
+    def _action_plan_budget(
+        self,
+        metadata: Mapping[str, Any],
+        requested_max_turns: int | None,
+        effective_max_turns: int,
+    ) -> dict[str, Any] | None:
+        action_plan = self._metadata_action_plan(metadata)
+        minimum = self._action_plan_min_turns(metadata)
+        if not action_plan or minimum is None:
+            return None
+        requested = max(1, int(requested_max_turns or 8))
+        return {
+            "schema_version": "agent-loop-action-plan-budget/1.0",
+            "declared_action_count": len(action_plan),
+            "implicit_quality_turn_count": self._implicit_quality_turn_count(action_plan),
+            "minimum_turns": minimum,
+            "requested_max_turns": requested,
+            "effective_max_turns": effective_max_turns,
+            "normalized": effective_max_turns > requested,
+        }
 
     def _budget_max_runtime_seconds(self, metadata: dict[str, Any]) -> float | None:
         budget = self._budget_metadata(metadata)
@@ -1387,7 +1490,7 @@ class AgentLoopRuntime:
 
     def _recovery_next_action(self, loop: LoopRun) -> str | None:
         action_type = str(loop.metadata.get(RECOVERY_NEXT_ACTION_METADATA_KEY) or "").strip()
-        return action_type if action_type in SUPPORTED_LOOP_ACTION_TYPES else None
+        return action_type if is_supported_loop_action_type(action_type) else None
 
     def _cancel_loop_state(
         self,
@@ -1610,6 +1713,37 @@ class AgentLoopRuntime:
             "patch_paths": patch_paths[:20],
         }
 
+    def _evidence_action_plan(self, loop: LoopRun) -> dict[str, Any]:
+        action_plan = self._host_action_plan(loop)
+        minimum = self._action_plan_min_turns(loop.metadata)
+        if not action_plan:
+            return {
+                "declared": False,
+                "complete": True,
+                "required_actions": [],
+                "required_action_count": 0,
+                "progress_count": 0,
+                "missing_actions": [],
+                "minimum_turns": None,
+                "implicit_quality_turn_count": 0,
+            }
+        progress = self._host_action_plan_progress(loop, action_plan)
+        progress = min(progress, len(action_plan))
+        return {
+            "declared": True,
+            "complete": progress >= len(action_plan),
+            "required_actions": action_plan,
+            "required_action_count": len(action_plan),
+            "progress_count": progress,
+            "missing_actions": action_plan[progress:],
+            "minimum_turns": minimum,
+            "implicit_quality_turn_count": self._implicit_quality_turn_count(action_plan),
+            "turns_used": loop.turn_count,
+            "max_turns_per_loop": loop.max_turns,
+            "final_output_required": "final_output" in action_plan,
+            "final_output_ready": bool(loop.final_output),
+        }
+
     def _evidence_cancellation(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         for event in reversed(events):
             if event.get("type") not in {"loop.cancel_requested", "loop.cancelled", "loop.step.cancelled"}:
@@ -1644,6 +1778,7 @@ class AgentLoopRuntime:
         routing: dict[str, Any],
         recovery: dict[str, Any],
         memory_candidates: dict[str, Any],
+        action_plan: dict[str, Any],
         cancellation: dict[str, Any],
         budget: dict[str, Any],
     ) -> dict[str, Any]:
@@ -1683,6 +1818,45 @@ class AgentLoopRuntime:
                 }
             )
             next_actions.append("Repair loop event audit metadata before using this loop as release evidence.")
+
+        if action_plan.get("declared"):
+            if action_plan.get("complete"):
+                add_check(
+                    "action_plan",
+                    "passed",
+                    f"Host action plan completed {action_plan.get('required_action_count', 0)} declared actions.",
+                    required_action_count=action_plan.get("required_action_count"),
+                    progress_count=action_plan.get("progress_count"),
+                    minimum_turns=action_plan.get("minimum_turns"),
+                    implicit_quality_turn_count=action_plan.get("implicit_quality_turn_count"),
+                )
+            else:
+                missing_actions = action_plan.get("missing_actions") if isinstance(action_plan.get("missing_actions"), list) else []
+                add_check(
+                    "action_plan",
+                    "blocked",
+                    "Host action plan did not complete all declared actions.",
+                    required_action_count=action_plan.get("required_action_count"),
+                    progress_count=action_plan.get("progress_count"),
+                    missing_actions=missing_actions,
+                    minimum_turns=action_plan.get("minimum_turns"),
+                    implicit_quality_turn_count=action_plan.get("implicit_quality_turn_count"),
+                )
+                risks.append(
+                    {
+                        "id": "action_plan_incomplete",
+                        "severity": "high",
+                        "summary": "The loop stopped before all host-declared actions completed.",
+                    }
+                )
+                next_actions.append("Continue or restart the loop until the host action plan is complete.")
+        else:
+            add_check(
+                "action_plan",
+                "passed",
+                "No host action plan was declared; loop policy controlled actions.",
+                declared=False,
+            )
 
         routed_count = int(routing.get("routed_action_count") or 0)
         non_default_count = int(routing.get("non_default_route_count") or 0)
@@ -2026,6 +2200,20 @@ class AgentLoopRuntime:
         observation_payload = self._execute_action(loop, action_type)
         if action_type == "final_output":
             loop.final_output = observation_payload.get("final_output")
+        if self._is_host_declared_check_action(action_type) and self._host_declared_check_failed(observation_payload):
+            observation_payload.setdefault("failure_type", failure_type_for_reason("quality_gate_failed"))
+            step.status = "failed"
+            step.observation = LoopObservation.new("failed", observation_payload)
+            step.checkpoint = self._checkpoint(
+                loop,
+                action_type,
+                turn,
+                observation_payload,
+                status="failed",
+                execution=self._complete_execution(step),
+            )
+            step.updated_at = time.time()
+            return step
         step.status = "completed"
         step.observation = LoopObservation.new("completed", observation_payload)
         step.checkpoint = self._checkpoint(
@@ -2071,6 +2259,8 @@ class AgentLoopRuntime:
         }.get(action_type, action_type.replace("_", " ").title())
 
     def _phase_for(self, action_type: str) -> str:
+        if self._is_host_declared_check_action(action_type):
+            return "verify"
         return {
             "memory_search": "context",
             "task_dispatch": "act",
@@ -2081,6 +2271,8 @@ class AgentLoopRuntime:
         }.get(action_type, "act")
 
     def _action_payload(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+        if self._is_host_declared_check_action(action_type):
+            return {"check": action_type, "mode": "host_declared_check", "side_effects": False}
         if action_type == "memory_search":
             return {"query": loop.goal, "provider": loop.memory_policy.get("provider", "across-context")}
         if action_type == "task_dispatch":
@@ -2145,7 +2337,309 @@ class AgentLoopRuntime:
             )
         if action_type == "final_output":
             return self.adapters.finalizer.finalize(loop=loop, context=context)
+        if self._is_host_declared_check_action(action_type):
+            return self._execute_host_declared_check(loop, action_type)
         return {}
+
+    def _execute_host_declared_check(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
+        contract = self._validation_contract(loop)
+        if not contract:
+            return {
+                "action_type": action_type,
+                "status": "passed",
+                "mode": "host_declared_check",
+                "side_effects": False,
+                "message": "host-declared check recorded; validation evidence is owned by the host or plugin tool that performed the check",
+            }
+        configured_action = str(contract.get("check_action") or contract.get("checkAction") or action_type)
+        if configured_action != action_type:
+            return {
+                "action_type": action_type,
+                "status": "passed",
+                "mode": "host_declared_check",
+                "side_effects": False,
+                "validation_contract": {
+                    "schema_version": str(contract.get("schema_version") or contract.get("schemaVersion") or ""),
+                    "check_action": configured_action,
+                    "applied": False,
+                },
+                "message": f"validation contract is bound to {configured_action}; {action_type} recorded only",
+            }
+        evidence = self._evaluate_validation_contract(loop, action_type, contract)
+        return evidence
+
+    def _host_declared_check_failed(self, payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        status = str(payload.get("status") or "").lower()
+        return status in {"failed", "blocked"} or payload.get("passed") is False
+
+    def _validation_contract(self, loop: LoopRun) -> dict[str, Any]:
+        metadata = getattr(loop, "metadata", {}) or {}
+        raw = (
+            metadata.get("validationContract")
+            or metadata.get("validation_contract")
+            or metadata.get("artifactContract")
+            or metadata.get("artifact_contract")
+        )
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _evaluate_validation_contract(self, loop: LoopRun, action_type: str, contract: dict[str, Any]) -> dict[str, Any]:
+        artifacts = self._contract_artifacts(contract)
+        failures: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        artifact_evidence: list[dict[str, Any]] = []
+        for artifact in artifacts:
+            evidence = self._evaluate_contract_artifact(loop, artifact)
+            artifact_evidence.append(evidence)
+            failures.extend(evidence.get("failures") or [])
+            warnings.extend(evidence.get("warnings") or [])
+        status = "failed" if failures else "passed"
+        return {
+            "schema_version": VALIDATION_EVIDENCE_SCHEMA,
+            "action_type": action_type,
+            "status": status,
+            "passed": not failures,
+            "mode": "host_declared_check",
+            "side_effects": False,
+            "contract_schema_version": str(contract.get("schema_version") or contract.get("schemaVersion") or VALIDATION_CONTRACT_SCHEMA),
+            "check_count": sum(int(item.get("check_count") or 0) for item in artifact_evidence),
+            "failure_count": len(failures),
+            "warning_count": len(warnings),
+            "failures": failures[:50],
+            "warnings": warnings[:50],
+            "artifacts": artifact_evidence,
+            "summary": (
+                f"{action_type} passed {len(artifact_evidence)} artifact contract(s)."
+                if not failures
+                else f"{action_type} failed {len(failures)} validation contract check(s)."
+            ),
+        }
+
+    def _contract_artifacts(self, contract: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = (
+            contract.get("artifacts")
+            or contract.get("required_artifacts")
+            or contract.get("requiredArtifacts")
+            or []
+        )
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        artifacts: list[dict[str, Any]] = []
+        for item in raw[:50]:
+            if isinstance(item, str):
+                artifacts.append({"path": item, "required": True})
+            elif isinstance(item, dict):
+                artifacts.append(dict(item))
+        return artifacts
+
+    def _evaluate_contract_artifact(self, loop: LoopRun, artifact: dict[str, Any]) -> dict[str, Any]:
+        path_value = str(artifact.get("path") or artifact.get("file") or "").strip()
+        evidence: dict[str, Any] = {
+            "path": path_value,
+            "required": artifact.get("required", True) is not False,
+            "type": str(artifact.get("type") or artifact.get("kind") or self._artifact_type_from_path(path_value)),
+            "present": False,
+            "check_count": 0,
+            "failures": [],
+            "warnings": [],
+        }
+        path = self._safe_artifact_path(loop.project_root, path_value)
+        if path is None:
+            evidence["failures"].append(self._validation_failure("artifact_path", path_value, "artifact path must stay inside project_root"))
+            evidence["check_count"] += 1
+            return evidence
+        exists = path.exists() and path.is_file()
+        evidence["present"] = exists
+        evidence["check_count"] += 1
+        if not exists:
+            if evidence["required"]:
+                evidence["failures"].append(self._validation_failure("artifact_presence", path_value, "required artifact is missing"))
+            return evidence
+
+        artifact_type = str(evidence["type"])
+        rows: list[dict[str, str]] | None = None
+        if artifact_type == "json":
+            parsed, error = self._read_json_artifact(path)
+            evidence["check_count"] += 1
+            if error:
+                evidence["failures"].append(self._validation_failure("json_parse", path_value, error))
+            else:
+                evidence["json_type"] = type(parsed).__name__
+                self._check_required_json_keys(parsed, artifact, path_value, evidence)
+        elif artifact_type == "csv":
+            rows, error = self._read_csv_artifact(path)
+            evidence["check_count"] += 1
+            if error:
+                evidence["failures"].append(self._validation_failure("csv_parse", path_value, error))
+            else:
+                evidence["row_count"] = len(rows)
+                evidence["columns"] = list(rows[0].keys()) if rows else self._csv_header(path)
+                self._check_csv_contract(rows, artifact, path_value, evidence)
+        elif artifact_type in {"markdown", "text"}:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            self._check_text_contract(text, artifact, path_value, evidence)
+        return evidence
+
+    def _safe_artifact_path(self, project_root: str, path_value: str) -> Path | None:
+        if not path_value:
+            return None
+        root = Path(project_root).expanduser().resolve()
+        candidate = Path(path_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return None
+        return resolved
+
+    def _artifact_type_from_path(self, path_value: str) -> str:
+        suffix = Path(path_value).suffix.lower()
+        if suffix == ".json":
+            return "json"
+        if suffix == ".csv":
+            return "csv"
+        if suffix in {".md", ".markdown"}:
+            return "markdown"
+        return "text"
+
+    def _read_json_artifact(self, path: Path) -> tuple[Any, str | None]:
+        try:
+            return json.loads(path.read_text(encoding="utf-8")), None
+        except Exception as exc:
+            return None, f"JSON parse failed: {exc}"
+
+    def _read_csv_artifact(self, path: Path) -> tuple[list[dict[str, str]], str | None]:
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                return [dict(row) for row in reader], None
+        except Exception as exc:
+            return [], f"CSV parse failed: {exc}"
+
+    def _csv_header(self, path: Path) -> list[str]:
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.reader(handle)
+                return [str(item) for item in next(reader, [])]
+        except Exception:
+            return []
+
+    def _check_required_json_keys(self, parsed: Any, artifact: dict[str, Any], path_value: str, evidence: dict[str, Any]) -> None:
+        keys = artifact.get("required_keys") or artifact.get("requiredKeys") or []
+        if not isinstance(keys, list):
+            return
+        for key in keys[:50]:
+            evidence["check_count"] += 1
+            if self._json_path_value(parsed, str(key)) is None:
+                evidence["failures"].append(self._validation_failure("json_required_key", path_value, f"missing JSON key: {key}"))
+
+    def _json_path_value(self, value: Any, dotted_path: str) -> Any:
+        current = value
+        for part in dotted_path.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return None
+        return current
+
+    def _check_csv_contract(self, rows: list[dict[str, str]], artifact: dict[str, Any], path_value: str, evidence: dict[str, Any]) -> None:
+        columns = artifact.get("columns") or artifact.get("expected_columns") or artifact.get("expectedColumns")
+        if isinstance(columns, list):
+            evidence["check_count"] += 1
+            actual = list(rows[0].keys()) if rows else evidence.get("columns", [])
+            expected = [str(item) for item in columns]
+            if actual != expected:
+                evidence["failures"].append(self._validation_failure("csv_columns", path_value, f"columns expected {expected} got {actual}"))
+        row_count = artifact.get("row_count", artifact.get("rowCount"))
+        if row_count is not None:
+            evidence["check_count"] += 1
+            if len(rows) != int(row_count):
+                evidence["failures"].append(self._validation_failure("csv_row_count", path_value, f"row_count expected {row_count} got {len(rows)}"))
+        min_rows = artifact.get("min_rows", artifact.get("minRows"))
+        if min_rows is not None:
+            evidence["check_count"] += 1
+            if len(rows) < int(min_rows):
+                evidence["failures"].append(self._validation_failure("csv_min_rows", path_value, f"min_rows expected {min_rows} got {len(rows)}"))
+        self._check_csv_sort(rows, artifact, path_value, evidence)
+        self._check_csv_row_expectations(rows, artifact, path_value, evidence)
+
+    def _check_csv_sort(self, rows: list[dict[str, str]], artifact: dict[str, Any], path_value: str, evidence: dict[str, Any]) -> None:
+        raw_sort = artifact.get("sort") or artifact.get("sort_order") or artifact.get("sortOrder")
+        if not raw_sort:
+            return
+        sort_specs = raw_sort if isinstance(raw_sort, list) else [raw_sort]
+        if not all(isinstance(item, dict) for item in sort_specs):
+            return
+        evidence["check_count"] += 1
+
+        def key(row: dict[str, str]) -> tuple[Any, ...]:
+            values: list[Any] = []
+            for spec in sort_specs:
+                field = str(spec.get("field") or "")
+                raw = row.get(field, "")
+                numeric = bool(spec.get("numeric")) or str(spec.get("type") or "").lower() in {"number", "numeric", "integer", "float"}
+                if numeric:
+                    try:
+                        value: Any = float(raw)
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    if str(spec.get("direction") or "asc").lower() == "desc":
+                        value = -value
+                else:
+                    value = str(raw)
+                    if str(spec.get("direction") or "asc").lower() == "desc":
+                        value = "".join(chr(0x10FFFF - ord(ch)) for ch in value)
+                values.append(value)
+            return tuple(values)
+
+        expected = sorted(rows, key=key)
+        if rows != expected:
+            evidence["failures"].append(self._validation_failure("csv_sort_order", path_value, "rows are not sorted according to contract"))
+
+    def _check_csv_row_expectations(self, rows: list[dict[str, str]], artifact: dict[str, Any], path_value: str, evidence: dict[str, Any]) -> None:
+        expectations = artifact.get("row_expectations") or artifact.get("rowExpectations") or []
+        if not isinstance(expectations, list):
+            return
+        for index, expectation in enumerate(expectations[:100]):
+            if not isinstance(expectation, dict):
+                continue
+            evidence["check_count"] += 1
+            match = expectation.get("match") if isinstance(expectation.get("match"), dict) else {}
+            expect = expectation.get("expect") if isinstance(expectation.get("expect"), dict) else {}
+            row = next((item for item in rows if all(str(item.get(str(k), "")) == str(v) for k, v in match.items())), None)
+            if row is None:
+                evidence["failures"].append(self._validation_failure("csv_row_expectation", path_value, f"row expectation {index} did not match any row"))
+                continue
+            mismatches = [
+                f"{key} expected {value} got {row.get(str(key), '')}"
+                for key, value in expect.items()
+                if str(row.get(str(key), "")) != str(value)
+            ]
+            if mismatches:
+                evidence["failures"].append(self._validation_failure("csv_row_expectation", path_value, "; ".join(mismatches)))
+
+    def _check_text_contract(self, text: str, artifact: dict[str, Any], path_value: str, evidence: dict[str, Any]) -> None:
+        for item in artifact.get("must_include") or artifact.get("mustInclude") or []:
+            evidence["check_count"] += 1
+            if str(item) not in text:
+                evidence["failures"].append(self._validation_failure("text_must_include", path_value, f"missing required text: {item}"))
+        for item in artifact.get("must_not_include") or artifact.get("mustNotInclude") or []:
+            evidence["check_count"] += 1
+            if str(item) in text:
+                evidence["failures"].append(self._validation_failure("text_must_not_include", path_value, f"forbidden text present: {item}"))
+
+    def _validation_failure(self, check_id: str, path: str, message: str) -> dict[str, Any]:
+        return {
+            "check_id": check_id,
+            "path": path,
+            "message": message,
+            "severity": "blocking",
+        }
 
     def _dispatch_with_cancellation_guard(
         self,
@@ -2817,17 +3311,11 @@ class AgentLoopRuntime:
         }
 
     def _host_action_plan(self, loop: LoopRun) -> list[str]:
-        raw_plan = loop.metadata.get("actionPlan")
-        if raw_plan is None:
-            raw_plan = loop.metadata.get("action_plan")
-        if not isinstance(raw_plan, list):
-            return []
-        plan: list[str] = []
-        for item in raw_plan:
-            action_type = str(item or "").strip()
-            if action_type in SUPPORTED_LOOP_ACTION_TYPES:
-                plan.append(action_type)
-        return plan
+        return self._metadata_action_plan(loop.metadata)
+
+    def _is_host_declared_check_action(self, action_type: Any) -> bool:
+        text = str(action_type or "").strip()
+        return text not in SUPPORTED_LOOP_ACTION_TYPES and bool(HOST_DECLARED_CHECK_ACTION_PATTERN.fullmatch(text))
 
     def _host_action_plan_progress(self, loop: LoopRun, action_plan: list[str]) -> int:
         plan_index = 0
@@ -3016,6 +3504,8 @@ class AgentLoopRuntime:
             return self.adapters.quality_gate.__class__.__name__
         if action_type == "final_output":
             return self.adapters.finalizer.__class__.__name__
+        if self._is_host_declared_check_action(action_type):
+            return "host_declared_check"
         return "unknown"
 
     def _latest_step(self, loop: LoopRun, action_type: str) -> LoopStep | None:
@@ -3055,9 +3545,22 @@ class AgentLoopRuntime:
 
 def default_agent_loop_adapters(env: dict[str, str] | None = None) -> AgentLoopAdapters:
     source = env or os.environ
-    provider = str(source.get("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER") or "").strip().lower()
-    if provider in {"across-context", "across_context"}:
+    if _should_enable_across_context_memory_provider(source):
         from .across_context import AcrossContextMemoryProvider
 
         return AgentLoopAdapters(memory_provider=AcrossContextMemoryProvider(env=source))
     return AgentLoopAdapters()
+
+
+def _should_enable_across_context_memory_provider(source: Mapping[str, str]) -> bool:
+    provider = str(source.get("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER") or "").strip().lower()
+    if provider in {"none", "disabled", "off", "false", "0"}:
+        return False
+    if provider in {"across-context", "across_context"}:
+        return True
+    if str(source.get("ACROSS_CONTEXT_COMMAND") or "").strip():
+        return True
+    from .paths import ecosystem_bin_dir
+
+    candidate = ecosystem_bin_dir(source) / "across-context"
+    return candidate.is_file() and os.access(candidate, os.X_OK)

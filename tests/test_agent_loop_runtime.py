@@ -180,6 +180,54 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(completed.checkpoint_count, 5)
 
+    def test_host_action_plan_budget_floor_covers_implicit_quality_gate(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Validate a business contract before final output",
+            project_root=str(self.project),
+            memory_policy={"read": True, "writeCandidates": False},
+            max_turns=4,
+            metadata={
+                "actionPlan": [
+                    "memory_search",
+                    "task_dispatch",
+                    "business_contract_check",
+                    "quality_gate",
+                    "final_output",
+                ]
+            },
+        )
+
+        self.assertEqual(loop.max_turns, 6)
+        started = runtime.list_loop_events(loop.loop_id)[0]
+        self.assertTrue(started["payload"]["action_plan_budget"]["normalized"])
+        self.assertEqual(started["payload"]["action_plan_budget"]["minimum_turns"], 6)
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.turn_count, 6)
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            [
+                "memory_search",
+                "task_dispatch",
+                "quality_gate",
+                "business_contract_check",
+                "quality_gate",
+                "final_output",
+            ],
+        )
+        self.assertEqual(completed.final_output, "Agent loop completed for: Validate a business contract before final output")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertTrue(summary["action_plan"]["declared"])
+        self.assertTrue(summary["action_plan"]["complete"])
+        self.assertEqual(summary["action_plan"]["minimum_turns"], 6)
+        action_plan_check = next(check for check in summary["host_release_evidence"]["checks"] if check["id"] == "action_plan")
+        self.assertEqual(action_plan_check["status"], "passed")
+
     def test_loop_turn_budget_stops_before_unbounded_execution(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
 

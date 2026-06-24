@@ -684,7 +684,7 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(release_evidence["readiness"], "attention")
         self.assertEqual(
             [check["id"] for check in release_evidence["checks"]],
-            ["event_audit", "capability_routing", "recovery", "memory_candidates", "cancellation", "budget"],
+            ["event_audit", "action_plan", "capability_routing", "recovery", "memory_candidates", "cancellation", "budget"],
         )
         recovery_check = next(check for check in release_evidence["checks"] if check["id"] == "recovery")
         self.assertEqual(recovery_check["status"], "attention")
@@ -1126,6 +1126,141 @@ class AgentLoopV2Tests(unittest.TestCase):
             )
 
         self.assertIn("unsupported actionPlan entries", str(exc.exception))
+
+    def test_host_declared_check_action_is_recorded_without_side_effects(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(memory_provider=RecordingMemoryProvider())
+        )
+
+        loop = runtime.start_loop(
+            goal="Record a generic manifest contract check",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": True, "writeCandidates": False},
+            metadata={
+                "actionPlan": [
+                    "memory_search",
+                    "manifest_contract_check",
+                    "task_dispatch",
+                    "quality_gate",
+                    "final_output",
+                ]
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            [step.action.type for step in completed.steps],
+            ["memory_search", "manifest_contract_check", "task_dispatch", "quality_gate", "final_output"],
+        )
+        check_step = completed.steps[1]
+        self.assertEqual(check_step.phase, "verify")
+        self.assertEqual(check_step.observation.payload["mode"], "host_declared_check")
+        self.assertFalse(check_step.observation.payload["side_effects"])
+
+    def test_host_declared_check_consumes_generic_validation_contract(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        outputs = self.project / "outputs"
+        outputs.mkdir()
+        (outputs / "risk.csv").write_text(
+            "account_id,risk_score,arr_usd,risk_band\n"
+            "A-101,100,420000,critical\n"
+            "A-107,69,500000,critical\n",
+            encoding="utf-8",
+        )
+        (outputs / "audit.json").write_text('{"loop_id":"loop-test","status":"completed"}', encoding="utf-8")
+        (outputs / "memo.md").write_text("A-107 risk score is 69 and the audit passed.\n", encoding="utf-8")
+        runtime = AgentLoopRuntime()
+
+        loop = runtime.start_loop(
+            goal="Validate a generic artifact contract",
+            project_root=str(self.project),
+            max_turns=4,
+            metadata={
+                "actionPlan": ["business_contract_check", "final_output"],
+                "validationContract": {
+                    "schema_version": "across-validation-contract/1.0",
+                    "check_action": "business_contract_check",
+                    "artifacts": [
+                        {
+                            "path": "outputs/risk.csv",
+                            "type": "csv",
+                            "columns": ["account_id", "risk_score", "arr_usd", "risk_band"],
+                            "row_count": 2,
+                            "sort": [
+                                {"field": "risk_score", "direction": "desc", "numeric": True},
+                                {"field": "arr_usd", "direction": "desc", "numeric": True},
+                            ],
+                            "row_expectations": [
+                                {"match": {"account_id": "A-107"}, "expect": {"risk_score": "69", "risk_band": "critical"}},
+                            ],
+                        },
+                        {"path": "outputs/audit.json", "type": "json", "required_keys": ["loop_id", "status"]},
+                        {"path": "outputs/memo.md", "type": "markdown", "must_include": ["A-107 risk score is 69"]},
+                    ],
+                },
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        check_step = completed.steps[0]
+        self.assertEqual(check_step.action.type, "business_contract_check")
+        self.assertEqual(check_step.status, "completed")
+        self.assertEqual(check_step.observation.payload["schema_version"], "across-validation-evidence/1.0")
+        self.assertEqual(check_step.observation.payload["status"], "passed")
+        self.assertTrue(check_step.observation.payload["passed"])
+        self.assertEqual(check_step.observation.payload["failure_count"], 0)
+
+    def test_failed_validation_contract_blocks_host_declared_check(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        outputs = self.project / "outputs"
+        outputs.mkdir()
+        (outputs / "risk.csv").write_text(
+            "account_id,risk_score,arr_usd,risk_band\n"
+            "A-101,100,420000,critical\n"
+            "A-107,77,500000,critical\n",
+            encoding="utf-8",
+        )
+        runtime = AgentLoopRuntime()
+
+        loop = runtime.start_loop(
+            goal="Block final output when contract fails",
+            project_root=str(self.project),
+            max_turns=4,
+            metadata={
+                "actionPlan": ["business_contract_check", "final_output"],
+                "validationContract": {
+                    "schema_version": "across-validation-contract/1.0",
+                    "check_action": "business_contract_check",
+                    "artifacts": [
+                        {
+                            "path": "outputs/risk.csv",
+                            "type": "csv",
+                            "row_expectations": [
+                                {"match": {"account_id": "A-107"}, "expect": {"risk_score": "69"}},
+                            ],
+                        }
+                    ],
+                },
+            },
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "failed")
+        self.assertEqual(completed.steps[0].status, "failed")
+        self.assertEqual(completed.steps[0].observation.payload["status"], "failed")
+        self.assertEqual(completed.steps[0].observation.payload["failure_type"], "quality_failed")
+        self.assertIn("risk_score expected 69 got 77", json.dumps(completed.steps[0].observation.payload))
+        self.assertIsNone(completed.final_output)
 
     def test_host_action_plan_continues_after_inserted_remediation_steps(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime

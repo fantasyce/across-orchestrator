@@ -13,6 +13,12 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
+`v0.7.1` is the generic agent-plugin runtime hardening release. It adds
+host-neutral external agent registration and protocol-gateway helpers, preserves
+the Agent Loop action-plan quality gate inside the loop budget, and keeps
+managed runtime wrappers relocatable under `~/.across/bin` instead of binding
+hosts to a source checkout path.
+
 `v0.7.0` is the Loop Engineering runtime release for the Across ecosystem. It
 adds the Across Autopilot execution metadata contract: Agent Loop metadata can
 carry `metadata.autopilot` with run id, spec id, LoopSpec schema, evidence
@@ -165,11 +171,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.0"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.1"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.0`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.1`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -437,7 +443,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.7.0` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.1` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
