@@ -7,8 +7,10 @@ from typing import Any
 
 from .agent_card import render_agent_card
 from .agent_loop import CANCEL_CATEGORY_VALUES
+from .external_agents import ExternalAgentRegistry
 from .host_conformance import evaluate_host_conformance, load_host_contract
 from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
+from .protocol_gateway import render_protocol_gateway
 from .runtime import OrchestratorRuntime
 from .store import LocalStore
 
@@ -143,6 +145,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     card = sub.add_parser("agent-card", help="Print the A2A-style Agent Card")
     card.add_argument("--json", action="store_true")
+
+    protocol_gateway = sub.add_parser("protocol-gateway", help="Print the AAA protocol gateway matrix")
+    protocol_gateway.add_argument("--json", action="store_true")
+
+    external_agents = sub.add_parser("external-agents", help="Manage generic external agent plugin manifests")
+    external_agents_sub = external_agents.add_subparsers(dest="external_agents_command")
+    external_validate = external_agents_sub.add_parser("validate", help="Validate an across-agent-plugin manifest")
+    external_validate.add_argument("--manifest", required=True)
+    external_validate.add_argument("--json", action="store_true")
+    external_register = external_agents_sub.add_parser("register", help="Register an across-agent-plugin manifest")
+    external_register.add_argument("--manifest", required=True)
+    external_register.add_argument("--json", action="store_true")
+    external_list = external_agents_sub.add_parser("list", help="List registered external agent plugins")
+    external_list.add_argument("--manifest", action="append", default=[])
+    external_list.add_argument("--probe", action="store_true")
+    external_list.add_argument("--json", action="store_true")
+    external_health = external_agents_sub.add_parser("health", help="Summarize external agent plugin health")
+    external_health.add_argument("--agent-id")
+    external_health.add_argument("--probe", action="store_true")
+    external_health.add_argument("--json", action="store_true")
 
     manifest = sub.add_parser("plugin-manifest", help="Print the Across plugin manifest")
     manifest.add_argument("--json", action="store_true")
@@ -311,6 +333,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "agent-card":
         _print(render_agent_card(), args.json)
         return 0
+
+    if args.command == "protocol-gateway":
+        _print(render_protocol_gateway(), args.json)
+        return 0
+
+    if args.command == "external-agents":
+        registry = ExternalAgentRegistry()
+        if args.external_agents_command == "validate":
+            _print(registry.validate_manifest_file(args.manifest), args.json)
+            return 0
+        if args.external_agents_command == "register":
+            _print(registry.register_manifest_file(args.manifest), args.json)
+            return 0
+        if args.external_agents_command == "list":
+            manifests = registry.list_manifests()
+            for manifest_path in args.manifest or []:
+                manifests.append(registry.validate_manifest_file(manifest_path))
+            _print(registry.registry_payload(manifests, probe=args.probe), args.json)
+            return 0
+        if args.external_agents_command == "health":
+            _print(registry.health_payload(args.agent_id, probe=args.probe), args.json)
+            return 0
+        parser.error("external-agents requires validate, register, list, or health")
 
     if args.command == "plugin-manifest":
         _print(render_plugin_manifest(), args.json)

@@ -33,6 +33,8 @@ def render_agent_card() -> dict:
             "hostModelDecision": True,
             "hostNeutralAgentAdapters": True,
             "declarativeAgentAdapters": True,
+            "externalAgentPluginRegistry": True,
+            "genericAgentPluginSchema": True,
             "localFirst": True,
         },
         "protocols": {
@@ -82,6 +84,11 @@ def render_agent_card() -> dict:
                 "id": "agent-adapter-specs",
                 "name": "Declarative Agent Adapters",
                 "description": "Bind arbitrary host agent ids to explicit command, demo, or reference execution adapters.",
+            },
+            {
+                "id": "external-agent-plugins",
+                "name": "External Agent Plugin Registry",
+                "description": "Register, validate, and expose generic across-agent-plugin/1.0 manifests for arbitrary local or sidecar agents.",
             },
             {
                 "id": "delivery-contracts",

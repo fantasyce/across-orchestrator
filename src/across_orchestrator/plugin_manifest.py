@@ -53,6 +53,8 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "hostingPlatformAdapters": True,
             "hostNeutralAgentAdapters": True,
             "declarativeAgentAdapters": True,
+            "externalAgentPluginRegistry": True,
+            "genericAgentPluginSchema": True,
             "localFirst": True,
         },
         "compatibility": {
@@ -204,6 +206,8 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "memory_hooks",
                 "evidence_bundles",
                 "quality_gates",
+                "external_agent_plugin_registry",
+                "generic_agent_plugin_schema",
             ],
         },
     }
@@ -281,7 +285,18 @@ def _resolve_status_command(command: str, source: Mapping[str, str]) -> str:
 
 def _memory_provider_status(source: Mapping[str, str]) -> dict:
     provider = str(source.get("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER") or "").strip().lower()
-    if provider in {"across-context", "across_context"}:
+    if provider in {"none", "disabled", "off", "false", "0"}:
+        return {
+            "provider": provider,
+            "status": "disabled",
+            "warnings": [],
+        }
+    managed_context = ecosystem_bin_dir(source) / "across-context"
+    if (
+        provider in {"across-context", "across_context"}
+        or str(source.get("ACROSS_CONTEXT_COMMAND") or "").strip()
+        or (managed_context.is_file() and os.access(managed_context, os.X_OK))
+    ):
         from .across_context import diagnose_across_context_command
 
         return diagnose_across_context_command(

@@ -140,6 +140,35 @@ class AcrossContextProviderTests(unittest.TestCase):
         self.assertEqual(completed.steps[0].observation.payload["provider"], "across-context")
         self.assertEqual(completed.steps[0].observation.payload["result_count"], 1)
 
+    def test_default_runtime_uses_across_context_when_context_command_is_configured(self):
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        self.run_context(
+            "remember",
+            "Configured Context command should activate the default provider.",
+            "--scope",
+            "project",
+            "--project",
+            str(self.project),
+            "--status",
+            "active",
+            "--json",
+        )
+        os.environ.pop("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER", None)
+        os.environ["ACROSS_CONTEXT_COMMAND"] = f"node {self.context_root / 'src' / 'cli.js'}"
+
+        runtime = AgentLoopRuntime()
+        loop = runtime.start_loop(
+            goal="Configured Context command should activate the default provider",
+            project_root=str(self.project),
+            max_turns=8,
+        )
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.steps[0].observation.payload["provider"], "across-context")
+        self.assertEqual(completed.steps[0].observation.payload["result_count"], 1)
+        self.assertEqual(completed.steps[0].checkpoint["adapter"], "AcrossContextMemoryProvider")
+
     def test_product_mode_does_not_execute_development_checkout_context_command(self):
         from across_orchestrator.across_context import AcrossContextMemoryProvider
 

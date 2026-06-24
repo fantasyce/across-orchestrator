@@ -27,6 +27,8 @@ PLUGIN_PROVIDE_CAPABILITIES = {
     "memory_hooks": "memoryHooks",
     "evidence_bundles": "evidenceBundles",
     "quality_gates": "qualityBenchmarks",
+    "external_agent_plugin_registry": "externalAgentPluginRegistry",
+    "generic_agent_plugin_schema": "genericAgentPluginSchema",
 }
 
 

@@ -6,10 +6,209 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
-from .agent_loop import CANCEL_CATEGORY_VALUES
+from .agent_loop import CANCEL_CATEGORY_VALUES, HOST_DECLARED_CHECK_ACTION_PATTERN, SUPPORTED_LOOP_ACTION_TYPES
+from .external_agents import ExternalAgentRegistry, normalize_agent_plugin_manifest
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
+
+
+def _loop_action_plan_item_schema() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "description": (
+            "One loop action type. Use built-in actions or host-declared read-only check actions "
+            "ending in _check such as business_contract_check. Object actionPlan entries are invalid."
+        ),
+        "anyOf": [
+            {"enum": sorted(SUPPORTED_LOOP_ACTION_TYPES)},
+            {"pattern": HOST_DECLARED_CHECK_ACTION_PATTERN.pattern},
+        ],
+    }
+
+
+def agent_loop_metadata_schema() -> dict[str, Any]:
+    action_plan_schema = {
+        "type": "array",
+        "items": _loop_action_plan_item_schema(),
+        "description": (
+            "Optional ordered list of loop action type strings. Duplicates are allowed. "
+            "The turn budget is raised to cover declared actions plus implicit post-dispatch quality gates. "
+            "Use simple strings only, for example "
+            "[\"memory_search\", \"task_dispatch\", \"business_contract_check\", "
+            "\"quality_gate\", \"final_output\"]."
+        ),
+    }
+    autopilot_schema = {
+        "type": "object",
+        "description": "Autopilot evidence contract metadata required when a host supplies Autopilot provenance.",
+        "properties": {
+            "schema_version": {
+                "type": "string",
+                "enum": ["across-loop-spec/1.0"],
+                "description": "Must be across-loop-spec/1.0.",
+            },
+            "run_id": {
+                "type": "string",
+                "description": "Stable host run id for correlating loop evidence.",
+            },
+            "evidence_contract": {
+                "type": "string",
+                "enum": ["across-loop-evidence/1.0"],
+                "description": "Must be across-loop-evidence/1.0.",
+            },
+            "tool_packs": {"type": "array", "items": {"type": "string"}},
+            "required_tool_packs": {"type": "array", "items": {"type": "string"}},
+            "sandbox": {"type": "object"},
+        },
+        "required": ["schema_version", "run_id", "evidence_contract"],
+    }
+    validation_contract_schema = {
+        "type": "object",
+        "description": (
+            "Optional across-validation-contract/1.0 artifact contract consumed by host-declared *_check "
+            "actions such as business_contract_check. It is generic: hosts provide domain-specific row, "
+            "text, or JSON expectations; Orchestrator only performs deterministic artifact checks."
+        ),
+        "properties": {
+            "schema_version": {"type": "string", "enum": ["across-validation-contract/1.0"]},
+            "check_action": {
+                "type": "string",
+                "description": "Host-declared *_check action that should consume this contract.",
+                "pattern": HOST_DECLARED_CHECK_ACTION_PATTERN.pattern,
+            },
+            "artifacts": {
+                "type": "array",
+                "description": "Required output artifacts and deterministic checks.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "required": {"type": "boolean"},
+                        "type": {"type": "string", "enum": ["json", "csv", "markdown", "text"]},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "row_count": {"type": "integer"},
+                        "min_rows": {"type": "integer"},
+                        "sort": {"type": "array", "items": {"type": "object"}},
+                        "row_expectations": {"type": "array", "items": {"type": "object"}},
+                        "required_keys": {"type": "array", "items": {"type": "string"}},
+                        "must_include": {"type": "array", "items": {"type": "string"}},
+                        "must_not_include": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+    }
+    return {
+        "type": "object",
+        "description": (
+            "Host metadata for Agent Loop. Use metadata.actionPlan to force an explicit action order; "
+            "host-declared *_check actions are recorded as read-only verify steps."
+        ),
+        "properties": {
+            "actionPlan": action_plan_schema,
+            "action_plan": {**action_plan_schema, "description": "Snake-case alias for actionPlan."},
+            "autopilot": autopilot_schema,
+            "actionLeaseSeconds": {"type": "number", "description": "Optional per-loop action lease duration in seconds."},
+            "action_lease_seconds": {"type": "number", "description": "Snake-case alias for actionLeaseSeconds."},
+            "agentRouting": {"type": "object", "description": "Optional routing hints keyed by action type or failed quality gate."},
+            "agent_routing": {"type": "object", "description": "Snake-case alias for agentRouting."},
+            "agentCapabilityHints": {
+                "type": "object",
+                "description": "Optional host-provided capability registry and routing hints; no credentials or install paths.",
+            },
+            "agent_capability_hints": {"type": "object", "description": "Snake-case alias for agentCapabilityHints."},
+            "validationContract": validation_contract_schema,
+            "validation_contract": {**validation_contract_schema, "description": "Snake-case alias for validationContract."},
+            "recoveryPolicy": {"type": "object", "description": "Optional recovery policy keyed by failure type."},
+            "recovery_policy": {"type": "object", "description": "Snake-case alias for recoveryPolicy."},
+        },
+        "additionalProperties": True,
+    }
+
+
+def agent_plugin_manifest_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": (
+            "across-agent-plugin/1.0 manifest. Keep arrays flat; do not wrap capabilities, "
+            "inputs, outputs, or tags in nested arrays."
+        ),
+        "properties": {
+            "schema_version": {"type": "string", "enum": ["across-agent-plugin/1.0"]},
+            "plugin_id": {"type": "string", "description": "Stable plugin id. Alias: id."},
+            "id": {"type": "string", "description": "Alias for plugin_id."},
+            "display_name": {"type": "string"},
+            "version": {"type": "string"},
+            "agent": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "vendor": {"type": "string"},
+                },
+            },
+            "agent_id": {"type": "string", "description": "Alias for agent.id."},
+            "capabilities": {
+                "type": "array",
+                "description": "Flat capability list. Each item may be a string id or an object with id, kind, risk, description.",
+                "items": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "kind": {"type": "string"},
+                                "risk": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["id"],
+                        },
+                    ]
+                },
+            },
+            "entrypoints": {
+                "type": "object",
+                "description": "Map entrypoint names to command or url specs. Use run for dispatch-capable plugins.",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "array",
+                            "description": "Direct executable argv array, not a shell string. Example: [\"printf\", \"ready\\n\"].",
+                            "items": {"type": "string"},
+                        },
+                        "url": {"type": "string", "description": "Localhost http URL or https URL."},
+                        "transport": {"type": "string", "enum": ["stdio", "http"]},
+                        "timeout_seconds": {"type": "integer"},
+                    },
+                },
+            },
+            "trust": {
+                "type": "object",
+                "properties": {
+                    "mutation_boundary": {
+                        "type": "string",
+                        "enum": ["read_only", "candidate_workspace", "host_approved_mutation", "network_only", "manual_only"],
+                    },
+                    "requires_human_approval": {"type": "boolean"},
+                    "secrets_included": {"type": "boolean"},
+                    "network_access": {"type": "string"},
+                    "credential_boundary": {"type": "string"},
+                },
+            },
+            "context": {
+                "type": "object",
+                "properties": {
+                    "pack_id": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "required": ["schema_version", "plugin_id", "entrypoints"],
+    }
 
 
 def tool_definitions() -> list[dict[str, Any]]:
@@ -91,7 +290,12 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "start_agent_loop",
-            "description": "Start a durable agent loop run with context, actions, checkpoints, and memory policy.",
+            "description": (
+                "Start a durable agent loop run with context, actions, checkpoints, and memory policy. "
+                "To force a host action order, pass metadata.actionPlan as a list of action type strings; "
+                "host-declared read-only validation stages may use names ending in _check, for example "
+                "business_contract_check."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -101,7 +305,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "maxTurns": {"type": "integer", "default": 8},
                     "memoryPolicy": {"type": "object"},
                     "approvalPolicy": {"type": "object"},
-                    "metadata": {"type": "object"},
+                    "metadata": agent_loop_metadata_schema(),
                 },
                 "required": ["goal", "projectRoot"],
             },
@@ -221,6 +425,47 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "required": ["loopId"],
             },
         },
+        {
+            "name": "validate_external_agent_plugin",
+            "description": "Validate and normalize an across-agent-plugin/1.0 manifest for generic external agent loading.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"manifest": agent_plugin_manifest_schema()},
+                "required": ["manifest"],
+            },
+        },
+        {
+            "name": "register_external_agent_plugin",
+            "description": "Validate and persist an across-agent-plugin/1.0 manifest in the generic external agent registry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest": agent_plugin_manifest_schema(),
+                    "probe": {"type": "boolean", "default": False},
+                },
+                "required": ["manifest"],
+            },
+        },
+        {
+            "name": "list_external_agent_plugins",
+            "description": "List registered generic external agent plugins from the Orchestrator registry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"probe": {"type": "boolean", "default": False}},
+            },
+        },
+        {
+            "name": "get_external_agent_plugin_health",
+            "description": "Return health status for registered external agent plugins.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agentId": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "probe": {"type": "boolean", "default": False},
+                },
+            },
+        },
     ]
 
 
@@ -250,6 +495,12 @@ def resource_definitions() -> list[dict[str, Any]]:
             "description": "Stable loop run, step, action, observation, checkpoint, and memory-hook contract.",
             "mimeType": "application/json",
         },
+        {
+            "uri": "across-orchestrator://external-agent-plugins",
+            "name": "External Agent Plugins",
+            "description": "Registered across-agent-plugin/1.0 manifests and health-safe public cards.",
+            "mimeType": "application/json",
+        },
     ]
 
 
@@ -269,7 +520,33 @@ def agent_loop_schema() -> dict[str, Any]:
         "schemaVersion": "0.4",
         "entities": ["LoopRun", "LoopStep", "LoopAction", "LoopObservation", "Checkpoint"],
         "status": ["pending", "running", "awaiting_approval", "completed", "stopped", "failed", "cancelled"],
-        "actions": ["memory_search", "task_dispatch", "quality_gate", "remediation_dispatch", "memory_write_candidate", "final_output"],
+        "actions": sorted(SUPPORTED_LOOP_ACTION_TYPES),
+        "hostDeclaredCheckActions": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}_check$",
+            "phase": "verify",
+            "sideEffects": False,
+            "purpose": "Record host/plugin validation stages such as manifest_contract_check without executing arbitrary host commands.",
+            "validationContract": "When metadata.validationContract is present and check_action matches, the check evaluates deterministic artifact rules and blocks the loop on failure.",
+        },
+        "validationContract": {
+            "schemaVersion": "across-validation-contract/1.0",
+            "evidenceSchemaVersion": "across-validation-evidence/1.0",
+            "consumedBy": "host-declared *_check actions such as business_contract_check",
+            "checkTypes": [
+                "artifact_presence",
+                "json_parse",
+                "json_required_key",
+                "csv_parse",
+                "csv_columns",
+                "csv_row_count",
+                "csv_min_rows",
+                "csv_sort_order",
+                "csv_row_expectation",
+                "text_must_include",
+                "text_must_not_include",
+            ],
+            "failureBehavior": "blocking by default; recoveryPolicy may route quality_failed to remediation.",
+        },
         "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
         "inspectionActions": [
@@ -392,7 +669,7 @@ def agent_loop_schema() -> dict[str, Any]:
             "description": (
                 "Read-only compact loop evidence derived from durable state; it exposes routing outcomes, "
                 "recovery decisions, memory candidate counts, cancellation category, event audit coverage, "
-                "and host release evidence without raw logs, transcripts, memory text, or stack traces."
+                "action plan completion, and host release evidence without raw logs, transcripts, memory text, or stack traces."
             ),
             "schemaVersion": "0.1",
             "fields": [
@@ -400,6 +677,7 @@ def agent_loop_schema() -> dict[str, Any]:
                 "routing",
                 "recovery",
                 "memory_candidates",
+                "action_plan",
                 "cancellation",
                 "host_release_evidence",
             ],
@@ -441,8 +719,10 @@ def agent_loop_schema() -> dict[str, Any]:
             "requireApprovalFor": ["tool_call", "task_dispatch", "memory_write_candidate"]
         },
         "metadata": {
-            "actionPlan": "optional ordered list of supported action types; duplicates are allowed",
+            "schema": agent_loop_metadata_schema(),
+            "actionPlan": "optional ordered list of supported action type strings; duplicates are allowed; host-declared *_check actions are read-only verify steps; turn budget is raised to the minimum needed for declared actions plus implicit post-dispatch quality gates",
             "action_plan": "snake-case alias for actionPlan",
+            "autopilot": "optional Autopilot provenance object; when present, schema_version must be across-loop-spec/1.0 and evidence_contract must be across-loop-evidence/1.0",
             "actionLeaseSeconds": "optional per-loop action lease duration in seconds; default is 300",
             "action_lease_seconds": "snake-case alias for actionLeaseSeconds",
             "agentRouting": "optional mapping from action type or failed quality gate to selected dispatch agent",
@@ -523,6 +803,20 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return loop_runtime.get_loop_evidence_summary(arguments["loopId"])
     if name == "get_agent_loop_telemetry":
         return loop_runtime.get_loop_telemetry(arguments["loopId"])
+    if name == "validate_external_agent_plugin":
+        return normalize_agent_plugin_manifest(arguments.get("manifest") or {})
+    if name == "register_external_agent_plugin":
+        return ExternalAgentRegistry().register_manifest(
+            arguments.get("manifest") or {},
+            probe=bool(arguments.get("probe")),
+        )
+    if name == "list_external_agent_plugins":
+        return ExternalAgentRegistry().registry_payload(probe=bool(arguments.get("probe")))
+    if name == "get_external_agent_plugin_health":
+        return ExternalAgentRegistry().health_payload(
+            arguments.get("agentId") or arguments.get("agent_id"),
+            probe=bool(arguments.get("probe")),
+        )
     raise ValueError(f"Unknown tool: {name}")
 
 
@@ -535,6 +829,8 @@ def read_resource(uri: str) -> dict[str, Any]:
         payload = render_plugin_status()
     elif uri == "across-orchestrator://agent-loop-schema":
         payload = agent_loop_schema()
+    elif uri == "across-orchestrator://external-agent-plugins":
+        payload = ExternalAgentRegistry().registry_payload()
     else:
         raise ValueError(f"Unknown resource: {uri}")
     return {

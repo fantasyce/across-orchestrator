@@ -5,17 +5,21 @@ if [ -d "node_modules" ]; then
   export NODE_PATH="${PWD}/node_modules${NODE_PATH:+:${NODE_PATH}}"
 fi
 export PYTHONDONTWRITEBYTECODE=1
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [[ -x ".venv/bin/python" ]]; then
+  PYTHON_BIN=".venv/bin/python"
+fi
 
 echo "== whitespace =="
 git diff --check
 
 echo "== tests =="
-PYTHONPATH=src python3 -m pytest -p no:cacheprovider tests -q
+PYTHONPATH=src "$PYTHON_BIN" -m pytest -p no:cacheprovider tests -q
 
 echo "== cli smoke =="
-PYTHONPATH=src python3 -m across_orchestrator.cli --help >/dev/null
-PYTHONPATH=src python3 -m across_orchestrator.cli agent-card --json >/dev/null
-PYTHONPATH=src python3 -m across_orchestrator.cli mcp </dev/null >/dev/null
+PYTHONPATH=src "$PYTHON_BIN" -m across_orchestrator.cli --help >/dev/null
+PYTHONPATH=src "$PYTHON_BIN" -m across_orchestrator.cli agent-card --json >/dev/null
+PYTHONPATH=src "$PYTHON_BIN" -m across_orchestrator.cli mcp </dev/null >/dev/null
 
 echo "== sensitive text scan =="
 PATH_PATTERN='/U''sers/[^[:space:])]+'

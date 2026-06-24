@@ -80,6 +80,24 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertIn("development checkout", memory_provider["warnings"][0])
         self.assertEqual(memory_provider["recommendedCommand"], str(self.home / "bin" / "across-context"))
 
+    def test_plugin_status_enables_memory_provider_when_context_command_is_configured(self):
+        command = self.home / "tools" / "across-context"
+        command.parent.mkdir(parents=True)
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o755)
+        self.env.pop("ACROSS_ORCHESTRATOR_MEMORY_PROVIDER", None)
+        self.env["ACROSS_CONTEXT_COMMAND"] = str(command)
+
+        status_result = self.run_cli("plugin-status", "--json")
+        self.assertEqual(status_result.returncode, 0, status_result.stderr)
+        status = json.loads(status_result.stdout)
+
+        memory_provider = status["memoryProvider"]
+        self.assertEqual(memory_provider["provider"], "across-context")
+        self.assertEqual(memory_provider["status"], "configured")
+        self.assertEqual(memory_provider["command"], [str(command)])
+        self.assertEqual(memory_provider["resolvedCommand"], str(command))
+
     def test_product_plugin_status_blocks_across_context_development_command(self):
         self.env["ACROSS_ORCHESTRATOR_PRODUCT_MODE"] = "1"
         self.env["ACROSS_ORCHESTRATOR_MEMORY_PROVIDER"] = "across-context"

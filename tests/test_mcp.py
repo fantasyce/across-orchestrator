@@ -14,6 +14,20 @@ def rpc(message_id, method, params=None):
     return payload
 
 
+def agent_plugin_manifest():
+    return {
+        "schema_version": "across-agent-plugin/1.0",
+        "plugin_id": "demo.echo-agent",
+        "display_name": "Demo Echo Agent",
+        "version": "1.0.0",
+        "agent": {"id": "demo-echo", "name": "Demo Echo", "vendor": "tests"},
+        "capabilities": [{"id": "echo", "risk": "low"}],
+        "entrypoints": {"run": {"command": [sys.executable, "-c", "print('ok')"]}},
+        "trust": {"mutation_boundary": "read_only", "secrets_included": False},
+        "context": {"pack_id": "demo.echo-agent", "tags": ["demo"]},
+    }
+
+
 class McpTests(unittest.TestCase):
     def test_mcp_submit_run_and_fetch_evidence(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -86,6 +100,10 @@ class McpTests(unittest.TestCase):
             self.assertIn("reject_agent_loop_action", tool_names)
             self.assertIn("retry_agent_loop_step", tool_names)
             self.assertIn("get_agent_loop_health", tool_names)
+            self.assertIn("validate_external_agent_plugin", tool_names)
+            self.assertIn("register_external_agent_plugin", tool_names)
+            self.assertIn("list_external_agent_plugins", tool_names)
+            self.assertIn("get_external_agent_plugin_health", tool_names)
             submit_tool = next(tool for tool in responses[1]["result"]["tools"] if tool["name"] == "submit_task")
             submit_properties = submit_tool["inputSchema"]["properties"]
             self.assertIn("agentAdapters", submit_properties)
@@ -93,6 +111,7 @@ class McpTests(unittest.TestCase):
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
+            self.assertIn("across-orchestrator://external-agent-plugins", resource_uris)
             manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
             self.assertEqual(manifest["id"], "across-orchestrator")
             self.assertTrue(manifest["capabilities"]["agentLoopV2"])
@@ -122,6 +141,61 @@ class McpTests(unittest.TestCase):
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
             self.assertEqual((project / "mcp/custom.txt").read_text(encoding="utf-8"), "mcp-adapter=mcp-custom-agent\n")
+
+    def test_mcp_exposes_external_agent_plugin_contract(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            home = Path(tempdir) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test"}}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "validate_external_agent_plugin",
+                    "arguments": {"manifest": agent_plugin_manifest()},
+                }),
+                rpc(3, "tools/call", {
+                    "name": "register_external_agent_plugin",
+                    "arguments": {"manifest": agent_plugin_manifest()},
+                }),
+                rpc(4, "tools/call", {"name": "list_external_agent_plugins", "arguments": {}}),
+                rpc(5, "tools/call", {"name": "get_external_agent_plugin_health", "arguments": {"agentId": "demo.echo-agent"}}),
+                rpc(6, "resources/read", {"uri": "across-orchestrator://external-agent-plugins"}),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            normalized = json.loads(responses[1]["result"]["content"][0]["text"])
+            self.assertEqual(normalized["schema_version"], "across-agent-plugin/1.0")
+            self.assertEqual(normalized["plugin_id"], "demo.echo-agent")
+            self.assertEqual(normalized["agent"]["id"], "demo-echo")
+            registered = json.loads(responses[2]["result"]["content"][0]["text"])
+            self.assertEqual(registered["summary"]["agent_count"], 1)
+            self.assertEqual(registered["agents"][0]["plugin_id"], "demo.echo-agent")
+            registry = json.loads(responses[3]["result"]["content"][0]["text"])
+            self.assertEqual(registry["schema_version"], "across-orchestrator-external-agents/1.0")
+            self.assertEqual(registry["summary"]["generic_schema"], "across-agent-plugin/1.0")
+            self.assertEqual(registry["summary"]["plugin_count"], 1)
+            health = json.loads(responses[4]["result"]["content"][0]["text"])
+            self.assertEqual(health["schema_version"], "across-orchestrator-external-agent-health/1.0")
+            self.assertEqual(health["summary"]["agent_count"], 1)
+            resource = json.loads(responses[5]["result"]["contents"][0]["text"])
+            self.assertEqual(resource["schema_version"], "across-orchestrator-external-agents/1.0")
+            self.assertEqual(resource["summary"]["plugin_count"], 1)
 
     def test_agent_loop_schema_declares_cancelled_terminal_status(self):
         from across_orchestrator.mcp import agent_loop_schema
@@ -159,6 +233,7 @@ class McpTests(unittest.TestCase):
         self.assertIn("cancellation_category", schema["healthSummary"]["fields"])
         self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
         self.assertIn("host_release_evidence", schema["evidenceSummary"]["fields"])
+        self.assertIn("action_plan", schema["evidenceSummary"]["fields"])
         self.assertEqual(schema["evidenceSummary"]["hostReleaseEvidence"]["readiness"], ["ready", "attention", "blocked"])
         self.assertEqual(schema["memoryPolicy"]["candidateSchema"], "agent-loop-memory-candidate/1.0")
         self.assertIn("failure_types", schema["memoryPolicy"]["candidateFields"])
@@ -178,6 +253,11 @@ class McpTests(unittest.TestCase):
         )
         self.assertIn("actionLeaseSeconds", schema["metadata"])
         self.assertIn("agentRouting", schema["metadata"])
+        self.assertEqual(schema["hostDeclaredCheckActions"]["phase"], "verify")
+        self.assertFalse(schema["hostDeclaredCheckActions"]["sideEffects"])
+        self.assertIn("_check", schema["hostDeclaredCheckActions"]["pattern"])
+        self.assertEqual(schema["validationContract"]["schemaVersion"], "across-validation-contract/1.0")
+        self.assertIn("csv_row_expectation", schema["validationContract"]["checkTypes"])
         self.assertEqual(schema["context"]["heartbeat"], "callable lease renewal hook for long-running dispatch adapters")
         self.assertIn("raise_if_cancelled", schema["context"]["cancellation"])
         self.assertEqual(
@@ -197,6 +277,48 @@ class McpTests(unittest.TestCase):
         self.assertEqual(schema["telemetry"]["schemaVersion"], "agent-loop-telemetry/1.0")
         self.assertEqual(schema["budgetPolicy"]["schemaVersion"], "agent-loop-budget/1.0")
         self.assertIn("afterSequence", schema["streamResume"]["mcpTool"])
+        self.assertIn("schema", schema["metadata"])
+        self.assertIn("autopilot", schema["metadata"]["schema"]["properties"])
+        self.assertIn("_check", schema["metadata"]["actionPlan"])
+
+    def test_start_agent_loop_tool_schema_documents_host_action_plan_contract(self):
+        from across_orchestrator.mcp import tool_definitions
+
+        tools = {tool["name"]: tool for tool in tool_definitions()}
+        metadata = tools["start_agent_loop"]["inputSchema"]["properties"]["metadata"]
+        action_plan = metadata["properties"]["actionPlan"]
+        action_item = action_plan["items"]
+        autopilot = metadata["properties"]["autopilot"]
+
+        self.assertIn("business_contract_check", action_plan["description"])
+        self.assertIn("turn budget", action_plan["description"])
+        self.assertIn("Object actionPlan entries are invalid", action_item["description"])
+        self.assertIn("anyOf", action_item)
+        self.assertIn("memory_search", action_item["anyOf"][0]["enum"])
+        self.assertIn("_check", action_item["anyOf"][1]["pattern"])
+        self.assertEqual(autopilot["required"], ["schema_version", "run_id", "evidence_contract"])
+        self.assertEqual(autopilot["properties"]["schema_version"]["enum"], ["across-loop-spec/1.0"])
+        self.assertEqual(autopilot["properties"]["evidence_contract"]["enum"], ["across-loop-evidence/1.0"])
+        validation = metadata["properties"]["validationContract"]
+        self.assertEqual(validation["properties"]["schema_version"]["enum"], ["across-validation-contract/1.0"])
+        self.assertIn("row_expectations", validation["properties"]["artifacts"]["items"]["properties"])
+        self.assertEqual(metadata["properties"]["validation_contract"]["properties"]["check_action"]["pattern"], validation["properties"]["check_action"]["pattern"])
+
+    def test_external_agent_plugin_tool_schema_documents_manifest_contract(self):
+        from across_orchestrator.mcp import tool_definitions
+
+        tools = {tool["name"]: tool for tool in tool_definitions()}
+        validate_manifest = tools["validate_external_agent_plugin"]["inputSchema"]["properties"]["manifest"]
+        register_manifest = tools["register_external_agent_plugin"]["inputSchema"]["properties"]["manifest"]
+
+        self.assertEqual(validate_manifest["properties"]["schema_version"]["enum"], ["across-agent-plugin/1.0"])
+        self.assertEqual(validate_manifest["properties"]["entrypoints"]["additionalProperties"]["properties"]["command"]["type"], "array")
+        self.assertIn(
+            "Direct executable argv array",
+            validate_manifest["properties"]["entrypoints"]["additionalProperties"]["properties"]["command"]["description"],
+        )
+        self.assertEqual(validate_manifest["properties"]["capabilities"]["items"]["anyOf"][1]["required"], ["id"])
+        self.assertEqual(register_manifest["properties"]["entrypoints"]["additionalProperties"]["properties"]["command"]["type"], "array")
 
     def test_mcp_agent_loop_tools(self):
         with tempfile.TemporaryDirectory() as tempdir:
