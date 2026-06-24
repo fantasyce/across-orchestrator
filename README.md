@@ -13,6 +13,14 @@ quality gates, evidence, and protocol surfaces.
 
 ## Current Status
 
+`v0.7.2` is the generic host compatibility release. It makes Across
+Orchestrator explicitly reusable outside Across Agents Assistant: Codex,
+CloudCode Desktop, CloudCode CLI, Claude Desktop, Claude CLI, OpenClaw, Hermes,
+and any CLI, HTTP, MCP, or Python-SDK capable host can install the managed
+runtime under `~/.across`, register external agent adapters, drive durable Agent
+Loop work, and consume quality-gate, evidence, telemetry, and protocol-gateway
+surfaces without importing AAA code or reading a developer checkout.
+
 `v0.7.1` is the generic agent-plugin runtime hardening release. It adds
 host-neutral external agent registration and protocol-gateway helpers, preserves
 the Agent Loop action-plan quality gate inside the loop budget, and keeps
@@ -122,6 +130,11 @@ Validated in this repository:
   `/.well-known/across-plugin.json` before routing work to the runtime.
 - Hosts can start, resume, inspect, and audit durable agent loops through CLI,
   HTTP, MCP, or the Python runtime boundary.
+- Codex, CloudCode Desktop, CloudCode CLI, Claude Desktop, Claude CLI, AAA, and
+  other generic agent hosts can use the same managed plugin contract. The host
+  owns UI, model credentials, process launch, and user approval; Orchestrator
+  owns task lifecycle, Agent Loop state, quality gates, evidence, and protocol
+  surfaces.
 - Hosting platforms can pass registered agent-container descriptors through the
   Python SDK boundary without adopting host application internals.
 - Hosts can run explicit plugin lifecycle actions, including uninstalling the
@@ -156,9 +169,20 @@ boundaries:
 - Across Agents Assistant: host app and control panel
 - Across Context: shared memory plugin
 - Across Orchestrator: task orchestration plugin
+- Across Autopilot: LoopSpec supervision and autonomous iteration plugin
 
 This lets the task runtime evolve independently and lets other hosts reuse the
 same contract, quality, and evidence loop.
+
+## Generic Host Compatibility
+
+Across Orchestrator is not an AAA-internal module. Product hosts should install
+the pinned release into `~/.across/plugins/across-orchestrator`, expose
+`~/.across/bin/across-orchestrator`, and communicate through CLI, HTTP, MCP, or
+the Python SDK. The same contract is intended for Codex, CloudCode
+Desktop/CLI, Claude Desktop/CLI, AAA, and other local or remote agent hosts
+that can provide agent descriptors, dispatch callbacks, model credentials, and
+approval UX.
 
 ## Install From Source
 
@@ -171,11 +195,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.1"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.2"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.1`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.2`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -443,7 +467,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.7.1` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.2` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
