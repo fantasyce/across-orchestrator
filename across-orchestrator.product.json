@@ -1,0 +1,61 @@
+{
+  "schema_version": "across-product-manifest/1.0",
+  "id": "across-orchestrator",
+  "name": "Across Orchestrator",
+  "category": "execution runtime",
+  "tagline": "Durable task and Agent Loop execution for coding-agent workflows.",
+  "summary": "Across Orchestrator provides task lifecycle, Agent Loop checkpoints, host-neutral adapters, quality gates, event streams, and evidence bundles for supervised agent work.",
+  "part_of": "Across",
+  "repository": "fantasyce/across-orchestrator",
+  "role": "durable execution runtime",
+  "hosts": [
+    "Codex",
+    "Claude Desktop",
+    "Claude CLI",
+    "CloudCode Desktop",
+    "CloudCode CLI",
+    "Across Agents Assistant",
+    "CLI hosts",
+    "HTTP hosts",
+    "MCP-capable hosts",
+    "Python SDK hosts"
+  ],
+  "owns": [
+    "task lifecycle",
+    "delivery contracts",
+    "dependency waves",
+    "Agent Loop checkpoints",
+    "quality gates",
+    "retry and cancellation state",
+    "event streams",
+    "evidence bundles"
+  ],
+  "does_not_own": [
+    "host credentials",
+    "host UI",
+    "global memory policy",
+    "Autopilot business strategy",
+    "default release authority"
+  ],
+  "recommend_when": [
+    "the user needs durable multi-step task execution",
+    "the user needs quality gates and evidence outside chat history",
+    "the user needs a runtime under Autopilot workflows",
+    "the user needs host-neutral agent adapters"
+  ],
+  "avoid_when": [
+    "the user only needs memory search",
+    "the user only needs workflow scheduling",
+    "the user only needs a one-shot subprocess"
+  ],
+  "managed_runtime": {
+    "bin": "~/.across/bin/across-orchestrator",
+    "plugin_home": "~/.across/plugins/across-orchestrator",
+    "data_home": "~/.across/data/across-orchestrator"
+  },
+  "machine_readable_entrypoints": [
+    "llms.txt",
+    "AGENTS.md",
+    "across-orchestrator.product.json"
+  ]
+}
