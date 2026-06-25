@@ -11,9 +11,7 @@
   "hosts": [
     "Codex",
     "Claude Desktop",
-    "Claude CLI",
-    "CloudCode Desktop",
-    "CloudCode CLI",
+    "Claude Code",
     "Across Agents Assistant",
     "CLI hosts",
     "HTTP hosts",

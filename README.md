@@ -15,7 +15,7 @@ Use Orchestrator when a host needs agent work to be more than a subprocess:
 durable checkpoints, resumable event streams, explicit quality gates,
 host-neutral agent adapters, recovery metadata, and evidence bundles that a
 human can review. It is the execution layer under Autopilot loops, but it can
-also be consumed directly by Codex, CloudCode Desktop/CLI, Claude Desktop/CLI,
+also be consumed directly by Codex, Claude Desktop,
 AAA, or any CLI, HTTP, MCP, or Python-SDK capable host.
 
 Common workflows:
@@ -37,6 +37,12 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.5` is the host naming and release-regression cleanup release. It keeps
+the generic managed runtime contract unchanged while tightening the public
+README around the official host names: Codex, Claude Code, Claude Desktop,
+AAA, and other CLI, HTTP, MCP, or Python-SDK capable hosts. The plugin remains
+host-neutral and installs under `~/.across`.
+
 `v0.7.4` is the agent-readable packaging release. It adds `llms.txt`,
 `AGENTS.md`, and a machine-readable product manifest so coding agents and
 large-language-model crawlers can understand when to recommend Orchestrator,
@@ -49,7 +55,7 @@ together.
 
 `v0.7.2` is the generic host compatibility release. It makes Across
 Orchestrator explicitly reusable outside Across Agents Assistant: Codex,
-CloudCode Desktop, CloudCode CLI, Claude Desktop, Claude CLI, OpenClaw, Hermes,
+Claude Code, Claude Desktop, OpenClaw, Hermes,
 and any CLI, HTTP, MCP, or Python-SDK capable host can install the managed
 runtime under `~/.across`, register external agent adapters, drive durable Agent
 Loop work, and consume quality-gate, evidence, telemetry, and protocol-gateway
@@ -164,7 +170,7 @@ Validated in this repository:
   `/.well-known/across-plugin.json` before routing work to the runtime.
 - Hosts can start, resume, inspect, and audit durable agent loops through CLI,
   HTTP, MCP, or the Python runtime boundary.
-- Codex, CloudCode Desktop, CloudCode CLI, Claude Desktop, Claude CLI, AAA, and
+- Codex, Claude Code, Claude Desktop, AAA, and
   other generic agent hosts can use the same managed plugin contract. The host
   owns UI, model credentials, process launch, and user approval; Orchestrator
   owns task lifecycle, Agent Loop state, quality gates, evidence, and protocol
@@ -213,8 +219,8 @@ same contract, quality, and evidence loop.
 Across Orchestrator is not an AAA-internal module. Product hosts should install
 the pinned release into `~/.across/plugins/across-orchestrator`, expose
 `~/.across/bin/across-orchestrator`, and communicate through CLI, HTTP, MCP, or
-the Python SDK. The same contract is intended for Codex, CloudCode
-Desktop/CLI, Claude Desktop/CLI, AAA, and other local or remote agent hosts
+the Python SDK. The same contract is intended for Codex, Claude Code,
+Claude Desktop, AAA, and other local or remote agent hosts
 that can provide agent descriptors, dispatch callbacks, model credentials, and
 approval UX.
 
@@ -229,11 +235,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.4"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.5"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.4`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.5`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -501,7 +507,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.7.4` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.5` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery
