@@ -17,6 +17,8 @@ class CliTests(unittest.TestCase):
         self.home.mkdir()
         self.env = os.environ.copy()
         self.env["PYTHONPATH"] = str(self.root / "src")
+        self.env["ACROSS_HOME"] = str(Path(self.tempdir.name) / "across-home")
+        self.env["ACROSS_CONTEXT_HOME"] = str(Path(self.tempdir.name) / "context-home")
         self.env["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
 
     def tearDown(self):
@@ -72,6 +74,26 @@ class CliTests(unittest.TestCase):
         event_types = [event["type"] for event in json.loads(events.stdout)]
         self.assertIn("task.completed", event_types)
 
+    def test_cli_json_output_redacts_sensitive_payloads(self):
+        fake_token = "sk-" + "abcdefghijklmnopqrst"
+        payload = {
+            "run_id": "run-secret-safe",
+            "status": "passed",
+            "quality": {
+                "password": "clear-text-password",
+                "notes": f"token {fake_token} should be hidden",
+            },
+        }
+        result = self.run_cli("evidence-graph", "--payload-json", json.dumps(payload), "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("clear-text-password", result.stdout)
+        self.assertNotIn(fake_token, result.stdout)
+        parsed = json.loads(result.stdout)
+        quality_node = next(item for item in parsed["nodes"] if item["type"] == "quality")
+        self.assertEqual(quality_node["payload"]["password"], "[redacted]")
+        self.assertEqual(quality_node["payload"]["notes"], "token [redacted] should be hidden")
+
     def test_cli_submit_preserves_explicit_serial_plan(self):
         subtasks = [
             {
@@ -118,6 +140,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(task["contract"]["serialPlan"], True)
         self.assertEqual([item["wave"] for item in task["subtasks"]], [1, 2])
         self.assertEqual(task["subtasks"][1]["dependencies"], [task["subtasks"][0]["subtask_id"]])
+
+    def test_cli_evaluates_agent_team_readiness_payload(self):
+        payload = {
+            "pack_id": "plugin-compatibility-lab-v2",
+            "host_targets": ["codex", "claude_code", "mcp", "a2a", "across"],
+            "runtime_policy": {"promotion": {"human_approval_required": True}},
+            "trust_boundary": {"secrets": "not_allowed"},
+            "product_card": {
+                "schema_version": "across-workflow-pack-product-card/1.0",
+                "user_problem": "Need a plugin adoption gate.",
+                "job_to_be_done": "Evaluate a plugin before use.",
+                "quickstart": {"cli": "across-autopilot loop run --spec plugin-compatibility-lab-v2 --json"},
+                "market_readiness": {"first_value_artifact": "run://plugin-compatibility-lab/report.md"},
+            },
+            "protocol_readiness": {
+                "schema_version": "across-workflow-pack-protocol-readiness/1.0",
+                "summary": {"honest_protocol_claims": True},
+                "checks": [{"id": "remote_mcp_http_oauth", "status": "planned"}],
+            },
+            "trust_receipt": {
+                "schema_version": "across-agent-team-trust-receipt/1.0",
+                "evidence_contract": {
+                    "required": ["runtime_policy", "trust_boundary", "host_exports", "evidence_graph", "validation_gates"]
+                },
+            },
+            "frontier_interop": {
+                "schema_version": "across-workflow-pack-frontier-interop/1.0",
+                "remote_mcp": {"schema_version": "across-remote-mcp-oauth-template/1.0", "oauth_required": True},
+                "a2a": {"schema_version": "across-a2a-task-delegation/1.0"},
+                "observability": {"otel_schema": "across-otel-genai-export/1.0", "otlp_trace_schema": "otlp-traces-json/1.0", "raw_transcripts_included": False},
+            },
+        }
+
+        result = self.run_cli("agent-team-readiness", "--payload-json", json.dumps(payload), "--json")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["schema_version"], "across-agent-team-readiness/1.0")
+        self.assertEqual(report["status"], "passed")
 
     def test_cli_declared_agent_adapter_executes_arbitrary_agent(self):
         agent_script = self.project / "cli_agent_adapter.py"
@@ -186,6 +247,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest["paths"]["data"], "~/.across/data/across-orchestrator")
         self.assertEqual(manifest["protocols"]["http"]["loopStart"], "POST /loops")
         self.assertEqual(manifest["protocols"]["http"]["hostConformance"], "POST /host-conformance")
+
+    def test_cli_sandbox_probe_and_evidence_graph(self):
+        policy = {
+            "network_policy": "none",
+            "filesystem_policy": "read_only",
+            "workspace_root": str(self.project),
+            "command_allowlist": ["node --version"],
+        }
+        sandbox = self.run_cli(
+            "sandbox-probe",
+            "--policy-json",
+            json.dumps(policy),
+            "--command-json",
+            json.dumps(["node", "--version"]),
+            "--cwd",
+            str(self.project),
+            "--json",
+        )
+        self.assertEqual(sandbox.returncode, 0, sandbox.stderr)
+        sandbox_payload = json.loads(sandbox.stdout)
+        self.assertEqual(sandbox_payload["schema_version"], "across-sandbox-evidence/1.0")
+        self.assertEqual(sandbox_payload["status"], "passed")
+
+        graph = self.run_cli(
+            "evidence-graph",
+            "--payload-json",
+            json.dumps({
+                "schema_version": "across-loop-evidence/1.0",
+                "run_id": "run-1",
+                "spec_id": "plugin-compatibility-lab-v2",
+                "status": "completed",
+                "actions": [{"id": "workflow_pack_export", "status": "passed"}],
+            }),
+            "--json",
+        )
+        self.assertEqual(graph.returncode, 0, graph.stderr)
+        graph_payload = json.loads(graph.stdout)
+        self.assertEqual(graph_payload["schema_version"], "across-evidence-graph/1.0")
+        self.assertTrue(any(node["id"] == "action:workflow_pack_export" for node in graph_payload["nodes"]))
 
     def test_cli_host_conformance_validates_external_host_contract(self):
         contract_path = self.project / "host-contract.json"

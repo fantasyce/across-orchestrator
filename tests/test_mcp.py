@@ -100,6 +100,12 @@ class McpTests(unittest.TestCase):
             self.assertIn("reject_agent_loop_action", tool_names)
             self.assertIn("retry_agent_loop_step", tool_names)
             self.assertIn("get_agent_loop_health", tool_names)
+            self.assertIn("evaluate_sandbox_policy", tool_names)
+            self.assertIn("build_evidence_graph", tool_names)
+            self.assertIn("evaluate_agent_team_readiness", tool_names)
+            self.assertIn("render_remote_mcp_oauth_template", tool_names)
+            self.assertIn("create_a2a_task_delegation", tool_names)
+            self.assertIn("export_otel_genai_spans", tool_names)
             self.assertIn("validate_external_agent_plugin", tool_names)
             self.assertIn("register_external_agent_plugin", tool_names)
             self.assertIn("list_external_agent_plugins", tool_names)
@@ -111,6 +117,7 @@ class McpTests(unittest.TestCase):
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
+            self.assertIn("across-orchestrator://sandbox-policy", resource_uris)
             self.assertIn("across-orchestrator://external-agent-plugins", resource_uris)
             manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
             self.assertEqual(manifest["id"], "across-orchestrator")
@@ -141,6 +148,117 @@ class McpTests(unittest.TestCase):
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
             self.assertEqual((project / "mcp/custom.txt").read_text(encoding="utf-8"), "mcp-adapter=mcp-custom-agent\n")
+
+    def test_mcp_evaluates_agent_team_readiness(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            home = Path(tempdir) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            payload = {
+                "pack_id": "plugin-compatibility-lab-v2",
+                "host_targets": ["codex", "claude_code", "mcp", "a2a", "across"],
+                "runtime_policy": {"promotion": {"human_approval_required": True}},
+                "trust_boundary": {"secrets": "not_allowed"},
+                "product_card": {
+                    "schema_version": "across-workflow-pack-product-card/1.0",
+                    "user_problem": "Need a plugin adoption gate.",
+                    "job_to_be_done": "Evaluate a plugin before use.",
+                    "quickstart": {"cli": "across-autopilot loop run --spec plugin-compatibility-lab-v2 --json"},
+                    "market_readiness": {"first_value_artifact": "run://plugin-compatibility-lab/report.md"},
+                },
+                "protocol_readiness": {
+                    "schema_version": "across-workflow-pack-protocol-readiness/1.0",
+                    "summary": {"honest_protocol_claims": True},
+                    "checks": [{"id": "remote_mcp_http_oauth", "status": "planned"}],
+                },
+                "trust_receipt": {
+                    "schema_version": "across-agent-team-trust-receipt/1.0",
+                    "evidence_contract": {
+                        "required": ["runtime_policy", "trust_boundary", "host_exports", "evidence_graph", "validation_gates"]
+                    },
+                },
+                "frontier_interop": {
+                    "schema_version": "across-workflow-pack-frontier-interop/1.0",
+                    "remote_mcp": {"schema_version": "across-remote-mcp-oauth-template/1.0", "oauth_required": True},
+                    "a2a": {"schema_version": "across-a2a-task-delegation/1.0"},
+                    "observability": {"otel_schema": "across-otel-genai-export/1.0", "otlp_trace_schema": "otlp-traces-json/1.0", "raw_transcripts_included": False},
+                },
+            }
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {"name": "evaluate_agent_team_readiness", "arguments": {"payload": payload}}),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            report = json.loads(responses[1]["result"]["content"][0]["text"])
+            self.assertEqual(report["schema_version"], "across-agent-team-readiness/1.0")
+            self.assertEqual(report["status"], "passed")
+
+    def test_mcp_exposes_frontier_interop_tools(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            home = Path(tempdir) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            evidence = {
+                "run_id": "run-1",
+                "spec_id": "plugin-compatibility-lab-v2",
+                "status": "completed",
+                "gates": [{"id": "workflow_pack_exports_ready", "status": "passed"}],
+            }
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "render_remote_mcp_oauth_template",
+                    "arguments": {"config": {"base_url": "https://example.test/mcp", "issuer": "https://issuer.example.test"}},
+                }),
+                rpc(3, "tools/call", {
+                    "name": "create_a2a_task_delegation",
+                    "arguments": {"payload": {"goal": "Validate plugin portability", "pack_id": "plugin-compatibility-lab-v2"}},
+                }),
+                rpc(4, "tools/call", {
+                    "name": "export_otel_genai_spans",
+                    "arguments": {"payload": evidence},
+                }),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            remote = json.loads(responses[1]["result"]["content"][0]["text"])
+            delegated = json.loads(responses[2]["result"]["content"][0]["text"])
+            otel = json.loads(responses[3]["result"]["content"][0]["text"])
+            self.assertEqual(remote["schema_version"], "across-remote-mcp-oauth-template/1.0")
+            self.assertEqual(delegated["schema_version"], "across-a2a-task-delegation/1.0")
+            self.assertEqual(otel["schema_version"], "across-otel-genai-export/1.0")
+            self.assertEqual(otel["summary"]["eval_case_count"], 1)
 
     def test_mcp_exposes_external_agent_plugin_contract(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -303,6 +421,8 @@ class McpTests(unittest.TestCase):
         self.assertEqual(validation["properties"]["schema_version"]["enum"], ["across-validation-contract/1.0"])
         self.assertIn("row_expectations", validation["properties"]["artifacts"]["items"]["properties"])
         self.assertEqual(metadata["properties"]["validation_contract"]["properties"]["check_action"]["pattern"], validation["properties"]["check_action"]["pattern"])
+        self.assertEqual(tools["evaluate_sandbox_policy"]["inputSchema"]["required"], ["policy"])
+        self.assertEqual(tools["build_evidence_graph"]["inputSchema"]["required"], ["payload"])
 
     def test_external_agent_plugin_tool_schema_documents_manifest_contract(self):
         from across_orchestrator.mcp import tool_definitions

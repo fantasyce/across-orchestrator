@@ -6,11 +6,17 @@ import sys
 
 from . import __version__
 from .agent_card import render_agent_card
+from .agent_team_readiness import evaluate_agent_team_readiness
+from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES, HOST_DECLARED_CHECK_ACTION_PATTERN, SUPPORTED_LOOP_ACTION_TYPES
+from .evidence_graph import build_evidence_graph_from_payload
 from .external_agents import ExternalAgentRegistry, normalize_agent_plugin_manifest
+from .otel_export import export_otel_genai_spans
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
+from .remote_mcp import render_remote_mcp_oauth_template
+from .sandbox import evaluate_sandbox_policy
 
 
 def _loop_action_plan_item_schema() -> dict[str, Any]:
@@ -289,6 +295,62 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
+            "name": "evaluate_sandbox_policy",
+            "description": "Evaluate an across-sandbox-policy/1.0 policy and optional argv boundary without executing commands.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "policy": {"type": "object"},
+                    "command": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                },
+                "required": ["policy"],
+            },
+        },
+        {
+            "name": "build_evidence_graph",
+            "description": "Build or verify an across-evidence-graph/1.0 graph from task, loop, or Autopilot evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "evaluate_agent_team_readiness",
+            "description": "Evaluate whether a Workflow Pack export is market-ready for generic agent-team adoption with product card, trust receipt, and honest protocol readiness.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "render_remote_mcp_oauth_template",
+            "description": "Render a secret-free Streamable HTTP/OAuth template for remote MCP deployment planning.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"config": {"type": "object"}},
+            },
+        },
+        {
+            "name": "create_a2a_task_delegation",
+            "description": "Create an A2A-style task, message, artifact, and evidence receipt envelope without calling a remote agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+            },
+        },
+        {
+            "name": "export_otel_genai_spans",
+            "description": "Export Across evidence as OTel/GenAI-style spans plus gate-based eval cases without raw transcripts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
             "name": "start_agent_loop",
             "description": (
                 "Start a durable agent loop run with context, actions, checkpoints, and memory policy. "
@@ -493,6 +555,12 @@ def resource_definitions() -> list[dict[str, Any]]:
             "uri": "across-orchestrator://agent-loop-schema",
             "name": "Across Agent Loop Schema",
             "description": "Stable loop run, step, action, observation, checkpoint, and memory-hook contract.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "across-orchestrator://sandbox-policy",
+            "name": "Across Sandbox Policy",
+            "description": "Host-neutral sandbox policy shape and enforcement semantics.",
             "mimeType": "application/json",
         },
         {
@@ -762,6 +830,22 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return runtime.evidence_bundle(arguments["taskId"])
     if name == "get_agent_card":
         return render_agent_card()
+    if name == "evaluate_sandbox_policy":
+        return evaluate_sandbox_policy(
+            arguments.get("policy") or {},
+            command=arguments.get("command"),
+            cwd=arguments.get("cwd"),
+        )
+    if name == "build_evidence_graph":
+        return build_evidence_graph_from_payload(arguments.get("payload") or {})
+    if name == "evaluate_agent_team_readiness":
+        return evaluate_agent_team_readiness(arguments.get("payload") or {})
+    if name == "render_remote_mcp_oauth_template":
+        return render_remote_mcp_oauth_template(arguments.get("config") or {})
+    if name == "create_a2a_task_delegation":
+        return create_a2a_task_delegation(arguments.get("payload") or {})
+    if name == "export_otel_genai_spans":
+        return export_otel_genai_spans(arguments.get("payload") or {})
     if name == "start_agent_loop":
         return loop_runtime.start_loop(
             goal=arguments.get("goal") or "",
@@ -829,6 +913,17 @@ def read_resource(uri: str) -> dict[str, Any]:
         payload = render_plugin_status()
     elif uri == "across-orchestrator://agent-loop-schema":
         payload = agent_loop_schema()
+    elif uri == "across-orchestrator://sandbox-policy":
+        payload = {
+            "schema_version": "across-sandbox-policy/1.0",
+            "network_policy": ["none", "adapter_scoped", "allowlist", "unrestricted_requires_approval"],
+            "filesystem_policy": ["read_only", "run_scoped", "candidate_workspace_only", "allowlist"],
+            "promotion": {
+                "human_approval_required": True,
+                "merge_release_signing_blocked": True,
+            },
+            "command_execution": "Commands are never executed by evaluate_sandbox_policy; argv is checked against command_allowlist and workspace_root only.",
+        }
     elif uri == "across-orchestrator://external-agent-plugins":
         payload = ExternalAgentRegistry().registry_payload()
     else:

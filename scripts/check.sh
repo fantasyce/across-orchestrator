@@ -5,6 +5,9 @@ if [ -d "node_modules" ]; then
   export NODE_PATH="${PWD}/node_modules${NODE_PATH:+:${NODE_PATH}}"
 fi
 export PYTHONDONTWRITEBYTECODE=1
+CHECK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/across-orchestrator-check.XXXXXX")"
+trap 'rm -rf "$CHECK_HOME"' EXIT
+export ACROSS_HOME="$CHECK_HOME/across-home"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=".venv/bin/python"

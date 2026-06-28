@@ -43,12 +43,62 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertIn("sdk", status["protocols"])
         self.assertTrue(status["install"]["installable"])
 
+        manifest_result = self.run_cli("plugin-manifest", "--json")
+        self.assertEqual(manifest_result.returncode, 0, manifest_result.stderr)
+        manifest = json.loads(manifest_result.stdout)
+        self.assertTrue(manifest["capabilities"]["evidenceGraph"])
+        self.assertTrue(manifest["capabilities"]["sandboxPolicyEvaluation"])
+        self.assertTrue(manifest["capabilities"]["agentTeamReadiness"])
+        self.assertTrue(manifest["capabilities"]["remoteMcpOAuthTemplate"])
+        self.assertTrue(manifest["capabilities"]["a2aTaskDelegation"])
+        self.assertTrue(manifest["capabilities"]["otelGenaiExport"])
+        self.assertEqual(
+            manifest["protocols"]["mcp"]["tools"]["evaluateAgentTeamReadiness"],
+            "evaluate_agent_team_readiness",
+        )
+        self.assertEqual(
+            manifest["protocols"]["mcp"]["tools"]["exportOtelGenaiSpans"],
+            "export_otel_genai_spans",
+        )
+        self.assertIn("evidence_graph", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertIn("agent_team_readiness", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertIn("remote_mcp_oauth_template", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertIn("a2a_task_delegation", manifest["hostingPlatform"]["pluginProvides"])
+        self.assertIn("otel_genai_export", manifest["hostingPlatform"]["pluginProvides"])
+
         health_result = self.run_cli("health", "--json")
         self.assertEqual(health_result.returncode, 0, health_result.stderr)
         health = json.loads(health_result.stdout)
         self.assertEqual(health["status"], "ok")
         self.assertEqual(health["pluginId"], "across-orchestrator")
         self.assertEqual(health["home"], str(self.home / "data" / "across-orchestrator"))
+
+    def test_install_command_prepares_generic_host_mcp_registrations(self):
+        claude_config = self.home / "claude_desktop_config.json"
+        claude_config.parent.mkdir(parents=True, exist_ok=True)
+        claude_config.write_text(json.dumps({"deploymentMode": "default"}), encoding="utf-8")
+
+        codex_result = self.run_cli("install", "codex-mcp", "--stdout")
+        self.assertEqual(codex_result.returncode, 0, codex_result.stderr)
+        self.assertIn("codex mcp add across-orchestrator -- sh -lc", codex_result.stdout)
+        self.assertIn(str(self.home / "bin" / "across-orchestrator"), codex_result.stdout)
+
+        claude_result = self.run_cli("install", "claude-code", "--stdout")
+        self.assertEqual(claude_result.returncode, 0, claude_result.stderr)
+        self.assertIn("claude mcp add -s user across-orchestrator -- sh -lc", claude_result.stdout)
+        self.assertIn(str(self.home / "bin" / "across-orchestrator"), claude_result.stdout)
+
+        desktop_result = self.run_cli("install", "claude-desktop", "--config-file", str(claude_config), "--json")
+        self.assertEqual(desktop_result.returncode, 0, desktop_result.stderr)
+        desktop_install = json.loads(desktop_result.stdout)
+        self.assertEqual(desktop_install["target"], "claude-desktop")
+        self.assertEqual(desktop_install["runtime"]["wrapper"], str(self.home / "bin" / "across-orchestrator"))
+        payload = json.loads(claude_config.read_text(encoding="utf-8"))
+        self.assertEqual(payload["deploymentMode"], "default")
+        self.assertEqual(payload["mcpServers"]["across-orchestrator"]["command"], "sh")
+        self.assertEqual(payload["mcpServers"]["across-orchestrator"]["args"], ["-lc", f"exec '{self.home / 'bin' / 'across-orchestrator'}' mcp"])
+        self.assertTrue((self.home / "bin" / "across-orchestrator").is_file())
+        self.assertTrue((self.home / "plugins" / "across-orchestrator" / "venv" / "bin" / "across-orchestrator").is_file())
 
     def test_plugin_status_expands_tilde_path_with_env_home(self):
         bin_dir = self.home / "tools"
