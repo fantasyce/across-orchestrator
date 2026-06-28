@@ -37,6 +37,12 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.6` is the frontier interop and evidence hardening release. It adds
+host-neutral evidence graphs, sandbox policy evaluation, agent-team readiness,
+remote MCP/OAuth planning, A2A delegation envelopes, and OTel/GenAI span export
+surfaces for generic hosts while keeping raw credentials and transcripts outside
+long-term evidence.
+
 `v0.7.5` is the host naming and release-regression cleanup release. It keeps
 the generic managed runtime contract unchanged while tightening the public
 README around the official host names: Codex, Claude Code, Claude Desktop,
@@ -235,11 +241,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.5"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.6"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.5`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.6`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -279,6 +285,34 @@ PYTHONPATH=src python3 -m across_orchestrator.cli run "$TASK_ID" --json
 PYTHONPATH=src python3 -m across_orchestrator.cli evidence "$TASK_ID" --json
 PYTHONPATH=src python3 -m across_orchestrator.cli quality "$TASK_ID" --json
 ```
+
+## Agent-Team Trust Layer Demo
+
+For the Plugin Compatibility Lab v2 workflow, Orchestrator is the independent
+verification layer. It checks whether an Autopilot Workflow Pack export is ready
+for generic agent-team adoption, then produces the frontier interop artifacts a
+host can hand to other systems:
+
+```bash
+PYTHONPATH=src python3 -m across_orchestrator.cli agent-team-readiness \
+  --payload-json '<workflow-pack-export-json>' \
+  --json
+
+PYTHONPATH=src python3 -m across_orchestrator.cli remote-mcp-oauth-template --json
+
+PYTHONPATH=src python3 -m across_orchestrator.cli a2a-delegation \
+  --payload-json '{"pack_id":"plugin-compatibility-lab-v2"}' \
+  --json
+
+PYTHONPATH=src python3 -m across_orchestrator.cli otel-export \
+  --payload-json '<evidence-graph-json>' \
+  --otlp-file /tmp/across-otel-traces.json \
+  --json
+```
+
+The Remote MCP/OAuth output is a secret-free deployment template, the A2A output
+is a task/message/artifact/evidence envelope, and the OTel output includes both
+Across's compact GenAI-style span payload and collector-friendly OTLP JSON.
 
 ## App-Grade Release E2E
 
@@ -507,7 +541,7 @@ new candidates always start as `pending`.
 
 ### Agent Loop Host Release Evidence
 
-The `v0.7.5` Agent Loop runtime covers the release-blocking durability,
+The `v0.7.6` Agent Loop runtime covers the release-blocking durability,
 cancellation, structured cancel categories, event audit metadata, live timeline
 streaming, compact evidence summaries, routing, terminal failure propagation,
 terminal task idempotency, read-only loop health inspection, opt-in recovery

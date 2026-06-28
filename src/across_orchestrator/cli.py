@@ -2,28 +2,80 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from .agent_card import render_agent_card
+from .agent_team_readiness import evaluate_agent_team_readiness
+from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES
+from .evidence_graph import build_evidence_graph_from_payload
 from .external_agents import ExternalAgentRegistry
+from .host_install import install_agent_host
 from .host_conformance import evaluate_host_conformance, load_host_contract
-from .plugin_manifest import render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
+from .otel_export import export_otel_genai_spans
+from .plugin_manifest import install_managed_plugin, render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .protocol_gateway import render_protocol_gateway
+from .remote_mcp import render_remote_mcp_oauth_template
 from .runtime import OrchestratorRuntime
+from .sandbox import evaluate_sandbox_policy
 from .store import LocalStore
 
 
+_SENSITIVE_KEY_RE = re.compile(
+    r"(password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|client[_-]?secret|private[_-]?key)",
+    re.IGNORECASE,
+)
+_SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+)
+_SAFE_SENSITIVE_FIELD_VALUES = {False, None, "", 0, "false", "none", "not_allowed", "disabled", "not_included"}
+
+
+def _is_safe_sensitive_field_value(value: Any) -> bool:
+    try:
+        return value in _SAFE_SENSITIVE_FIELD_VALUES
+    except TypeError:
+        return False
+
+
+def _redact_sensitive_output(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _SENSITIVE_KEY_RE.search(key_text) and not _is_safe_sensitive_field_value(item):
+                redacted[key_text] = "[redacted]"
+            else:
+                redacted[key_text] = _redact_sensitive_output(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive_output(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_sensitive_output(item) for item in value]
+    if isinstance(value, str):
+        return _SENSITIVE_VALUE_RE.sub("[redacted]", value)
+    return value
+
+
+def _emit_public_text(text: str) -> None:
+    os.write(sys.stdout.fileno(), text.encode("utf-8", errors="replace"))
+
+
 def _print(payload: Any, as_json: bool) -> None:
+    safe_payload = _redact_sensitive_output(payload)
     if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        _emit_public_text(json.dumps(safe_payload, indent=2, sort_keys=True))
+        _emit_public_text("\n")
     else:
-        if isinstance(payload, dict):
-            for key, value in payload.items():
-                print(f"{key}: {value}")
+        if isinstance(safe_payload, dict):
+            for key, value in safe_payload.items():
+                _emit_public_text(f"{key}: {value}\n")
         else:
-            print(payload)
+            _emit_public_text(f"{safe_payload}\n")
 
 
 def _json_object_arg(value: str | None, name: str) -> dict[str, Any]:
@@ -149,6 +201,33 @@ def build_parser() -> argparse.ArgumentParser:
     protocol_gateway = sub.add_parser("protocol-gateway", help="Print the AAA protocol gateway matrix")
     protocol_gateway.add_argument("--json", action="store_true")
 
+    sandbox_probe = sub.add_parser("sandbox-probe", help="Evaluate an Across sandbox policy without executing commands")
+    sandbox_probe.add_argument("--policy-json", required=True)
+    sandbox_probe.add_argument("--command-json")
+    sandbox_probe.add_argument("--cwd")
+    sandbox_probe.add_argument("--json", action="store_true")
+
+    evidence_graph = sub.add_parser("evidence-graph", help="Build a host-neutral evidence graph from an evidence payload")
+    evidence_graph.add_argument("--payload-json", required=True)
+    evidence_graph.add_argument("--json", action="store_true")
+
+    agent_team_readiness = sub.add_parser("agent-team-readiness", help="Evaluate a Workflow Pack export for market-ready agent-team use")
+    agent_team_readiness.add_argument("--payload-json", required=True)
+    agent_team_readiness.add_argument("--json", action="store_true")
+
+    remote_mcp = sub.add_parser("remote-mcp-oauth-template", help="Render a secret-free Streamable HTTP/OAuth template for remote MCP deployment")
+    remote_mcp.add_argument("--config-json")
+    remote_mcp.add_argument("--json", action="store_true")
+
+    a2a_delegation = sub.add_parser("a2a-delegation", help="Create an A2A-style task/message/artifact delegation envelope")
+    a2a_delegation.add_argument("--payload-json")
+    a2a_delegation.add_argument("--json", action="store_true")
+
+    otel_export = sub.add_parser("otel-export", help="Export evidence as OTel/GenAI-style spans and eval cases")
+    otel_export.add_argument("--payload-json", required=True)
+    otel_export.add_argument("--otlp-file", help="Optional path to write OTLP JSON traces for collector-compatible smoke tests")
+    otel_export.add_argument("--json", action="store_true")
+
     external_agents = sub.add_parser("external-agents", help="Manage generic external agent plugin manifests")
     external_agents_sub = external_agents.add_subparsers(dest="external_agents_command")
     external_validate = external_agents_sub.add_parser("validate", help="Validate an across-agent-plugin manifest")
@@ -178,6 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     health = sub.add_parser("health", help="Probe local runtime health")
     health.add_argument("--json", action="store_true")
+
+    install = sub.add_parser("install", help="Prepare generic host MCP registrations")
+    install.add_argument("target", choices=["codex", "codex-mcp", "claude", "claude-code", "claude-desktop"])
+    install.add_argument("--stdout", action="store_true")
+    install.add_argument("--config-file")
+    install.add_argument("--json", action="store_true")
+
+    plugin_install = sub.add_parser("plugin-install", help="Install or repair a managed host plugin runtime")
+    plugin_install.add_argument("--json", action="store_true")
 
     plugin_uninstall = sub.add_parser("plugin-uninstall", help="Remove a managed host plugin runtime while preserving data")
     plugin_uninstall.add_argument("--json", action="store_true")
@@ -338,6 +426,69 @@ def main(argv: list[str] | None = None) -> int:
         _print(render_protocol_gateway(), args.json)
         return 0
 
+    if args.command == "sandbox-probe":
+        try:
+            policy = _json_object_arg(args.policy_json, "--policy-json")
+            command = None
+            if args.command_json:
+                command_payload = json.loads(args.command_json)
+                if not isinstance(command_payload, list):
+                    parser.error("--command-json must be a JSON array")
+                command = [str(item) for item in command_payload]
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(str(exc))
+        payload = evaluate_sandbox_policy(policy, command=command, cwd=args.cwd)
+        _print(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
+    if args.command == "evidence-graph":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        _print(build_evidence_graph_from_payload(payload), args.json)
+        return 0
+
+    if args.command == "agent-team-readiness":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        report = evaluate_agent_team_readiness(payload)
+        _print(report, args.json)
+        return 0 if report["status"] == "passed" else 1
+
+    if args.command == "remote-mcp-oauth-template":
+        try:
+            config = _json_object_arg(args.config_json, "--config-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        payload = render_remote_mcp_oauth_template(config)
+        _print(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
+    if args.command == "a2a-delegation":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        _print(create_a2a_task_delegation(payload), args.json)
+        return 0
+
+    if args.command == "otel-export":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+        exported = export_otel_genai_spans(payload)
+        if args.otlp_file:
+            target = Path(args.otlp_file).expanduser()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(exported.get("otlp") or {}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            exported = {**exported, "otlp_file": str(target)}
+        _print(exported, args.json)
+        return 0
+
     if args.command == "external-agents":
         registry = ExternalAgentRegistry()
         if args.external_agents_command == "validate":
@@ -372,6 +523,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         _print(render_plugin_health(), args.json)
+        return 0
+
+    if args.command == "install":
+        payload = install_agent_host(args.target, config_file=args.config_file, env=os.environ)
+        if args.json:
+            _print(payload, True)
+        elif args.stdout or payload.get("command"):
+            print(payload.get("command") or json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            _print(payload, args.json)
+        return 0
+
+    if args.command == "plugin-install":
+        _print(install_managed_plugin(os.environ, force=True), args.json)
         return 0
 
     if args.command == "plugin-uninstall":

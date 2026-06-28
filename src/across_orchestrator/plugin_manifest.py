@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Mapping
@@ -38,6 +41,12 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "taskOrchestration": True,
             "contracts": True,
             "evidenceBundles": True,
+            "evidenceGraph": True,
+            "sandboxPolicyEvaluation": True,
+            "agentTeamReadiness": True,
+            "remoteMcpOAuthTemplate": True,
+            "a2aTaskDelegation": True,
+            "otelGenaiExport": True,
             "qualityBenchmarks": True,
             "eventStreaming": True,
             "autopilotMetadataContract": True,
@@ -178,6 +187,12 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                     "getAgentLoop": "get_agent_loop",
                     "getAgentLoopHealth": "get_agent_loop_health",
                     "getAgentLoopEvents": "get_agent_loop_events",
+                    "evaluateSandboxPolicy": "evaluate_sandbox_policy",
+                    "evaluateAgentTeamReadiness": "evaluate_agent_team_readiness",
+                    "buildEvidenceGraph": "build_evidence_graph",
+                    "renderRemoteMcpOauthTemplate": "render_remote_mcp_oauth_template",
+                    "createA2aTaskDelegation": "create_a2a_task_delegation",
+                    "exportOtelGenaiSpans": "export_otel_genai_spans",
                 },
             },
             "sdk": {
@@ -205,6 +220,12 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "human_approval_gates",
                 "memory_hooks",
                 "evidence_bundles",
+                "evidence_graph",
+                "sandbox_policy_evaluation",
+                "agent_team_readiness",
+                "remote_mcp_oauth_template",
+                "a2a_task_delegation",
+                "otel_genai_export",
                 "quality_gates",
                 "external_agent_plugin_registry",
                 "generic_agent_plugin_schema",
@@ -322,6 +343,59 @@ def render_plugin_health(env: Mapping[str, str] | None = None) -> dict:
     }
 
 
+def install_managed_plugin(env: Mapping[str, str] | None = None, *, force: bool = False) -> dict:
+    source = env if env is not None else os.environ
+    source_root = Path(__file__).resolve().parents[2]
+    plugin_dir = plugin_root(source) / COMPONENT_ID
+    venv_dir = plugin_dir / "venv"
+    wrapper = ecosystem_bin_dir(source) / "across-orchestrator"
+    manifest_path = plugin_dir / "manifest.json"
+    state_path = plugin_dir / "install-state.json"
+
+    if force:
+        shutil.rmtree(venv_dir, ignore_errors=True)
+
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint = venv_dir / "bin" / "across-orchestrator"
+    if not entrypoint.is_file() and (source_root / "pyproject.toml").is_file():
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pip = venv_dir / "bin" / "pip"
+        subprocess.run([str(pip), "install", str(source_root)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if entrypoint.is_file():
+        wrapper_body = _render_managed_wrapper()
+    else:
+        wrapper_body = _render_module_wrapper(sys.executable)
+
+    wrapper.write_text(wrapper_body, encoding="utf-8")
+    wrapper.chmod(0o755)
+    manifest_path.write_text(json.dumps(render_plugin_manifest(str(wrapper)), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(
+            {
+                "pluginId": COMPONENT_ID,
+                "sourceRoot": str(source_root),
+                "pluginDir": str(plugin_dir),
+                "wrapper": str(wrapper),
+                "venv": str(venv_dir),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "pluginId": COMPONENT_ID,
+        "installed": True,
+        "pluginDir": str(plugin_dir),
+        "wrapper": str(wrapper),
+        "venv": str(venv_dir) if entrypoint.is_file() else None,
+        "manifestPath": str(manifest_path),
+    }
+
+
 def uninstall_managed_plugin(env: Mapping[str, str] | None = None) -> dict:
     source = env if env is not None else os.environ
     plugin_dir = plugin_root(source) / COMPONENT_ID
@@ -338,3 +412,28 @@ def uninstall_managed_plugin(env: Mapping[str, str] | None = None) -> dict:
         "wrapper": str(wrapper),
         "preservedData": str(component_data_home(env=source)),
     }
+
+
+def _render_managed_wrapper() -> str:
+    return "\n".join(
+        [
+            "#!/bin/sh",
+            "SCRIPT_DIR=$(CDPATH= cd \"$(dirname \"$0\")\" && pwd)",
+            "exec \"$SCRIPT_DIR\"/../plugins/across-orchestrator/venv/bin/across-orchestrator \"$@\"",
+            "",
+        ]
+    )
+
+
+def _render_module_wrapper(python: str) -> str:
+    return "\n".join(
+        [
+            "#!/bin/sh",
+            f"exec {_shell_quote(python)} -m across_orchestrator.cli \"$@\"",
+            "",
+        ]
+    )
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "'\\''") + "'"
