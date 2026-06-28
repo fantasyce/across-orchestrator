@@ -37,6 +37,9 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.7` is a source-sync patch release that records the current `main` commit
+as the latest release tag after release documentation synchronization.
+
 `v0.7.6` is the frontier interop and evidence hardening release. It adds
 host-neutral evidence graphs, sandbox policy evaluation, agent-team readiness,
 remote MCP/OAuth planning, A2A delegation envelopes, and OTel/GenAI span export
@@ -241,11 +244,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.6"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.7"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.6`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.7`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
