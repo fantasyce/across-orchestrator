@@ -37,6 +37,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.9` is the CodeQL and open-source hygiene patch release. It keeps the
+remote MCP/OAuth behavior from `v0.7.8` unchanged while clearing current
+CodeQL quality alerts for the producer release surface.
+
 `v0.7.8` is the remote MCP Streamable HTTP + OAuth Resource Server release.
 It ships a real `remote-mcp-server start` endpoint that binds
 `/.well-known/oauth-protected-resource` (RFC 9728) and
@@ -259,11 +263,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.8"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.9"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.8`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.9`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

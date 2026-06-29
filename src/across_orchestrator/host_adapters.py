@@ -6,26 +6,26 @@ from typing import Any, Callable, Protocol
 
 class DispatcherAdapter(Protocol):
     def add_progress_callback(self, callback: Callable[[Any], None]) -> None:
-        ...
+        pass
 
     def dispatch_subtask(self, subtask: Any) -> Any:
-        ...
+        pass
 
 
 class ValidatorAdapter(Protocol):
     def validate(self, job: Any) -> Any:
-        ...
+        pass
 
 
 class OwnerAgentAdapter(Protocol):
     def decompose_and_assign(self, task: Any, context: dict | None = None) -> Any:
-        ...
+        pass
 
     def assign_waves(self, task: Any) -> Any:
-        ...
+        pass
 
     def refresh_decomposition_coverage(self, task: Any) -> Any:
-        ...
+        pass
 
 
 @dataclass(frozen=True)

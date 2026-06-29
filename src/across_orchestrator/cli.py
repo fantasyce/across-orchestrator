@@ -542,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = _json_object_arg(args.payload_json, "--payload-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         exported = export_otel_genai_spans(payload)
         if args.otlp_file:
             target = Path(args.otlp_file).expanduser()
