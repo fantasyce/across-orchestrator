@@ -37,6 +37,9 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.10` is the follow-up CodeQL hygiene patch release. It removes the
+remaining unused-variable alert from the remote MCP compatibility path.
+
 `v0.7.9` is the CodeQL and open-source hygiene patch release. It keeps the
 remote MCP/OAuth behavior from `v0.7.8` unchanged while clearing current
 CodeQL quality alerts for the producer release surface.
@@ -263,11 +266,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.9"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.10"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.9`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.10`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

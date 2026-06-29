@@ -67,7 +67,7 @@ JSON_RPC_METHOD_NOT_FOUND = -32601
 JSON_RPC_INVALID_PARAMS = -32602
 JSON_RPC_INTERNAL_ERROR = -32603
 
-MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.7.9"}
+MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.7.10"}
 
 MCP_SERVER_CAPABILITIES = {
     "tools": {"listChanged": False},
@@ -327,7 +327,6 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             return
         if self._authorize() is None:
             return
-        accept = self.headers.get("Accept") or ""
         # MCP spec §"Sending Messages": clients MUST include both content types.
         # This endpoint still accepts either for compatibility with existing
         # local test clients.
