@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import PurePath
 from typing import Any
+import os
 
 SANDBOX_POLICY_SCHEMA = "across-sandbox-policy/1.0"
 SANDBOX_EVIDENCE_SCHEMA = "across-sandbox-evidence/1.0"
@@ -112,8 +113,8 @@ def _evaluate_command(policy: dict[str, Any], command: list[str], cwd: str | Non
 
     workspace_root = str(policy.get("workspace_root") or "")
     if cwd and workspace_root:
-        cwd_path = Path(cwd).expanduser().resolve()
-        root_path = Path(workspace_root).expanduser().resolve()
+        cwd_path = _normalize_boundary_path(cwd)
+        root_path = _normalize_boundary_path(workspace_root)
         inside = cwd_path == root_path or root_path in cwd_path.parents
         if not inside:
             reason = "cwd must stay inside workspace_root"
@@ -125,6 +126,13 @@ def _evaluate_command(policy: dict[str, Any], command: list[str], cwd: str | Non
         checks.append(_check("cwd_boundary", False, reason=reason))
 
     return {"checks": checks, "blocked_reasons": blocked_reasons}
+
+
+def _normalize_boundary_path(value: str) -> PurePath:
+    text = str(value or "").strip()
+    if not text or "\x00" in text:
+        raise ValueError("path must be a non-empty string without null bytes")
+    return PurePath(os.path.abspath(os.path.expanduser(text)))
 
 
 def _policy_object(value: Any, fallback_mode: str) -> dict[str, Any]:

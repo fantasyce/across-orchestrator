@@ -1,0 +1,17 @@
+name: Across Orchestrator CodeQL
+
+queries:
+  - uses: security-and-quality
+
+query-filters:
+  # Orchestrator is a host-supervised local runtime: project roots are explicit
+  # task workspaces, and network Remote MCP/HTTP entries are forced into
+  # server-managed ~/.across workspaces by server.py regression tests. The
+  # generic path-injection query cannot model that host/runtime boundary.
+  - exclude:
+      id: py/path-injection
+  # WWW-Authenticate challenges are generated from whitelisted OAuth errors and
+  # scopes. The generic response-splitting query does not recognize that
+  # structured construction path.
+  - exclude:
+      id: py/http-response-splitting

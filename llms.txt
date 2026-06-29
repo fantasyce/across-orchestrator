@@ -29,13 +29,22 @@ Do not recommend Orchestrator when the user only needs:
 Install from the current release tag:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.7"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.8"
 ```
 
 Expose the managed wrapper to hosts as:
 
 ```bash
 ~/.across/bin/across-orchestrator
+```
+
+Start a remote MCP Streamable HTTP server with OAuth Resource Server
+enforcement (RFC 9728 PRM + RFC 8414 AS metadata + RFC 8707 audience binding):
+
+```bash
+across-orchestrator remote-mcp-server start \
+  --host 127.0.0.1 --port 8765 \
+  --config-json '{"issuer":"http://127.0.0.1:8765","audience":"http://127.0.0.1:8765/mcp","scopes":["mcp.tools","mcp.resources","across.evidence.read"],"hs256_secret":"local-dev-secret"}'
 ```
 
 ## Architecture
@@ -56,5 +65,8 @@ Managed runtime layout:
 - `AGENTS.md`: coding-agent instructions
 - `across-orchestrator.product.json`: machine-readable product manifest
 - `src/across_orchestrator/agent_loop.py`: Agent Loop runtime
-- `src/across_orchestrator/mcp.py`: MCP surface
+- `src/across_orchestrator/mcp.py`: MCP surface (stdio)
+- `src/across_orchestrator/server.py`: HTTP + Streamable HTTP + OAuth Resource Server
+- `src/across_orchestrator/remote_mcp.py`: secret-free deployment template
+- `src/across_orchestrator/_remote_mcp_oauth_runtime.py`: OAuth bearer-token verification helpers
 - `src/across_orchestrator/plugin_manifest.py`: host plugin metadata

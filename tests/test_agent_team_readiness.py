@@ -29,7 +29,7 @@ def workflow_export_payload():
             "schema_version": "across-workflow-pack-protocol-readiness/1.0",
             "summary": {"score": 75, "honest_protocol_claims": True},
             "checks": [
-                {"id": "remote_mcp_http_oauth", "status": "planned"},
+                {"id": "remote_mcp_http_oauth", "status": "passed"},
                 {"id": "mcp_stdio", "status": "passed"},
             ],
         },
@@ -54,7 +54,14 @@ def workflow_export_payload():
                 "oauth_required": True,
             },
             "a2a": {
-                "schema_version": "across-a2a-task-delegation/1.0",
+                "schema_version": "across-a2a-task-delegation/2.0",
+            },
+            "projections": {
+                "mcp_tasks": {"status": "projection_only"},
+                "a2a": {"status": "passed"},
+                "ag_ui": {"status": "passed"},
+                "remote_mcp_oauth": {"status": "passed"},
+                "otel": {"status": "passed"},
             },
             "observability": {
                 "otel_schema": "across-otel-genai-export/1.0",
@@ -74,11 +81,25 @@ def test_evaluate_agent_team_readiness_passes_complete_workflow_export():
     assert report["score"] >= 80
 
 
-def test_evaluate_agent_team_readiness_rejects_overclaimed_remote_mcp():
+def test_evaluate_agent_team_readiness_rejects_incomplete_projection_status():
     payload = workflow_export_payload()
-    payload["protocol_readiness"]["checks"][0]["status"] = "passed"
+    payload["frontier_interop"]["projections"].pop("ag_ui")
 
     report = evaluate_agent_team_readiness(payload)
 
     assert report["status"] == "failed"
-    assert any(item["id"] == "remote_mcp_not_overclaimed" and item["status"] == "failed" for item in report["checks"])
+    assert any(item["id"] == "projection_status_ready" and item["status"] == "failed" for item in report["checks"])
+
+
+def test_evaluate_agent_team_readiness_accepts_projection_dimensions_shape():
+    payload = workflow_export_payload()
+    projections = payload["frontier_interop"]["projections"]
+    payload["frontier_interop"]["projections"] = {
+        "schema_version": "across-external-projection/1.0",
+        "dimensions": projections,
+    }
+
+    report = evaluate_agent_team_readiness(payload)
+
+    assert report["status"] == "passed"
+    assert any(item["id"] == "projection_status_ready" and item["status"] == "passed" for item in report["checks"])

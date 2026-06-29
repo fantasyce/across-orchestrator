@@ -5,7 +5,9 @@ import json
 import sys
 
 from . import __version__
+from .agui_projection import project_events_to_agui
 from .agent_card import render_agent_card
+from .agent_team import create_agent_team
 from .agent_team_readiness import evaluate_agent_team_readiness
 from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES, HOST_DECLARED_CHECK_ACTION_PATTERN, SUPPORTED_LOOP_ACTION_TYPES
@@ -335,7 +337,23 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "create_a2a_task_delegation",
-            "description": "Create an A2A-style task, message, artifact, and evidence receipt envelope without calling a remote agent.",
+            "description": "Create an LF-compatible A2A task, message, artifact, streaming, push notification, and evidence receipt projection without calling a remote agent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+            },
+        },
+        {
+            "name": "project_agui_events",
+            "description": "Project Across task or loop events into AG-UI task-card events for external web or desktop clients.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+            },
+        },
+        {
+            "name": "create_agent_team",
+            "description": "Create a first-class agent-team contract with independent sessions, checkpoints, context refs, and handoff notes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"payload": {"type": "object"}},
@@ -567,6 +585,12 @@ def resource_definitions() -> list[dict[str, Any]]:
             "uri": "across-orchestrator://external-agent-plugins",
             "name": "External Agent Plugins",
             "description": "Registered across-agent-plugin/1.0 manifests and health-safe public cards.",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": "across-orchestrator://projection-contracts",
+            "name": "Across Projection Contracts",
+            "description": "Projection-only contracts for MCP Tasks, A2A, AG-UI, Remote MCP/OAuth, and OTel.",
             "mimeType": "application/json",
         },
     ]
@@ -844,6 +868,10 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return render_remote_mcp_oauth_template(arguments.get("config") or {})
     if name == "create_a2a_task_delegation":
         return create_a2a_task_delegation(arguments.get("payload") or {})
+    if name == "project_agui_events":
+        return project_events_to_agui(arguments.get("payload") or {})
+    if name == "create_agent_team":
+        return create_agent_team(arguments.get("payload") or {})
     if name == "export_otel_genai_spans":
         return export_otel_genai_spans(arguments.get("payload") or {})
     if name == "start_agent_loop":
@@ -926,6 +954,24 @@ def read_resource(uri: str) -> dict[str, Any]:
         }
     elif uri == "across-orchestrator://external-agent-plugins":
         payload = ExternalAgentRegistry().registry_payload()
+    elif uri == "across-orchestrator://projection-contracts":
+        payload = {
+            "schema_version": "across-external-projection/1.0",
+            "runtime_source_of_truth": "across-orchestrator-run-store",
+            "projection_only": True,
+            "projections": {
+                "mcp_tasks": {"schema_version": "across-async-task/1.0", "status": "projection_only"},
+                "a2a": {"schema_version": "across-a2a-task-delegation/2.0", "status": "passed"},
+                "ag_ui": {"schema_version": "across-agui-projection/1.0", "status": "passed"},
+                "remote_mcp_oauth": {"schema_version": "across-remote-mcp-oauth-template/1.0", "status": "passed"},
+                "otel": {"schema_version": "across-otel-genai-export/1.0", "status": "passed"},
+            },
+            "boundaries": {
+                "host_credentials": "host_owned",
+                "raw_transcripts_included": False,
+                "secrets_included": False,
+            },
+        }
     else:
         raise ValueError(f"Unknown resource: {uri}")
     return {

@@ -6,15 +6,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 
-A2A_DELEGATION_SCHEMA = "across-a2a-task-delegation/1.0"
+A2A_DELEGATION_SCHEMA = "across-a2a-task-delegation/2.0"
 
 
 def create_a2a_task_delegation(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Create a minimal executable A2A-style task envelope.
+    """Create an LF-compatible A2A task delegation projection.
 
-    This does not call a remote agent. It gives any host a deterministic task,
-    message, artifact, and evidence receipt shape that can be sent through an
-    A2A-compatible gateway or inspected locally.
+    This does not call a remote agent. It gives hosts a deterministic Agent
+    Card, JSON-RPC task request, streaming, push notification, artifact, and
+    evidence receipt shape that can be sent through an A2A-compatible gateway
+    or inspected locally.
     """
 
     payload = payload or {}
@@ -25,10 +26,33 @@ def create_a2a_task_delegation(payload: dict[str, Any] | None = None) -> dict[st
     state = _text(payload.get("state") or "submitted")
     if state not in {"submitted", "working", "input-required", "completed", "failed", "canceled"}:
         state = "submitted"
+    agent_url = _text(payload.get("agent_url") or payload.get("agentUrl") or "https://agent.example.com/a2a")
+    review_agent = _text(payload.get("review_agent") or payload.get("reviewAgent") or "review-agent")
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     return {
         "schema_version": A2A_DELEGATION_SCHEMA,
+        "compatible_schema_versions": ["across-a2a-task-delegation/1.0"],
+        "a2a_profile": "linux-foundation-a2a",
+        "projection_only": True,
         "provider": "across-orchestrator",
+        "agent_card": {
+            "name": "Across Orchestrator Review Delegation",
+            "url": agent_url,
+            "version": "2.0",
+            "capabilities": {
+                "streaming": True,
+                "pushNotifications": True,
+                "stateTransitionHistory": True,
+            },
+            "skills": [
+                {
+                    "id": "plugin-compatibility-review",
+                    "name": "Plugin Compatibility Review",
+                    "description": "Review candidate workspaces and produce evidence for human promotion.",
+                    "tags": ["plugin-compatibility", "review", "evidence"],
+                }
+            ],
+        },
         "task": {
             "id": task_id,
             "kind": "task",
@@ -39,6 +63,24 @@ def create_a2a_task_delegation(payload: dict[str, Any] | None = None) -> dict[st
                 "trust_receipt_required": True,
                 "human_promotion_gate": True,
                 "secrets_allowed": False,
+                "assigned_agent": review_agent,
+            },
+        },
+        "jsonrpc": {
+            "jsonrpc": "2.0",
+            "id": task_id,
+            "method": "tasks/send",
+            "params": {
+                "id": task_id,
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": goal}],
+                },
+                "metadata": {
+                    "pack_id": pack_id,
+                    "human_promotion_gate": True,
+                    "candidate_workspace_review": True,
+                },
             },
         },
         "message": {
@@ -49,6 +91,16 @@ def create_a2a_task_delegation(payload: dict[str, Any] | None = None) -> dict[st
                     "text": goal,
                 }
             ],
+        },
+        "streaming": {
+            "method": "tasks/sendSubscribe",
+            "events": ["TaskStatusUpdateEvent", "TaskArtifactUpdateEvent"],
+            "resume": "task_id",
+        },
+        "push_notification": {
+            "method": "tasks/pushNotificationConfig/set",
+            "required_for_background_review": False,
+            "host_must_confirm_endpoint": True,
         },
         "artifacts": artifacts,
         "evidence_receipt": {

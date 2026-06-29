@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,30 @@ from .store import LocalStore
 
 
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _resolve_project_root(project_root: str) -> Path:
+    text = str(project_root or "").strip()
+    if not text or "\x00" in text:
+        raise ValueError("project_root must be a non-empty path without null bytes")
+    resolved = Path(os.path.realpath(os.path.expanduser(text)))
+    allowed_roots = _allowed_project_roots()
+    if allowed_roots and not any(resolved == allowed or allowed in resolved.parents for allowed in allowed_roots):
+        raise ValueError("project_root is outside ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS")
+    return resolved
+
+
+def _allowed_project_roots() -> list[Path]:
+    raw = os.environ.get("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS", "")
+    roots: list[Path] = []
+    for item in raw.split(os.pathsep):
+        text = item.strip()
+        if not text:
+            continue
+        if "\x00" in text:
+            raise ValueError("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS contains a null byte")
+        roots.append(Path(os.path.realpath(os.path.expanduser(text))))
+    return roots
 
 
 class OrchestratorRuntime:
@@ -54,7 +79,7 @@ class OrchestratorRuntime:
     ) -> Task:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
-        root = Path(project_root).expanduser().resolve()
+        root = _resolve_project_root(project_root)
         root.mkdir(parents=True, exist_ok=True)
         paths = list(deliverables or ["README.md"])
         if subtasks:
@@ -101,7 +126,7 @@ class OrchestratorRuntime:
         run_label: str | None = None,
         allowed_agents: list[str] | None = None,
     ) -> Task:
-        root = Path(project_root).expanduser().resolve()
+        root = _resolve_project_root(project_root)
         root.mkdir(parents=True, exist_ok=True)
         executor_agents = _clean_release_e2e_agents(allowed_agents)
         task = Task.new(
