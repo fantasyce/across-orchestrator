@@ -105,6 +105,8 @@ class McpTests(unittest.TestCase):
             self.assertIn("evaluate_agent_team_readiness", tool_names)
             self.assertIn("render_remote_mcp_oauth_template", tool_names)
             self.assertIn("create_a2a_task_delegation", tool_names)
+            self.assertIn("project_agui_events", tool_names)
+            self.assertIn("create_agent_team", tool_names)
             self.assertIn("export_otel_genai_spans", tool_names)
             self.assertIn("validate_external_agent_plugin", tool_names)
             self.assertIn("register_external_agent_plugin", tool_names)
@@ -119,6 +121,7 @@ class McpTests(unittest.TestCase):
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
             self.assertIn("across-orchestrator://sandbox-policy", resource_uris)
             self.assertIn("across-orchestrator://external-agent-plugins", resource_uris)
+            self.assertIn("across-orchestrator://projection-contracts", resource_uris)
             manifest = json.loads(responses[3]["result"]["contents"][0]["text"])
             self.assertEqual(manifest["id"], "across-orchestrator")
             self.assertTrue(manifest["capabilities"]["agentLoopV2"])
@@ -183,8 +186,15 @@ class McpTests(unittest.TestCase):
                 "frontier_interop": {
                     "schema_version": "across-workflow-pack-frontier-interop/1.0",
                     "remote_mcp": {"schema_version": "across-remote-mcp-oauth-template/1.0", "oauth_required": True},
-                    "a2a": {"schema_version": "across-a2a-task-delegation/1.0"},
+                    "a2a": {"schema_version": "across-a2a-task-delegation/2.0"},
                     "observability": {"otel_schema": "across-otel-genai-export/1.0", "otlp_trace_schema": "otlp-traces-json/1.0", "raw_transcripts_included": False},
+                    "projections": {
+                        "mcp_tasks": {"status": "projection_only"},
+                        "a2a": {"status": "passed"},
+                        "ag_ui": {"status": "passed"},
+                        "remote_mcp_oauth": {"status": "passed"},
+                        "otel": {"status": "passed"},
+                    },
                 },
             }
             messages = [
@@ -256,9 +266,69 @@ class McpTests(unittest.TestCase):
             delegated = json.loads(responses[2]["result"]["content"][0]["text"])
             otel = json.loads(responses[3]["result"]["content"][0]["text"])
             self.assertEqual(remote["schema_version"], "across-remote-mcp-oauth-template/1.0")
-            self.assertEqual(delegated["schema_version"], "across-a2a-task-delegation/1.0")
+            self.assertEqual(delegated["schema_version"], "across-a2a-task-delegation/2.0")
+            self.assertEqual(delegated["jsonrpc"]["method"], "tasks/send")
             self.assertEqual(otel["schema_version"], "across-otel-genai-export/1.0")
             self.assertEqual(otel["summary"]["eval_case_count"], 1)
+
+    def test_mcp_exposes_agui_projection_and_agent_team_tools(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(__file__).resolve().parents[1]
+            home = Path(tempdir) / "home"
+            home.mkdir()
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(root / "src")
+            env["ACROSS_ORCHESTRATOR_HOME"] = str(home)
+            messages = [
+                rpc(1, "initialize", {}),
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                rpc(2, "tools/call", {
+                    "name": "project_agui_events",
+                    "arguments": {
+                        "payload": {
+                            "source": "loop",
+                            "loop_id": "loop-1",
+                            "events": [{"type": "loop.completed", "sequence": 1, "payload": {"status": "completed"}}],
+                        }
+                    },
+                }),
+                rpc(3, "tools/call", {
+                    "name": "create_agent_team",
+                    "arguments": {
+                        "payload": {
+                            "owner": "owner",
+                            "agents": [{"id": "owner"}, {"id": "review-agent", "role": "review"}],
+                            "context": {"notes": ["Use NOTES.md handoff only."]},
+                        }
+                    },
+                }),
+                rpc(4, "resources/read", {"uri": "across-orchestrator://projection-contracts"}),
+            ]
+            process = subprocess.run(
+                [sys.executable, "-m", "across_orchestrator.cli", "mcp"],
+                cwd=root,
+                env=env,
+                input="\n".join(json.dumps(item) for item in messages) + "\n",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(process.returncode, 0, process.stderr)
+            responses = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            agui = json.loads(responses[1]["result"]["content"][0]["text"])
+            team = json.loads(responses[2]["result"]["content"][0]["text"])
+            contracts = json.loads(responses[3]["result"]["contents"][0]["text"])
+            self.assertEqual(agui["schema_version"], "across-agui-projection/1.0")
+            self.assertEqual(agui["events"][0]["type"], "task.completed")
+            self.assertFalse(agui["summary"]["secrets_included"])
+            self.assertEqual(team["schema_version"], "across-agent-team/1.0")
+            self.assertEqual(len(team["agents"]), 2)
+            self.assertTrue(team["checkpoint_policy"]["independent_session"])
+            self.assertEqual(contracts["schema_version"], "across-external-projection/1.0")
+            self.assertEqual(contracts["projections"]["ag_ui"]["schema_version"], "across-agui-projection/1.0")
 
     def test_mcp_exposes_external_agent_plugin_contract(self):
         with tempfile.TemporaryDirectory() as tempdir:

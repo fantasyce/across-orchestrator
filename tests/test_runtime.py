@@ -16,6 +16,7 @@ class RuntimeTests(unittest.TestCase):
         self.project.mkdir()
         self.home.mkdir()
         self._old_home = os.environ.get("ACROSS_ORCHESTRATOR_HOME")
+        self._old_allowed_roots = os.environ.get("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS")
         os.environ["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
 
     def tearDown(self):
@@ -23,6 +24,10 @@ class RuntimeTests(unittest.TestCase):
             os.environ.pop("ACROSS_ORCHESTRATOR_HOME", None)
         else:
             os.environ["ACROSS_ORCHESTRATOR_HOME"] = self._old_home
+        if self._old_allowed_roots is None:
+            os.environ.pop("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS", None)
+        else:
+            os.environ["ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS"] = self._old_allowed_roots
         self.tempdir.cleanup()
 
     def test_submit_task_persists_contracts_and_events(self):
@@ -61,6 +66,26 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events[0]["correlation_id"], f"loop:{task.metadata['agent_loop']['loop_id']}")
         subtask_events = [event for event in events if event["type"] == "subtask.created"]
         self.assertTrue(all(event["correlation_id"].startswith("subtask:") for event in subtask_events))
+
+    def test_submit_task_rejects_invalid_project_root(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        with self.assertRaises(ValueError):
+            runtime.submit_task(goal="Invalid root", project_root="")
+        with self.assertRaises(ValueError):
+            runtime.submit_task(goal="Invalid root", project_root="bad\x00root")
+
+    def test_submit_task_enforces_optional_allowed_project_roots(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        outside = Path(self.tempdir.name) / "outside"
+        outside.mkdir()
+        os.environ["ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS"] = str(self.project)
+        runtime = OrchestratorRuntime()
+        runtime.submit_task(goal="Allowed root", project_root=str(self.project))
+        with self.assertRaises(ValueError):
+            runtime.submit_task(goal="Blocked root", project_root=str(outside))
 
     def test_submit_task_preserves_explicit_serial_plan(self):
         from across_orchestrator.runtime import OrchestratorRuntime

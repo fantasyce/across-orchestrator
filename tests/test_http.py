@@ -190,7 +190,9 @@ class HttpTests(unittest.TestCase):
         completed = self.post(f"/tasks/{task['task_id']}/run", {})
 
         self.assertEqual(completed["status"], "completed")
-        self.assertEqual((self.project / "out/http.txt").read_text(encoding="utf-8"), "http-adapter=http-custom-agent\n")
+        task_root = Path(completed["project_root"])
+        self.assertEqual((task_root / "out/http.txt").read_text(encoding="utf-8"), "http-adapter=http-custom-agent\n")
+        self.assertFalse((self.project / "out/http.txt").exists())
 
     def test_http_agent_loop_lifecycle(self):
         loop = self.post(
@@ -361,9 +363,11 @@ class HttpTests(unittest.TestCase):
 
         self.assertEqual(completed["status"], "completed")
         self.assertEqual([item["status"] for item in task["subtasks"]], ["completed", "completed", "completed"])
-        self.assertTrue((self.project / "README.md").exists())
-        self.assertTrue((self.project / "web/index.html").exists())
-        self.assertTrue((self.project / "web/app.js").exists())
+        task_root = Path(task["project_root"])
+        self.assertTrue((task_root / "README.md").exists())
+        self.assertTrue((task_root / "web/index.html").exists())
+        self.assertTrue((task_root / "web/app.js").exists())
+        self.assertFalse((self.project / "README.md").exists())
 
     def test_http_rejects_invalid_loop_action_plan_with_400(self):
         status, payload = self.post_error(

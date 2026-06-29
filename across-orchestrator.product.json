@@ -8,10 +8,10 @@
   "part_of": "Across",
   "repository": "fantasyce/across-orchestrator",
   "current_release": {
-    "version": "v0.7.7",
+    "version": "v0.7.8",
     "published_at": "2026-06-29",
-    "tag": "v0.7.7",
-    "release_url": "https://github.com/fantasyce/across-orchestrator/releases/tag/v0.7.7"
+    "tag": "v0.7.8",
+    "release_url": "https://github.com/fantasyce/across-orchestrator/releases/tag/v0.7.8"
   },
   "role": "durable execution runtime",
   "hosts": [
@@ -32,8 +32,21 @@
     "quality gates",
     "retry and cancellation state",
     "event streams",
-    "evidence bundles"
+    "evidence bundles",
+    "remote_mcp_oauth_resource_server",
+    "mcp_tasks_projection",
+    "a2a_task_delegation_v2",
+    "agui_projection",
+    "agent_team_runtime_primitives"
   ],
+  "capabilities": {
+    "mcp_remote_oauth_v1": true,
+    "mcp_tasks_capability": true,
+    "a2a_task_delegation_v2": true,
+    "agui_projection": true,
+    "otel_genai_bridge": true,
+    "agent_teams": true
+  },
   "does_not_own": [
     "host credentials",
     "host UI",

@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
+from .agui_projection import project_events_to_agui
 from .agent_card import render_agent_card
+from .agent_team import create_agent_team
 from .agent_team_readiness import evaluate_agent_team_readiness
 from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES
@@ -19,46 +20,11 @@ from .host_conformance import evaluate_host_conformance, load_host_contract
 from .otel_export import export_otel_genai_spans
 from .plugin_manifest import install_managed_plugin, render_plugin_health, render_plugin_manifest, render_plugin_status, uninstall_managed_plugin
 from .protocol_gateway import render_protocol_gateway
+from .redaction import redact_sensitive_value
 from .remote_mcp import render_remote_mcp_oauth_template
 from .runtime import OrchestratorRuntime
 from .sandbox import evaluate_sandbox_policy
 from .store import LocalStore
-
-
-_SENSITIVE_KEY_RE = re.compile(
-    r"(password|passwd|pwd|secret|token|api[_-]?key|apikey|credential|client[_-]?secret|private[_-]?key)",
-    re.IGNORECASE,
-)
-_SENSITIVE_VALUE_RE = re.compile(
-    r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
-)
-_SAFE_SENSITIVE_FIELD_VALUES = {False, None, "", 0, "false", "none", "not_allowed", "disabled", "not_included"}
-
-
-def _is_safe_sensitive_field_value(value: Any) -> bool:
-    try:
-        return value in _SAFE_SENSITIVE_FIELD_VALUES
-    except TypeError:
-        return False
-
-
-def _redact_sensitive_output(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if _SENSITIVE_KEY_RE.search(key_text) and not _is_safe_sensitive_field_value(item):
-                redacted[key_text] = "[redacted]"
-            else:
-                redacted[key_text] = _redact_sensitive_output(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_sensitive_output(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_sensitive_output(item) for item in value]
-    if isinstance(value, str):
-        return _SENSITIVE_VALUE_RE.sub("[redacted]", value)
-    return value
 
 
 def _emit_public_text(text: str) -> None:
@@ -66,7 +32,7 @@ def _emit_public_text(text: str) -> None:
 
 
 def _print(payload: Any, as_json: bool) -> None:
-    safe_payload = _redact_sensitive_output(payload)
+    safe_payload = redact_sensitive_value(payload)
     if as_json:
         _emit_public_text(json.dumps(safe_payload, indent=2, sort_keys=True))
         _emit_public_text("\n")
@@ -219,9 +185,26 @@ def build_parser() -> argparse.ArgumentParser:
     remote_mcp.add_argument("--config-json")
     remote_mcp.add_argument("--json", action="store_true")
 
+    remote_mcp_server = sub.add_parser("remote-mcp-server", help="Start a Streamable HTTP MCP server with OAuth Resource Server enforcement")
+    remote_mcp_server_sub = remote_mcp_server.add_subparsers(dest="remote_mcp_server_command")
+    remote_mcp_server_start = remote_mcp_server_sub.add_parser("start", help="Bind a local Streamable HTTP endpoint with bearer-token verification")
+    remote_mcp_server_start.add_argument("--host", default="127.0.0.1")
+    remote_mcp_server_start.add_argument("--port", type=int, default=8765)
+    remote_mcp_server_start.add_argument("--config-json", help="OAuth config JSON: {issuer, audience, scopes, jwks_uri, hs256_secret, jwks_url, required_claims}")
+    remote_mcp_server_start.add_argument("--allowed-origins", action="append", default=[], help="Allowed Origin header values for DNS-rebinding protection (repeatable)")
+    remote_mcp_server_start.add_argument("--json", action="store_true")
+
     a2a_delegation = sub.add_parser("a2a-delegation", help="Create an A2A-style task/message/artifact delegation envelope")
     a2a_delegation.add_argument("--payload-json")
     a2a_delegation.add_argument("--json", action="store_true")
+
+    agui_projection = sub.add_parser("agui-projection", help="Project Across task or loop events into AG-UI task-card events")
+    agui_projection.add_argument("--payload-json", required=True)
+    agui_projection.add_argument("--json", action="store_true")
+
+    agent_team = sub.add_parser("agent-team", help="Create a first-class agent-team session/checkpoint/handoff contract")
+    agent_team.add_argument("--payload-json")
+    agent_team.add_argument("--json", action="store_true")
 
     otel_export = sub.add_parser("otel-export", help="Export evidence as OTel/GenAI-style spans and eval cases")
     otel_export.add_argument("--payload-json", required=True)
@@ -304,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             agent_adapters = _json_object_arg(args.agent_adapters_json, "--agent-adapters-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         task = runtime.submit_task(
             goal=args.goal,
             project_root=args.project,
@@ -355,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
             metadata = _json_object_arg(args.metadata_json, "--metadata-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         if args.require_approval_for:
             approval_policy = {
                 **approval_policy,
@@ -372,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         _print(loop.to_dict(), args.json)
         return 0
 
@@ -437,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
                 command = [str(item) for item in command_payload]
         except (json.JSONDecodeError, ValueError) as exc:
             parser.error(str(exc))
+            return 2
         payload = evaluate_sandbox_policy(policy, command=command, cwd=args.cwd)
         _print(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
@@ -446,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = _json_object_arg(args.payload_json, "--payload-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         _print(build_evidence_graph_from_payload(payload), args.json)
         return 0
 
@@ -454,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = _json_object_arg(args.payload_json, "--payload-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         report = evaluate_agent_team_readiness(payload)
         _print(report, args.json)
         return 0 if report["status"] == "passed" else 1
@@ -463,16 +452,89 @@ def main(argv: list[str] | None = None) -> int:
             config = _json_object_arg(args.config_json, "--config-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         payload = render_remote_mcp_oauth_template(config)
         _print(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
+
+    if args.command == "remote-mcp-server":
+        from .server import build_remote_mcp_oauth_config, serve as serve_runtime
+
+        if not getattr(args, "remote_mcp_server_command", None):
+            sys.stderr.write(
+                "remote-mcp-server requires a subcommand. Use 'start' to bind a Streamable HTTP endpoint.\n"
+            )
+            _print(
+                {
+                    "status": "missing_subcommand",
+                    "subcommands": ["start"],
+                },
+                True,
+            )
+            return 2
+        if args.remote_mcp_server_command != "start":
+            parser.error("remote-mcp-server requires 'start'")
+        try:
+            user_config = _json_object_arg(args.config_json, "--config-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        oauth_config = build_remote_mcp_oauth_config(
+            host=args.host,
+            port=args.port,
+            issuer=user_config.get("issuer"),
+            audience=user_config.get("audience"),
+            jwks_uri=user_config.get("jwks_uri"),
+            hs256_secret=user_config.get("hs256_secret"),
+            jwks_url=user_config.get("jwks_url"),
+            scopes=user_config.get("scopes"),
+            allowed_origins=list(args.allowed_origins) + list(user_config.get("allowed_origins") or []),
+            required_claims=user_config.get("required_claims") or user_config.get("requiredClaims"),
+        )
+        if args.json:
+            _print(
+                {
+                    "status": "starting",
+                    "host": args.host,
+                    "port": args.port,
+                    "endpoint": oauth_config["base_url"],
+                    "mcp_endpoint": f"{oauth_config['base_url']}{oauth_config['mcp_endpoint']}",
+                    "protected_resource": f"{oauth_config['base_url']}{oauth_config['well_known_protected_resource']}",
+                    "authorization_server": f"{oauth_config['base_url']}{oauth_config['well_known_authorization_server']}",
+                    "audience": oauth_config["audience"],
+                    "issuer": oauth_config["issuer"],
+                    "scopes": oauth_config["scopes"],
+                },
+                True,
+            )
+        serve_runtime(args.host, args.port, remote_mcp_oauth_config=oauth_config)
+        return 0
 
     if args.command == "a2a-delegation":
         try:
             payload = _json_object_arg(args.payload_json, "--payload-json")
         except ValueError as exc:
             parser.error(str(exc))
+            return 2
         _print(create_a2a_task_delegation(payload), args.json)
+        return 0
+
+    if args.command == "agui-projection":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        _print(project_events_to_agui(payload), args.json)
+        return 0
+
+    if args.command == "agent-team":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        _print(create_agent_team(payload), args.json)
         return 0
 
     if args.command == "otel-export":

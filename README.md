@@ -37,6 +37,21 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.8` is the remote MCP Streamable HTTP + OAuth Resource Server release.
+It ships a real `remote-mcp-server start` endpoint that binds
+`/.well-known/oauth-protected-resource` (RFC 9728) and
+`/.well-known/oauth-authorization-server` (RFC 8414) plus
+the single `/mcp` Streamable HTTP endpoint. `POST /mcp` accepts JSON-RPC
+messages for `initialize`, `tools/list`, `tools/call`, `resources/list`,
+`resources/read`, and `ping`; `GET /mcp` exposes the optional SSE stream;
+`DELETE /mcp` terminates an MCP session. Bearer tokens are verified server-side
+with RFC 8707 Resource Indicators audience binding, scope-to-tool enforcement,
+JWKS caching, and HS256/RS256/ES256 support. The existing stdio MCP transport
+and the `across-remote-mcp-oauth-template/1.0` schema_version stay unchanged so
+AAA E2E and Plugin Compatibility Lab v2 still pass without modification. PyJWT
+is offered as an optional `[remote-mcp]` extra so the package's
+stdlib-only `dependencies = []` contract is preserved.
+
 `v0.7.7` is a source-sync patch release that records the current `main` commit
 as the latest release tag after release documentation synchronization.
 
@@ -244,11 +259,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.7"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.8"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.7`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.8`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
@@ -625,6 +640,75 @@ Run:
 ```bash
 across-orchestrator mcp
 ```
+
+## Remote MCP Streamable HTTP Server
+
+`v0.7.8` adds a real Streamable HTTP MCP server bound to an OAuth Resource
+Server. The transport is host-neutral, token-bearing, and stays read-only with
+respect to client credentials: signing keys and authorization-server endpoints
+stay with the host.
+
+### Endpoints
+
+- `GET /.well-known/oauth-protected-resource` — RFC 9728 Protected Resource
+  Metadata. The `resource` field is the audience identifier that tokens MUST
+  bind to via the `aud` claim (RFC 8707 Resource Indicators).
+- `GET /.well-known/oauth-authorization-server` — RFC 8414 Authorization
+  Server Metadata, with `remote_as: true` to flag that Across Orchestrator
+  proxies a host-configured external issuer.
+- `POST /mcp` — accepts JSON-RPC 2.0 requests. Supported methods are
+  `initialize`, `tools/list`, `tools/call`, `resources/list`,
+  `resources/read`, and `ping`.
+- `GET /mcp` — opens a `text/event-stream` keep-alive stream when requested;
+  clients without `Accept: text/event-stream` receive 405.
+- `DELETE /mcp` — terminates the supplied `Mcp-Session-Id`.
+
+`initialize` returns `protocolVersion: 2025-06-18` plus a fresh
+`Mcp-Session-Id` header. Legacy `2024-11-05` is honored when the client
+requests it through `MCP-Protocol-Version`. Subsequent JSON-RPC requests must
+include that session header. The legacy `/mcp/v1/*` REST paths were removed in
+`v0.7.8`.
+
+### Authentication
+
+- Bearer token in the `Authorization` header.
+- `iss` must equal the configured issuer (RFC 8414 §2).
+- `aud` must equal the configured `resource` value (RFC 8707).
+- `exp` must be in the future (with 30s leeway).
+- Required claims default to `iss`, `iat`, `exp`, and `aud`; hosts may override
+  the set with `required_claims` in `--config-json`.
+- `scope` must include at least one of the configured required scopes.
+- HS256 is verified with a pure-stdlib path so the default `[dev]` install
+  covers local testing without PyJWT.
+- RS256 / ES256 require the `[remote-mcp]` extra
+  (`pip install across-orchestrator[remote-mcp]`), which pulls PyJWT with
+  the `cryptography` extra. The base `[dev]` install keeps
+  `dependencies = []` intact.
+
+### 401 / 403 challenges
+
+Every unauthenticated response includes a `WWW-Authenticate: Bearer ...`
+header pointing at the protected-resource metadata URL per RFC 6750 +
+RFC 9728 §5.1:
+
+```text
+WWW-Authenticate: Bearer realm="across-orchestrator",
+  resource_metadata="http://127.0.0.1:8765/.well-known/oauth-protected-resource",
+  error="invalid_token", error_description="..."
+```
+
+### Run locally with HS256
+
+```bash
+across-orchestrator remote-mcp-server start \
+  --host 127.0.0.1 --port 8765 \
+  --config-json '{"issuer":"http://127.0.0.1:8765","audience":"http://127.0.0.1:8765/mcp","scopes":["mcp.tools","mcp.resources","across.evidence.read"],"hs256_secret":"local-dev-secret"}'
+```
+
+The endpoint stays compatible with the existing `render_remote_mcp_oauth_template`
+schema (`across-remote-mcp-oauth-template/1.0`) so AAA's
+`agent_interop_e2e.py` and Plugin Compatibility Lab v2 keep scoring the
+existing templates without modification.
 
 ## Host Boundary And Hosting Platforms
 

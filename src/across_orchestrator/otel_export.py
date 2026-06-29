@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .evidence_graph import build_evidence_graph_from_payload
+from .redaction import redact_sensitive_value
 
 
 OTEL_GENAI_EXPORT_SCHEMA = "across-otel-genai-export/1.0"
@@ -16,8 +17,8 @@ def export_otel_genai_spans(payload: dict[str, Any] | None = None) -> dict[str, 
     """Convert Across evidence into a compact OTel/GenAI-style span export."""
 
     graph = build_evidence_graph_from_payload(payload or {})
-    run_id = str(graph.get("run_id") or "unknown")
-    spec_id = str(graph.get("spec_id") or "unknown")
+    run_id = str(redact_sensitive_value(graph.get("run_id") or "unknown"))
+    spec_id = str(redact_sensitive_value(graph.get("spec_id") or "unknown"))
     trace_id = _hex(run_id, 32)
     now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     spans = []
@@ -38,7 +39,7 @@ def export_otel_genai_spans(payload: dict[str, Any] | None = None) -> dict[str, 
                     "gen_ai.system": "across",
                     "across.run_id": run_id,
                     "across.spec_id": spec_id,
-                    "across.node.id": node_id,
+                    "across.node.id": str(redact_sensitive_value(node_id)),
                     "across.node.type": node_type,
                     "across.node.status": str(node.get("status") or "unknown"),
                     "across.node.hash": str(node.get("hash") or ""),
@@ -135,11 +136,11 @@ def _eval_dataset(graph: dict[str, Any]) -> dict[str, Any]:
             continue
         cases.append(
             {
-                "id": str(node.get("id") or ""),
-                "input": {"run_id": graph.get("run_id"), "spec_id": graph.get("spec_id")},
+                "id": str(redact_sensitive_value(node.get("id") or "")),
+                "input": {"run_id": redact_sensitive_value(graph.get("run_id")), "spec_id": redact_sensitive_value(graph.get("spec_id"))},
                 "expected": {"status": str(node.get("status") or "unknown")},
                 "metadata": {
-                    "gate": str(node.get("label") or node.get("id") or ""),
+                    "gate": str(redact_sensitive_value(node.get("label") or node.get("id") or "")),
                     "evidence_hash": str(node.get("hash") or ""),
                 },
             }

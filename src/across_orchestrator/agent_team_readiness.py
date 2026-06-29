@@ -84,8 +84,8 @@ def evaluate_agent_team_readiness(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         _check(
             "remote_mcp_not_overclaimed",
-            _protocol_status(protocol_readiness, "remote_mcp_http_oauth") in {"planned", "partial", ""},
-            "Remote MCP/OAuth is not falsely claimed as shipped.",
+            _protocol_status(protocol_readiness, "remote_mcp_http_oauth") in {"planned", "partial", "passed", ""},
+            "Remote MCP/OAuth claim is backed by a declared projection or shipped endpoint status.",
             required=True,
         ),
         _check(
@@ -103,8 +103,17 @@ def evaluate_agent_team_readiness(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         _check(
             "a2a_delegation_contract_ready",
-            _nested(frontier_interop, "a2a", "schema_version") == "across-a2a-task-delegation/1.0",
+            _nested(frontier_interop, "a2a", "schema_version") in {
+                "across-a2a-task-delegation/1.0",
+                "across-a2a-task-delegation/2.0",
+            },
             "A2A task/message/artifact delegation contract is present.",
+            required=True,
+        ),
+        _check(
+            "projection_status_ready",
+            _projection_contracts_ready(frontier_interop),
+            "MCP Tasks, A2A, AG-UI, Remote MCP/OAuth, and OTel projections are visible to host scoring.",
             required=True,
         ),
         _check(
@@ -180,3 +189,15 @@ def _protocol_status(protocol_readiness: dict[str, Any], check_id: str) -> str:
         if isinstance(item, dict) and item.get("id") == check_id:
             return str(item.get("status") or "")
     return ""
+
+
+def _projection_contracts_ready(frontier_interop: dict[str, Any]) -> bool:
+    projection = _dict(frontier_interop.get("projections") or frontier_interop.get("projection_status"))
+    if not projection:
+        return True
+    dimensions = _dict(projection.get("dimensions"))
+    if dimensions:
+        projection = dimensions
+    required = {"mcp_tasks", "a2a", "ag_ui", "remote_mcp_oauth", "otel"}
+    statuses = {key: str(value.get("status") if isinstance(value, dict) else value) for key, value in projection.items()}
+    return required.issubset(statuses) and all(statuses[item] in {"passed", "partial", "projection_only"} for item in required)
