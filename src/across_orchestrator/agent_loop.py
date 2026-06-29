@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -52,25 +53,25 @@ CANCEL_CATEGORY_ALIASES = {
 
 class MemoryProvider(Protocol):
     def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
-        ...
+        pass
 
     def remember_candidate(self, *, text: str, project_root: str, tags: list[str] | None = None) -> dict[str, Any]:
-        ...
+        pass
 
 
 class LoopDispatcher(Protocol):
     def dispatch(self, *, loop: "LoopRun", action_type: str, context: dict[str, Any]) -> dict[str, Any]:
-        ...
+        pass
 
 
 class QualityGate(Protocol):
     def evaluate(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
-        ...
+        pass
 
 
 class Finalizer(Protocol):
     def finalize(self, *, loop: "LoopRun", context: dict[str, Any]) -> dict[str, Any]:
-        ...
+        pass
 
 
 def normalize_cancel_category(category: Any = None, reason: Any = None) -> str:
@@ -2103,8 +2104,6 @@ class AgentLoopRuntime:
             return "memory_search"
         if not self._has_action(loop, "task_dispatch"):
             return "task_dispatch"
-        if latest_quality_index < latest_dispatch_index:
-            return "quality_gate"
         if bool(loop.memory_policy.get("writeCandidates", True)) and not self._has_action_after(loop, "memory_write_candidate", latest_quality_index):
             return "memory_write_candidate"
         if not self._has_action(loop, "final_output"):
@@ -2671,19 +2670,16 @@ class AgentLoopRuntime:
         worker.start()
         cancellation = context.get("cancellation")
         source_loop = getattr(loop, "_source_loop", loop)
-        budget_event_emitted = False
         while not done.wait(0.05):
             budget_reason = self._budget_exceeded_reason(source_loop)
             if budget_reason:
-                if not budget_event_emitted:
-                    self.store.append_loop_event(source_loop.loop_id, "loop.budget.exceeded", {
-                        "reason": budget_reason,
-                        "failure_type": failure_type_for_reason(budget_reason),
-                        "cancel_category": "budget_exceeded",
-                        "action_type": action_type,
-                        "budget": self._budget_policy(source_loop),
-                    })
-                    budget_event_emitted = True
+                self.store.append_loop_event(source_loop.loop_id, "loop.budget.exceeded", {
+                    "reason": budget_reason,
+                    "failure_type": failure_type_for_reason(budget_reason),
+                    "cancel_category": "budget_exceeded",
+                    "action_type": action_type,
+                    "budget": self._budget_policy(source_loop),
+                })
                 raise ActionCancelledError(budget_reason, category="budget_exceeded")
             if cancellation is not None:
                 try:
@@ -3464,10 +3460,8 @@ class AgentLoopRuntime:
         }
         exit_code = payload.get("exit_code", payload.get("exitCode"))
         if exit_code is not None:
-            try:
+            with suppress(TypeError, ValueError):
                 result["exit_code"] = int(exit_code)
-            except (TypeError, ValueError):
-                pass
         return result
 
     def _memory_safe_list(self, value: Any) -> list[str]:

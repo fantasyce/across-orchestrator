@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import json
 import os
 import shutil
@@ -416,10 +417,8 @@ def uninstall_managed_plugin(env: Mapping[str, str] | None = None) -> dict:
     plugin_dir = plugin_root(source) / COMPONENT_ID
     wrapper = ecosystem_bin_dir(source) / "across-orchestrator"
     shutil.rmtree(plugin_dir, ignore_errors=True)
-    try:
+    with suppress(FileNotFoundError):
         wrapper.unlink()
-    except FileNotFoundError:
-        pass
     return {
         "pluginId": COMPONENT_ID,
         "removed": True,
