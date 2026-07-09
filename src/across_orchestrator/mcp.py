@@ -15,6 +15,7 @@ from .evidence_graph import build_evidence_graph_from_payload
 from .external_agents import ExternalAgentRegistry, normalize_agent_plugin_manifest
 from .otel_export import export_otel_genai_spans
 from .plugin_manifest import render_plugin_manifest, render_plugin_status
+from .redaction import redact_sensitive_value
 from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
 from .remote_mcp import render_remote_mcp_oauth_template
@@ -994,6 +995,13 @@ def response(message_id: Any, result: Any = None, error: str | None = None) -> d
     return payload
 
 
+def emit_stdio_response(message_id: Any, result: Any = None, error: str | None = None) -> None:
+    payload = redact_sensitive_value(response(message_id, result=result, error=error))
+    sys.stdout.write(json.dumps(payload))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
 def main() -> int:
     runtime = OrchestratorRuntime()
     for line in sys.stdin:
@@ -1022,11 +1030,11 @@ def main() -> int:
                 result = text_result(handle_tool_call(runtime, params.get("name"), params.get("arguments") or {}))
             else:
                 raise ValueError(f"Unsupported method: {method}")
-            print(json.dumps(response(message_id, result=result)), flush=True)
+            emit_stdio_response(message_id, result=result)
         except ValueError as exc:
-            print(json.dumps(response(message_id, error=str(exc))), flush=True)
+            emit_stdio_response(message_id, error=str(exc))
         except Exception:
-            print(json.dumps(response(message_id, error="Across Orchestrator MCP request failed.")), flush=True)
+            emit_stdio_response(message_id, error="Across Orchestrator MCP request failed.")
     return 0
 
 
