@@ -37,6 +37,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.13` is the stdio MCP output-sink hardening patch release. It keeps
+redacted JSON-RPC responses on the same byte-oriented stdout path used by the
+CLI, clearing the remaining CodeQL clear-text logging alert.
+
 `v0.7.12` is the stdio MCP redaction patch release. It routes JSON-RPC
 responses through the shared sensitive-value redactor before writing to stdout,
 closing the CodeQL clear-text logging alert without changing the MCP protocol.
@@ -274,11 +278,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.12"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.13"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.12`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.13`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

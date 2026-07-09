@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 import json
+import os
 import sys
 
 from . import __version__
@@ -995,11 +996,11 @@ def response(message_id: Any, result: Any = None, error: str | None = None) -> d
     return payload
 
 
-def emit_stdio_response(message_id: Any, result: Any = None, error: str | None = None) -> None:
+def emit_stdio_response(message_id: Any, result: Any = None, error: str | None = None, stdout_fd: int | None = None) -> None:
     payload = redact_sensitive_value(response(message_id, result=result, error=error))
-    sys.stdout.write(json.dumps(payload))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    target_fd = sys.stdout.fileno() if stdout_fd is None else stdout_fd
+    os.write(target_fd, json.dumps(payload).encode("utf-8", errors="replace"))
+    os.write(target_fd, b"\n")
 
 
 def main() -> int:

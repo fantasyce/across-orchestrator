@@ -784,23 +784,26 @@ class McpTests(unittest.TestCase):
             )
 
     def test_stdio_response_redacts_sensitive_values(self):
-        from contextlib import redirect_stdout
-        from io import StringIO
-
         from across_orchestrator.mcp import emit_stdio_response
 
         fake_token = "sk-" + "abcdefghijklmnopqrst"
-        output = StringIO()
-        with redirect_stdout(output):
+        read_fd, write_fd = os.pipe()
+        try:
             emit_stdio_response(
                 99,
                 result={
                     "password": "clear-text-password",
                     "notes": f"token {fake_token} should be hidden",
                 },
+                stdout_fd=write_fd,
             )
+        finally:
+            os.close(write_fd)
 
-        serialized = output.getvalue()
+        try:
+            serialized = os.read(read_fd, 65536).decode("utf-8")
+        finally:
+            os.close(read_fd)
         payload = json.loads(serialized)
         self.assertEqual(payload["result"]["password"], "[redacted]")
         self.assertIn("[redacted]", payload["result"]["notes"])
