@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "across-orchestrator"
-version = "0.7.8"
+version = "0.7.10"
 source = { editable = "." }
 
 [package.optional-dependencies]
