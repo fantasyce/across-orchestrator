@@ -37,6 +37,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.7.12` is the stdio MCP redaction patch release. It routes JSON-RPC
+responses through the shared sensitive-value redactor before writing to stdout,
+closing the CodeQL clear-text logging alert without changing the MCP protocol.
+
 `v0.7.11` is the lockfile alignment patch release. It records the `uv.lock`
 editable package metadata at `0.7.11` so the current release tag, Python
 project metadata, Node package metadata, and lockfiles stay in sync.
@@ -270,11 +274,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.11"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.12"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.11`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.7.12`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

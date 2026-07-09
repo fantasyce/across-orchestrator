@@ -783,6 +783,30 @@ class McpTests(unittest.TestCase):
                 "user_cancelled",
             )
 
+    def test_stdio_response_redacts_sensitive_values(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from across_orchestrator.mcp import emit_stdio_response
+
+        fake_token = "sk-" + "abcdefghijklmnopqrst"
+        output = StringIO()
+        with redirect_stdout(output):
+            emit_stdio_response(
+                99,
+                result={
+                    "password": "clear-text-password",
+                    "notes": f"token {fake_token} should be hidden",
+                },
+            )
+
+        serialized = output.getvalue()
+        payload = json.loads(serialized)
+        self.assertEqual(payload["result"]["password"], "[redacted]")
+        self.assertIn("[redacted]", payload["result"]["notes"])
+        self.assertNotIn("clear-text-password", serialized)
+        self.assertNotIn(fake_token, serialized)
+
     def test_mcp_submit_release_e2e_task(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(__file__).resolve().parents[1]
