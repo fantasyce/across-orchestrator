@@ -298,6 +298,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(evidence["task_id"], task.task_id)
         self.assertEqual(evidence["status"], "completed")
         self.assertEqual(evidence["quality"]["status"], "passed")
+        self.assertEqual(evidence["quality"]["finding_state"], "pass")
+        self.assertEqual(evidence["quality"]["findings"][0]["source_gate"], "required_artifacts")
         self.assertEqual(evidence["agent_loop"]["status"], "completed")
         self.assertEqual(evidence["agent_loop"]["step_count"], 5)
         self.assertEqual(evidence["agent_loop"]["checkpoint_count"], 5)
@@ -327,6 +329,7 @@ class RuntimeTests(unittest.TestCase):
 
         quality = runtime.quality_benchmark(task.task_id)
         self.assertEqual(quality["status"], "passed")
+        self.assertEqual(quality["finding_state"], "pass")
         self.assertEqual(quality["required_artifacts"], 2)
         self.assertEqual(quality["present_artifacts"], 2)
 

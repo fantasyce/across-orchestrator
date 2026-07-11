@@ -64,6 +64,9 @@ class Task:
     subtasks: list[SubTask] = field(default_factory=list)
     contract: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    finding_state: str | None = None
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    finding_history: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -176,6 +179,9 @@ class Task:
             subtasks=subtasks,
             contract=data.get("contract", {}),
             metadata=data.get("metadata", {}),
+            finding_state=data.get("finding_state"),
+            findings=[dict(item) for item in data.get("findings", []) if isinstance(item, dict)],
+            finding_history=[dict(item) for item in data.get("finding_history", []) if isinstance(item, dict)],
             created_at=float(data.get("created_at", time.time())),
             updated_at=float(data.get("updated_at", time.time())),
         )

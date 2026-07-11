@@ -37,6 +37,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.8.0` adds the durable shared Finding lifecycle across runtime, HTTP, MCP,
+and evidence summaries. Failed gates, bounded repair, terminal pass, and blocked
+outcomes now keep one normalized, auditable contract across the ecosystem.
+
 `v0.7.13` is the stdio MCP output-sink hardening patch release. It keeps
 redacted JSON-RPC responses on the same byte-oriented stdout path used by the
 CLI, clearing the remaining CodeQL clear-text logging alert.
@@ -278,11 +282,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.7.13"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.8.0"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.7.13`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.8.0`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

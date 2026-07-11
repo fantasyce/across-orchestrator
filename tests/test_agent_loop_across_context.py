@@ -59,7 +59,7 @@ class AcrossContextProviderTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         return completed
 
-    def test_loop_reads_active_memory_and_writes_pending_candidate_through_across_context(self):
+    def test_loop_reads_active_and_pinned_memory_and_writes_pending_candidate_through_across_context(self):
         from across_orchestrator.across_context import AcrossContextMemoryProvider
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
 
@@ -72,6 +72,28 @@ class AcrossContextProviderTests(unittest.TestCase):
             str(self.project),
             "--status",
             "active",
+            "--json",
+        )
+        self.run_context(
+            "remember",
+            "Agent Loop v2 must also reuse pinned Across Context memory.",
+            "--scope",
+            "project",
+            "--project",
+            str(self.project),
+            "--status",
+            "pinned",
+            "--json",
+        )
+        self.run_context(
+            "remember",
+            "Agent Loop v2 must not recall pending memory by default.",
+            "--scope",
+            "project",
+            "--project",
+            str(self.project),
+            "--status",
+            "pending",
             "--json",
         )
 
@@ -95,8 +117,11 @@ class AcrossContextProviderTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         memory_step = completed.steps[0]
         self.assertEqual(memory_step.action.type, "memory_search")
-        self.assertEqual(memory_step.observation.payload["result_count"], 1)
-        self.assertIn("Agent Loop v2", json.dumps(memory_step.observation.payload))
+        self.assertEqual(memory_step.observation.payload["result_count"], 2)
+        memory_payload = json.dumps(memory_step.observation.payload)
+        self.assertIn("active memory", memory_payload)
+        self.assertIn("pinned Across Context memory", memory_payload)
+        self.assertNotIn("pending memory by default", memory_payload)
 
         pending = json.loads(
             self.run_context(
@@ -106,9 +131,10 @@ class AcrossContextProviderTests(unittest.TestCase):
                 "--json",
             ).stdout
         )
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["status"], "pending")
-        self.assertIn("Use Agent Loop v2 memory policy", pending[0]["text"])
+        self.assertEqual(len(pending), 2)
+        loop_pending = [item for item in pending if "Use Agent Loop v2 memory policy" in item["text"]]
+        self.assertEqual(len(loop_pending), 1)
+        self.assertEqual(loop_pending[0]["status"], "pending")
 
     def test_default_runtime_uses_across_context_when_memory_provider_env_is_enabled(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime

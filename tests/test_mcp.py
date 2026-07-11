@@ -119,6 +119,7 @@ class McpTests(unittest.TestCase):
             resource_uris = [resource["uri"] for resource in responses[2]["result"]["resources"]]
             self.assertIn("across-orchestrator://plugin-manifest", resource_uris)
             self.assertIn("across-orchestrator://agent-loop-schema", resource_uris)
+            self.assertIn("across-orchestrator://finding-schema", resource_uris)
             self.assertIn("across-orchestrator://sandbox-policy", resource_uris)
             self.assertIn("across-orchestrator://external-agent-plugins", resource_uris)
             self.assertIn("across-orchestrator://projection-contracts", resource_uris)
@@ -150,6 +151,8 @@ class McpTests(unittest.TestCase):
             self.assertEqual(json.loads(second[1]["result"]["content"][0]["text"])["status"], "completed")
             evidence = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertEqual(evidence["quality"]["status"], "passed")
+            self.assertEqual(evidence["finding_state"], "pass")
+            self.assertEqual(evidence["findings"][0]["schema_version"], "across-autopilot-finding/1.0")
             self.assertEqual((project / "mcp/custom.txt").read_text(encoding="utf-8"), "mcp-adapter=mcp-custom-agent\n")
 
     def test_mcp_evaluates_agent_team_readiness(self):
@@ -406,6 +409,8 @@ class McpTests(unittest.TestCase):
         self.assertIn("loop.step.cancelled", schema["events"])
         self.assertIn("loop.step.recovery_decision", schema["events"])
         self.assertIn("loop.step.recovered", schema["events"])
+        self.assertIn("loop.findings.updated", schema["events"])
+        self.assertIn("loop.findings.blocked", schema["events"])
         self.assertIn("get_agent_loop_health", schema["inspectionActions"])
         self.assertIn("get_agent_loop_telemetry", schema["inspectionActions"])
         self.assertIn("healthSummary", schema)
@@ -419,6 +424,10 @@ class McpTests(unittest.TestCase):
             ["user_cancelled", "shutdown", "superseded", "timeout_cancelled", "budget_exceeded"],
         )
         self.assertIn("cancellation_category", schema["healthSummary"]["fields"])
+        self.assertIn("finding_state", schema["healthSummary"]["fields"])
+        self.assertIn("finding_lifecycle", schema["evidenceSummary"]["fields"])
+        self.assertEqual(schema["findingProtocol"]["schemaVersion"], "across-autopilot-finding/1.0")
+        self.assertEqual(schema["findingProtocol"]["successStates"], ["pass", "no_op"])
         self.assertIn("require_human", schema["recoveryPolicy"]["supportedActions"])
         self.assertIn("host_release_evidence", schema["evidenceSummary"]["fields"])
         self.assertIn("action_plan", schema["evidenceSummary"]["fields"])
@@ -468,6 +477,19 @@ class McpTests(unittest.TestCase):
         self.assertIn("schema", schema["metadata"])
         self.assertIn("autopilot", schema["metadata"]["schema"]["properties"])
         self.assertIn("_check", schema["metadata"]["actionPlan"])
+
+    def test_finding_schema_resource_matches_autopilot_contract(self):
+        from across_orchestrator.mcp import read_resource
+
+        resource = read_resource("across-orchestrator://finding-schema")
+        finding_schema = json.loads(resource["contents"][0]["text"])
+
+        self.assertEqual(finding_schema["schema_version"], "across-autopilot-finding/1.0")
+        self.assertIn("repair_round", finding_schema["required_fields"])
+        self.assertEqual(
+            finding_schema["lifecycle"]["failed_to_blocked"],
+            ["failed", "repair_exhausted", "blocked"],
+        )
 
     def test_start_agent_loop_tool_schema_documents_host_action_plan_contract(self):
         from across_orchestrator.mcp import tool_definitions
@@ -575,15 +597,21 @@ class McpTests(unittest.TestCase):
             second = [json.loads(line) for line in process2.stdout.splitlines() if line.strip()]
             completed = json.loads(second[1]["result"]["content"][0]["text"])
             self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["finding_state"], "pass")
+            self.assertEqual(completed["findings"][0]["schema_version"], "across-autopilot-finding/1.0")
             events = json.loads(second[2]["result"]["content"][0]["text"])
             self.assertIn("loop.completed", [event["type"] for event in events])
+            self.assertIn("loop.findings.updated", [event["type"] for event in events])
             health = json.loads(second[3]["result"]["content"][0]["text"])
             self.assertEqual(health["status"], "completed")
             self.assertEqual(health["loop_id"], loop["loop_id"])
+            self.assertEqual(health["finding_state"], "pass")
             summary = json.loads(second[4]["result"]["content"][0]["text"])
             self.assertEqual(summary["schema_version"], "0.1")
             self.assertEqual(summary["status"], "completed")
             self.assertTrue(summary["event_audit"]["sequence_contiguous"])
+            self.assertEqual(summary["finding_state"], "pass")
+            self.assertEqual(summary["finding_lifecycle"]["round_count"], 1)
             telemetry = json.loads(second[5]["result"]["content"][0]["text"])
             self.assertEqual(telemetry["schema_version"], "agent-loop-telemetry/1.0")
             resumed_events = json.loads(second[6]["result"]["content"][0]["text"])

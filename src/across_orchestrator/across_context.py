@@ -27,19 +27,20 @@ class AcrossContextMemoryProvider:
         self.disabled_reason = _disabled_reason(self.warnings, self.env)
         self.timeout = timeout
 
-    def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
+    def search(self, *, query: str, project_root: str, limit: int = 8, status: str | None = None) -> dict[str, Any]:
         context_root = _context_project_root(project_root)
-        completed = self._run([
+        args = [
             "search",
             query,
             "--project",
             context_root,
             "--limit",
             str(limit),
-            "--status",
-            status,
             "--json",
-        ])
+        ]
+        if status:
+            args.extend(["--status", status])
+        completed = self._run(args)
         if completed["status"] != "ok":
             return {
                 "provider": "across-context",

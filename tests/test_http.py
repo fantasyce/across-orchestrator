@@ -130,12 +130,16 @@ class HttpTests(unittest.TestCase):
 
         completed = self.post(f"/tasks/{task_id}/run", {})
         self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["finding_state"], "pass")
+        self.assertEqual(completed["findings"][0]["schema_version"], "across-autopilot-finding/1.0")
 
         status = self.get(f"/tasks/{task_id}")
         self.assertEqual(status["status"], "completed")
 
         evidence = self.get(f"/tasks/{task_id}/evidence-bundle")
         self.assertEqual(evidence["quality"]["status"], "passed")
+        self.assertEqual(evidence["finding_state"], "pass")
+        self.assertEqual(evidence["findings"], evidence["quality"]["findings"])
 
         quality = self.get(f"/tasks/{task_id}/quality-benchmark")
         self.assertEqual(quality["present_artifacts"], 2)
@@ -210,6 +214,8 @@ class HttpTests(unittest.TestCase):
 
         completed = self.post(f"/loops/{loop_id}/run", {})
         self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["finding_state"], "pass")
+        self.assertEqual(completed["findings"][0]["source_gate"], "quality_gate")
         self.assertEqual(
             [step["action"]["type"] for step in completed["steps"]],
             ["memory_search", "task_dispatch", "quality_gate", "memory_write_candidate", "final_output"],
@@ -221,6 +227,8 @@ class HttpTests(unittest.TestCase):
         health = self.get(f"/loops/{loop_id}/health")
         self.assertEqual(health["loop_id"], loop_id)
         self.assertEqual(health["status"], "completed")
+        self.assertEqual(health["finding_state"], "pass")
+        self.assertEqual(health["finding_round_count"], 1)
         self.assertEqual(health["executable_actions"], [])
         self.assertFalse(health["lease"]["active"])
 
@@ -228,6 +236,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(summary["schema_version"], "0.1")
         self.assertEqual(summary["loop_id"], loop_id)
         self.assertEqual(summary["status"], "completed")
+        self.assertEqual(summary["finding_state"], "pass")
+        self.assertEqual(summary["finding_lifecycle"]["round_count"], 1)
         self.assertTrue(summary["event_audit"]["sequence_contiguous"])
         self.assertEqual(summary["routing"]["routed_action_count"], 1)
         self.assertEqual(summary["routing"]["outcomes"][0]["selected_agent"], "owner")
@@ -241,6 +251,7 @@ class HttpTests(unittest.TestCase):
 
         events = self.get(f"/loops/{loop_id}/events")
         self.assertIn("loop.completed", [event["type"] for event in events])
+        self.assertIn("loop.findings.updated", [event["type"] for event in events])
         self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
         self.assertTrue(all(event["event_id"].startswith("loop-event-") for event in events))
         self.assertTrue(all(event["correlation_id"] for event in events))
