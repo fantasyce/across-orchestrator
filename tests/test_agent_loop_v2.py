@@ -114,6 +114,22 @@ class AlwaysFailingQualityGate:
         }
 
 
+class UnifiedFindingStateFailingGate:
+    def evaluate(self, *, loop, context):
+        return {
+            "quality": "unknown",
+            "passed": True,
+            "finding_state": "blocked",
+            "findings": [{
+                "id": "browser_e2e",
+                "state": "blocked",
+                "source_gate": "browser_e2e",
+                "summary": "Browser E2E is blocked.",
+            }],
+            "summary": "Unified finding state blocked promotion.",
+        }
+
+
 class ExplodingDispatcher:
     def dispatch(self, *, loop, action_type, context):
         raise RuntimeError(f"{action_type} adapter unavailable")
@@ -218,6 +234,35 @@ class CancellableDispatcher:
             "dispatch": "completed",
             "adapter": "cancellable-dispatcher",
             "message": "Cancellation was not observed.",
+        }
+
+
+class CancellableRemediationDispatcher:
+    requires_cancel_ack = True
+
+    def __init__(self):
+        self.remediation_started = threading.Event()
+        self.cancel_seen = threading.Event()
+        self.actions = []
+
+    def dispatch(self, *, loop, action_type, context):
+        self.actions.append(action_type)
+        if action_type != "remediation_dispatch":
+            return {
+                "dispatch": "completed",
+                "adapter": "cancellable-remediation-dispatcher",
+            }
+        self.remediation_started.set()
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if context["cancellation"].is_cancelled():
+                self.cancel_seen.set()
+                context["cancellation"].raise_if_cancelled()
+            context["heartbeat"]()
+            time.sleep(0.01)
+        return {
+            "dispatch": "completed",
+            "adapter": "cancellable-remediation-dispatcher",
         }
 
 
@@ -564,6 +609,153 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertIn("loop.failed", event_types)
         self.assertNotIn("loop.completed", event_types)
         self.assertEqual(events[-1]["payload"]["failure_type"], "quality_failed")
+
+    def test_finding_lifecycle_preserves_failed_and_passing_repair_rounds(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=RemediationDispatcher(),
+                quality_gate=FailingThenPassingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Repair a failed browser gate",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"maxRemediationTurns": 1},
+        )
+
+        completed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.finding_state, "pass")
+        self.assertEqual(completed.findings[0]["repair_round"], 1)
+        self.assertEqual(
+            [(item["repair_round"], item["state"], item["source_gate"]) for item in completed.finding_history],
+            [(0, "failed", "browser_e2e"), (1, "pass", "quality_gate")],
+        )
+        events = runtime.list_loop_events(loop.loop_id)
+        event_types = [event["type"] for event in events]
+        self.assertEqual(event_types.count("loop.findings.updated"), 2)
+        self.assertIn("loop.findings.remediation_scheduled", event_types)
+        health = runtime.get_loop_health(loop.loop_id)
+        self.assertEqual(health["finding_state"], "pass")
+        self.assertEqual(health["finding_round_count"], 2)
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["finding_state"], "pass")
+        self.assertEqual(summary["finding_lifecycle"]["round_count"], 2)
+        self.assertEqual(summary["finding_lifecycle"]["source_gates"], ["browser_e2e", "quality_gate"])
+
+    def test_finding_lifecycle_transitions_exhausted_repairs_to_blocked(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=RemediationDispatcher(),
+                quality_gate=AlwaysFailingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Exhaust browser gate repairs",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"maxRemediationTurns": 1},
+        )
+
+        failed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.finding_state, "blocked")
+        self.assertEqual(failed.findings[0]["state"], "blocked")
+        self.assertEqual(failed.findings[0]["repair_round"], 1)
+        self.assertEqual(failed.findings[0]["source_gate"], "browser_e2e")
+        self.assertEqual(
+            [(item["repair_round"], item["state"]) for item in failed.finding_history],
+            [(0, "failed"), (1, "failed"), (1, "blocked")],
+        )
+        events = runtime.list_loop_events(loop.loop_id)
+        blocked = next(event for event in events if event["type"] == "loop.findings.blocked")
+        self.assertEqual(blocked["payload"]["reason"], "repair_exhausted")
+        self.assertEqual(blocked["payload"]["failed_gates"], ["browser_e2e"])
+        self.assertEqual(events[-1]["payload"]["finding_state"], "blocked")
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        self.assertEqual(summary["finding_lifecycle"]["counts_by_state"]["failed"], 2)
+        self.assertEqual(summary["finding_lifecycle"]["counts_by_state"]["blocked"], 1)
+        quality_check = next(
+            check for check in summary["host_release_evidence"]["checks"]
+            if check["id"] == "quality_findings"
+        )
+        self.assertEqual(quality_check["status"], "blocked")
+
+    def test_cancelling_remediation_preserves_failed_finding_round(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        dispatcher = CancellableRemediationDispatcher()
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=dispatcher,
+                quality_gate=AlwaysFailingQualityGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Cancel an in-flight repair",
+            project_root=str(self.project),
+            max_turns=8,
+            memory_policy={"read": False, "writeCandidates": False},
+            metadata={"maxRemediationTurns": 1},
+        )
+        results = []
+
+        thread = threading.Thread(target=lambda: results.append(runtime.run_loop(loop.loop_id)))
+        thread.start()
+        self.assertTrue(dispatcher.remediation_started.wait(timeout=2))
+        requested = runtime.cancel_loop(loop.loop_id, reason="cancel repair", cancel_category="user_cancelled")
+        thread.join(timeout=3)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(dispatcher.cancel_seen.is_set())
+        self.assertEqual(requested.status, "cancelled")
+        self.assertEqual(results[0].status, "cancelled")
+        self.assertEqual(results[0].finding_state, "failed")
+        self.assertEqual(
+            [(item["repair_round"], item["state"]) for item in results[0].finding_history],
+            [(0, "failed")],
+        )
+        events = runtime.list_loop_events(loop.loop_id)
+        cancelled = next(event for event in events if event["type"] == "loop.findings.remediation_cancelled")
+        self.assertEqual(cancelled["payload"]["finding_state"], "failed")
+        self.assertEqual(cancelled["payload"]["failed_gates"], ["browser_e2e"])
+
+    def test_unified_finding_state_can_fail_quality_gate(self):
+        from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
+
+        runtime = AgentLoopRuntime(
+            adapters=AgentLoopAdapters(
+                memory_provider=RecordingMemoryProvider(),
+                dispatcher=RemediationDispatcher(),
+                quality_gate=UnifiedFindingStateFailingGate(),
+            )
+        )
+        loop = runtime.start_loop(
+            goal="Fail from unified finding state",
+            project_root=str(self.project),
+            max_turns=6,
+            metadata={"maxRemediationTurns": 0},
+        )
+
+        failed = runtime.run_loop(loop.loop_id)
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "quality_gate_failed")
+        quality = next(step for step in failed.steps if step.action.type == "quality_gate")
+        self.assertEqual(quality.observation.payload["finding_state"], "blocked")
+        self.assertEqual(runtime._latest_failed_gates(failed), ["browser_e2e"])
 
     def test_adapter_exception_fails_loop_instead_of_leaving_it_running(self):
         from across_orchestrator.agent_loop import AgentLoopAdapters, AgentLoopRuntime
@@ -1217,6 +1409,9 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(check_step.observation.payload["status"], "passed")
         self.assertTrue(check_step.observation.payload["passed"])
         self.assertEqual(check_step.observation.payload["failure_count"], 0)
+        self.assertEqual(check_step.observation.payload["finding_state"], "pass")
+        self.assertEqual(check_step.observation.payload["findings"][0]["schema_version"], "across-autopilot-finding/1.0")
+        self.assertEqual(check_step.observation.payload["findings"][0]["source_gate"], "business_contract_check")
 
     def test_failed_validation_contract_blocks_host_declared_check(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
@@ -1259,6 +1454,10 @@ class AgentLoopV2Tests(unittest.TestCase):
         self.assertEqual(completed.steps[0].status, "failed")
         self.assertEqual(completed.steps[0].observation.payload["status"], "failed")
         self.assertEqual(completed.steps[0].observation.payload["failure_type"], "quality_failed")
+        self.assertEqual(completed.steps[0].observation.payload["finding_state"], "failed")
+        self.assertEqual(completed.steps[0].observation.payload["failed_gates"], ["csv_row_expectation"])
+        self.assertEqual(completed.finding_state, "blocked")
+        self.assertEqual(completed.findings[0]["source_gate"], "csv_row_expectation")
         self.assertIn("risk_score expected 69 got 77", json.dumps(completed.steps[0].observation.payload))
         self.assertIsNone(completed.final_output)
 

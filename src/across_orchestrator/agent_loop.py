@@ -16,6 +16,14 @@ import time
 from .cancellation import ActionCancelledError
 from .autopilot_contract import autopilot_metadata_summary, validate_autopilot_metadata
 from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
+from .findings import (
+    aggregate_finding_state,
+    blocked_findings_for_exhaustion,
+    failed_gate_ids_from_findings,
+    normalize_findings,
+    normalize_quality_report,
+    quality_report_passed,
+)
 from .models import new_id
 from .store import LocalStore
 
@@ -52,7 +60,7 @@ CANCEL_CATEGORY_ALIASES = {
 
 
 class MemoryProvider(Protocol):
-    def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
+    def search(self, *, query: str, project_root: str, limit: int = 8, status: str | None = None) -> dict[str, Any]:
         pass
 
     def remember_candidate(self, *, text: str, project_root: str, tags: list[str] | None = None) -> dict[str, Any]:
@@ -117,7 +125,7 @@ def cancel_category_release_risk_severity(category: Any = None, reason: Any = No
 
 
 class NullMemoryProvider:
-    def search(self, *, query: str, project_root: str, limit: int = 8, status: str = "active") -> dict[str, Any]:
+    def search(self, *, query: str, project_root: str, limit: int = 8, status: str | None = None) -> dict[str, Any]:
         return {
             "provider": "across-context",
             "query": query,
@@ -539,6 +547,9 @@ class LoopRun:
     metadata: dict[str, Any] = field(default_factory=dict)
     steps: list[LoopStep] = field(default_factory=list)
     checkpoint_count: int = 0
+    finding_state: str | None = None
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    finding_history: list[dict[str, Any]] = field(default_factory=list)
     final_output: str | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -594,6 +605,9 @@ class LoopRun:
             metadata=dict(data.get("metadata") or {}),
             steps=[LoopStep.from_dict(item) for item in data.get("steps", [])],
             checkpoint_count=int(data.get("checkpoint_count", 0)),
+            finding_state=data.get("finding_state"),
+            findings=[dict(item) for item in data.get("findings", []) if isinstance(item, dict)],
+            finding_history=[dict(item) for item in data.get("finding_history", []) if isinstance(item, dict)],
             final_output=data.get("final_output"),
             error=data.get("error"),
             created_at=float(data.get("created_at", time.time())),
@@ -664,6 +678,7 @@ class AgentLoopRuntime:
         cancel_request = self.store.load_loop_cancel_request(loop_id)
         cancel_category = self._cancel_category_for_health(cancel_request, events)
         last_event_at = events[-1]["timestamp"] if events else loop.created_at
+        finding_lifecycle = self._finding_lifecycle_summary(loop)
 
         return {
             "schema_version": "0.1",
@@ -675,6 +690,10 @@ class AgentLoopRuntime:
             },
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
+            "finding_state": finding_lifecycle["state"],
+            "findings": finding_lifecycle["current"],
+            "failed_gates": finding_lifecycle["failed_gates"],
+            "finding_round_count": finding_lifecycle["round_count"],
             "current_action_type": current_action_type,
             "current_step_id": current_step_id,
             "pending_approval": self._pending_approval_payload(pending_approval),
@@ -721,6 +740,7 @@ class AgentLoopRuntime:
         budget = self._budget_policy(loop)
         model_decision = self._evidence_model_decision(loop)
         action_plan = self._evidence_action_plan(loop)
+        finding_lifecycle = self._finding_lifecycle_summary(loop)
 
         return {
             "schema_version": "0.1",
@@ -733,6 +753,9 @@ class AgentLoopRuntime:
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "final_output_ready": bool(loop.final_output),
+            "finding_state": finding_lifecycle["state"],
+            "findings": finding_lifecycle["current"],
+            "finding_lifecycle": finding_lifecycle,
             "event_audit": event_audit,
             "routing": routing,
             "recovery": recovery,
@@ -750,6 +773,7 @@ class AgentLoopRuntime:
                 action_plan=action_plan,
                 cancellation=cancellation,
                 budget=budget,
+                finding_lifecycle=finding_lifecycle,
             ),
         }
 
@@ -897,6 +921,9 @@ class AgentLoopRuntime:
                     "final_output": loop.final_output,
                     "turn_count": loop.turn_count,
                     "checkpoint_count": loop.checkpoint_count,
+                    "finding_state": loop.finding_state,
+                    "failed_gates": failed_gate_ids_from_findings(loop.findings),
+                    "findings": loop.findings,
                 })
                 return loop
 
@@ -1069,6 +1096,8 @@ class AgentLoopRuntime:
                 **observation_payload,
                 "approval": "approved",
             })
+            if self._is_quality_action(step.action.type):
+                self._record_finding_round(loop, step, step.observation.payload)
             step.checkpoint = self._checkpoint(
                 loop,
                 step.action.type,
@@ -1265,7 +1294,13 @@ class AgentLoopRuntime:
         loop.status = "failed"
         loop.error = reason
         failure_type = str(event_payload.get("failure_type") or "") or failure_type_for_loop(loop, reason)
+        if failure_type == "quality_failed" and loop.findings and loop.finding_state != "blocked":
+            self._block_findings_for_exhaustion(loop, self._latest_quality_action_step(loop))
         event_payload["failure_type"] = failure_type
+        if loop.findings:
+            event_payload.setdefault("finding_state", loop.finding_state)
+            event_payload.setdefault("failed_gates", failed_gate_ids_from_findings(loop.findings))
+            event_payload.setdefault("findings", loop.findings)
         self.store.save_loop(loop)
         self.store.append_loop_event(loop.loop_id, "loop.failed", {
             "reason": reason,
@@ -1542,11 +1577,22 @@ class AgentLoopRuntime:
         self.store.clear_loop_cancel_request(loop.loop_id)
         for step in cancelled_steps:
             self.store.append_loop_event(loop.loop_id, "loop.step.cancelled", step.to_dict())
+        if any(step.action.type == "remediation_dispatch" for step in cancelled_steps) and loop.findings:
+            self.store.append_loop_event(loop.loop_id, "loop.findings.remediation_cancelled", {
+                "reason": loop.error,
+                "cancel_category": category,
+                "finding_state": loop.finding_state,
+                "failed_gates": failed_gate_ids_from_findings(loop.findings),
+                "findings": loop.findings,
+            })
         self.store.append_loop_event(loop.loop_id, "loop.cancelled", {
             "reason": loop.error,
             "cancel_category": category,
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
+            "finding_state": loop.finding_state,
+            "failed_gates": failed_gate_ids_from_findings(loop.findings),
+            "findings": loop.findings,
         })
         return loop
 
@@ -1782,6 +1828,7 @@ class AgentLoopRuntime:
         action_plan: dict[str, Any],
         cancellation: dict[str, Any],
         budget: dict[str, Any],
+        finding_lifecycle: dict[str, Any],
     ) -> dict[str, Any]:
         """Promote compact evidence into host-facing release readiness signals."""
         checks: list[dict[str, Any]] = []
@@ -1858,6 +1905,25 @@ class AgentLoopRuntime:
                 "No host action plan was declared; loop policy controlled actions.",
                 declared=False,
             )
+
+        finding_state = str(finding_lifecycle.get("state") or "")
+        current_findings = finding_lifecycle.get("current") if isinstance(finding_lifecycle.get("current"), list) else []
+        if finding_state not in {"pass", "no_op", ""}:
+            finding_check_status = "attention" if finding_state == "auto_fix_available" else "blocked"
+            add_check(
+                "quality_findings",
+                finding_check_status,
+                f"Current quality finding state is {finding_state}.",
+                finding_state=finding_state,
+                finding_count=len(current_findings),
+                failed_gates=finding_lifecycle.get("failed_gates"),
+            )
+            risks.append({
+                "id": "quality_findings_unresolved",
+                "severity": "medium" if finding_check_status == "attention" else "high",
+                "summary": "Quality findings must reach pass or no_op before release.",
+            })
+            next_actions.append("Resolve current quality findings before release.")
 
         routed_count = int(routing.get("routed_action_count") or 0)
         non_default_count = int(routing.get("non_default_route_count") or 0)
@@ -2115,9 +2181,13 @@ class AgentLoopRuntime:
         if recovery_next_action is not None:
             loop.metadata.pop(RECOVERY_NEXT_ACTION_METADATA_KEY, None)
             self.store.save_loop(loop)
+            if recovery_next_action == "remediation_dispatch":
+                self._record_remediation_scheduled(loop, self._latest_step(loop, "quality_gate"))
             return recovery_next_action
         action = self._peek_next_action(loop)
         if action is not None:
+            if action == "remediation_dispatch":
+                self._record_remediation_scheduled(loop, self._latest_step(loop, "quality_gate"))
             return action
         latest_quality = self._latest_step(loop, "quality_gate")
         if latest_quality and self._quality_failed(latest_quality):
@@ -2134,8 +2204,11 @@ class AgentLoopRuntime:
                 if recovery_next_action is not None:
                     loop.metadata.pop(RECOVERY_NEXT_ACTION_METADATA_KEY, None)
                     self.store.save_loop(loop)
+                    if recovery_next_action == "remediation_dispatch":
+                        self._record_remediation_scheduled(loop, latest_quality)
                     return recovery_next_action
                 return self._peek_next_action(loop)
+            blocked_findings = self._block_findings_for_exhaustion(loop, latest_quality)
             loop.status = "failed"
             loop.error = "quality_gate_failed"
             self.store.save_loop(loop)
@@ -2143,6 +2216,9 @@ class AgentLoopRuntime:
                 "reason": loop.error,
                 "failure_type": failure_type_for_reason(loop.error),
                 "failed_quality": latest_quality.observation.payload,
+                "finding_state": loop.finding_state,
+                "failed_gates": failed_gate_ids_from_findings(loop.findings),
+                "findings": blocked_findings or loop.findings,
             })
             return None
         return None
@@ -2197,6 +2273,8 @@ class AgentLoopRuntime:
         )
         self._mark_step_running(loop, step)
         observation_payload = self._execute_action(loop, action_type)
+        if self._is_quality_action(action_type):
+            self._record_finding_round(loop, step, observation_payload)
         if action_type == "final_output":
             loop.final_output = observation_payload.get("final_output")
         if self._is_host_declared_check_action(action_type) and self._host_declared_check_failed(observation_payload):
@@ -2299,15 +2377,220 @@ class AgentLoopRuntime:
             return {"format": "summary"}
         return {}
 
+    def _is_quality_action(self, action_type: str) -> bool:
+        return action_type == "quality_gate" or self._is_host_declared_check_action(action_type)
+
+    def _repair_round(self, loop: LoopRun) -> int:
+        return sum(1 for step in loop.steps if step.action.type == "remediation_dispatch")
+
+    def _normalize_quality_payload(
+        self,
+        loop: LoopRun,
+        action_type: str,
+        payload: Mapping[str, Any] | Any,
+    ) -> dict[str, Any]:
+        raw = dict(payload) if isinstance(payload, Mapping) else {
+            "status": "failed",
+            "passed": False,
+            "summary": str(payload or f"{action_type} returned no quality payload"),
+        }
+        raw.setdefault("repair_round", self._repair_round(loop))
+        return normalize_quality_report(
+            raw,
+            finding_id=action_type,
+            source_gate=action_type,
+            summary=str(raw.get("summary") or "").strip() or f"{action_type.replace('_', ' ')} result.",
+            owner=loop.agent,
+            repair_round=self._repair_round(loop),
+        )
+
+    def _record_finding_round(
+        self,
+        loop: LoopRun,
+        step: LoopStep,
+        payload: dict[str, Any],
+    ) -> None:
+        findings = normalize_findings(
+            payload.get("findings") or payload.get("normalized_findings"),
+            defaults={
+                "source_gate": step.action.type,
+                "owner": loop.agent,
+                "repair_round": payload.get("repair_round", self._repair_round(loop)),
+            },
+        )
+        if not findings:
+            return
+        finding_state = aggregate_finding_state(findings, report_state=payload.get("finding_state"))
+        payload["findings"] = findings
+        payload["normalized_findings"] = findings
+        payload["finding_state"] = finding_state
+        payload["failed_gates"] = failed_gate_ids_from_findings(findings)
+        loop.finding_state = finding_state
+        loop.findings = [dict(item) for item in findings]
+        for item in findings:
+            history_item = dict(item)
+            history_metadata = dict(history_item.get("metadata") or {})
+            history_metadata.update({
+                "action_type": step.action.type,
+                "loop_id": loop.loop_id,
+                "step_id": step.step_id,
+            })
+            history_item["metadata"] = history_metadata
+            if not self._finding_history_contains(loop, history_item):
+                loop.finding_history.append(history_item)
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.findings.updated", {
+            "step_id": step.step_id,
+            "action_type": step.action.type,
+            "repair_round": payload.get("repair_round", self._repair_round(loop)),
+            "finding_state": finding_state,
+            "failed_gates": payload["failed_gates"],
+            "findings": findings,
+        })
+
+    def _finding_history_contains(self, loop: LoopRun, candidate: Mapping[str, Any]) -> bool:
+        candidate_metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), Mapping) else {}
+        candidate_key = (
+            candidate_metadata.get("step_id"),
+            candidate.get("id"),
+            candidate.get("state"),
+            candidate.get("repair_round"),
+            candidate.get("source_gate"),
+        )
+        for item in loop.finding_history:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+            item_key = (
+                metadata.get("step_id"),
+                item.get("id"),
+                item.get("state"),
+                item.get("repair_round"),
+                item.get("source_gate"),
+            )
+            if item_key == candidate_key:
+                return True
+        return False
+
+    def _finding_lifecycle_summary(self, loop: LoopRun) -> dict[str, Any]:
+        history = [dict(item) for item in loop.finding_history]
+        current = [dict(item) for item in loop.findings]
+        if not history:
+            repair_round = 0
+            for step in loop.steps:
+                if step.action.type == "remediation_dispatch":
+                    repair_round += 1
+                    continue
+                if not self._is_quality_action(step.action.type):
+                    continue
+                payload = step.observation.payload if isinstance(step.observation.payload, dict) else {}
+                normalized = normalize_quality_report(
+                    payload,
+                    finding_id=step.action.type,
+                    source_gate=step.action.type,
+                    owner=loop.agent,
+                    repair_round=int(payload.get("repair_round", repair_round) or 0),
+                )
+                for item in normalized["findings"]:
+                    history_item = dict(item)
+                    metadata = dict(history_item.get("metadata") or {})
+                    metadata.update({
+                        "action_type": step.action.type,
+                        "loop_id": loop.loop_id,
+                        "step_id": step.step_id,
+                    })
+                    history_item["metadata"] = metadata
+                    history.append(history_item)
+                current = [dict(item) for item in normalized["findings"]]
+        if not current and history:
+            latest_round = max(int(item.get("repair_round") or 0) for item in history)
+            current = [dict(item) for item in history if int(item.get("repair_round") or 0) == latest_round]
+        finding_state = loop.finding_state or (aggregate_finding_state(current) if current else None)
+        rounds: list[dict[str, Any]] = []
+        for item in history:
+            round_number = int(item.get("repair_round") or 0)
+            round_entry = next((entry for entry in rounds if entry["repair_round"] == round_number), None)
+            if round_entry is None:
+                round_entry = {"repair_round": round_number, "findings": []}
+                rounds.append(round_entry)
+            round_entry["findings"].append(item)
+        counts = {state: 0 for state in ("pass", "auto_fix_available", "ask_user", "blocked", "no_op", "failed")}
+        for item in history:
+            state = str(item.get("state") or "failed")
+            counts[state] = counts.get(state, 0) + 1
+        return {
+            "schema_version": "across-finding-lifecycle/1.0",
+            "state": finding_state,
+            "current": current,
+            "history": history,
+            "rounds": sorted(rounds, key=lambda item: item["repair_round"]),
+            "round_count": len(rounds),
+            "history_count": len(history),
+            "counts_by_state": counts,
+            "failed_gates": failed_gate_ids_from_findings(current),
+            "source_gates": list(dict.fromkeys(
+                str(item.get("source_gate")) for item in history if item.get("source_gate")
+            )),
+        }
+
+    def _block_findings_for_exhaustion(self, loop: LoopRun, step: LoopStep | None) -> list[dict[str, Any]]:
+        lifecycle = self._finding_lifecycle_summary(loop)
+        current = lifecycle["current"]
+        repair_round = max(
+            [int(item.get("repair_round") or 0) for item in current] or [self._repair_round(loop)]
+        )
+        blocked = blocked_findings_for_exhaustion(current, repair_round=repair_round)
+        if not blocked:
+            return []
+        if loop.finding_state == "blocked" and all(item.get("state") == "blocked" for item in loop.findings):
+            return [dict(item) for item in loop.findings]
+        loop.finding_state = "blocked"
+        loop.findings = [dict(item) for item in blocked]
+        for item in blocked:
+            history_item = dict(item)
+            metadata = dict(history_item.get("metadata") or {})
+            metadata.update({
+                "action_type": step.action.type if step else "quality_gate",
+                "loop_id": loop.loop_id,
+                "step_id": step.step_id if step else None,
+            })
+            history_item["metadata"] = {key: value for key, value in metadata.items() if value is not None}
+            if not self._finding_history_contains(loop, history_item):
+                loop.finding_history.append(history_item)
+        self.store.save_loop(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.findings.blocked", {
+            "step_id": step.step_id if step else None,
+            "action_type": step.action.type if step else "quality_gate",
+            "repair_round": repair_round,
+            "reason": "repair_exhausted",
+            "finding_state": "blocked",
+            "failed_gates": failed_gate_ids_from_findings(blocked),
+            "findings": blocked,
+        })
+        return blocked
+
+    def _record_remediation_scheduled(self, loop: LoopRun, step: LoopStep | None) -> None:
+        lifecycle = self._finding_lifecycle_summary(loop)
+        self.store.append_loop_event(loop.loop_id, "loop.findings.remediation_scheduled", {
+            "step_id": step.step_id if step else None,
+            "from_repair_round": max(
+                [int(item.get("repair_round") or 0) for item in lifecycle["current"]] or [self._repair_round(loop)]
+            ),
+            "to_repair_round": self._repair_round(loop) + 1,
+            "finding_state": lifecycle["state"],
+            "failed_gates": lifecycle["failed_gates"],
+            "findings": lifecycle["current"],
+        })
+
     def _execute_action(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
         context = self._context(loop)
         if action_type == "memory_search":
-            return self.adapters.memory_provider.search(
-                query=loop.goal,
-                project_root=loop.project_root,
-                limit=int(loop.memory_policy.get("limit") or 8),
-                status=str(loop.memory_policy.get("readStatus") or "active"),
-            )
+            kwargs: dict[str, Any] = {
+                "query": loop.goal,
+                "project_root": loop.project_root,
+                "limit": int(loop.memory_policy.get("limit") or 8),
+            }
+            if loop.memory_policy.get("readStatus") is not None:
+                kwargs["status"] = str(loop.memory_policy.get("readStatus"))
+            return self.adapters.memory_provider.search(**kwargs)
         if action_type in {"task_dispatch", "remediation_dispatch"}:
             routing = self._agent_routing(loop, action_type)
             dispatch_loop = replace(loop, agent=routing["selected_agent"])
@@ -2327,7 +2610,11 @@ class AgentLoopRuntime:
             cancellation.raise_if_cancelled()
             return result
         if action_type == "quality_gate":
-            return self.adapters.quality_gate.evaluate(loop=loop, context=context)
+            return self._normalize_quality_payload(
+                loop,
+                action_type,
+                self.adapters.quality_gate.evaluate(loop=loop, context=context),
+            )
         if action_type == "memory_write_candidate":
             return self.adapters.memory_provider.remember_candidate(
                 text=self._memory_candidate_text(loop),
@@ -2343,16 +2630,16 @@ class AgentLoopRuntime:
     def _execute_host_declared_check(self, loop: LoopRun, action_type: str) -> dict[str, Any]:
         contract = self._validation_contract(loop)
         if not contract:
-            return {
+            return self._normalize_quality_payload(loop, action_type, {
                 "action_type": action_type,
                 "status": "passed",
                 "mode": "host_declared_check",
                 "side_effects": False,
                 "message": "host-declared check recorded; validation evidence is owned by the host or plugin tool that performed the check",
-            }
+            })
         configured_action = str(contract.get("check_action") or contract.get("checkAction") or action_type)
         if configured_action != action_type:
-            return {
+            return self._normalize_quality_payload(loop, action_type, {
                 "action_type": action_type,
                 "status": "passed",
                 "mode": "host_declared_check",
@@ -2363,15 +2650,14 @@ class AgentLoopRuntime:
                     "applied": False,
                 },
                 "message": f"validation contract is bound to {configured_action}; {action_type} recorded only",
-            }
+            })
         evidence = self._evaluate_validation_contract(loop, action_type, contract)
         return evidence
 
     def _host_declared_check_failed(self, payload: dict[str, Any] | None) -> bool:
         if not isinstance(payload, dict):
             return False
-        status = str(payload.get("status") or "").lower()
-        return status in {"failed", "blocked"} or payload.get("passed") is False
+        return not quality_report_passed(payload)
 
     def _validation_contract(self, loop: LoopRun) -> dict[str, Any]:
         metadata = getattr(loop, "metadata", {}) or {}
@@ -2394,7 +2680,7 @@ class AgentLoopRuntime:
             failures.extend(evidence.get("failures") or [])
             warnings.extend(evidence.get("warnings") or [])
         status = "failed" if failures else "passed"
-        return {
+        return self._normalize_quality_payload(loop, action_type, {
             "schema_version": VALIDATION_EVIDENCE_SCHEMA,
             "action_type": action_type,
             "status": status,
@@ -2413,7 +2699,7 @@ class AgentLoopRuntime:
                 if not failures
                 else f"{action_type} failed {len(failures)} validation contract check(s)."
             ),
-        }
+        })
 
     def _contract_artifacts(self, contract: dict[str, Any]) -> list[dict[str, Any]]:
         raw = (
@@ -2964,13 +3250,15 @@ class AgentLoopRuntime:
         payload = latest_quality.observation.payload
         failed = payload.get("failed_gates") or payload.get("failedGates") or []
         if not isinstance(failed, list):
-            return []
+            failed = []
         gates: list[str] = []
         for item in failed:
             value = str(item or "").strip()
             if value:
                 gates.append(value)
-        return gates
+        if gates:
+            return gates
+        return failed_gate_ids_from_findings(payload.get("findings"))
 
     def _clean_agent_id(self, value: Any) -> str | None:
         text = str(value or "").strip()
@@ -3372,7 +3660,11 @@ class AgentLoopRuntime:
                     "step_id": step.step_id,
                     "action_type": step.action.type,
                     "failure_type": self._memory_safe_string(failure_type),
-                    "gates": self._memory_safe_list(payload.get("failed_gates") or payload.get("failedGates")),
+                    "gates": self._memory_safe_list(
+                        payload.get("failed_gates")
+                        or payload.get("failedGates")
+                        or failed_gate_ids_from_findings(payload.get("findings"))
+                    ),
                 })
             if step.action.type == "remediation_dispatch":
                 remediation_outcomes.append({
@@ -3508,6 +3800,12 @@ class AgentLoopRuntime:
                 return step
         return None
 
+    def _latest_quality_action_step(self, loop: LoopRun) -> LoopStep | None:
+        for step in reversed(loop.steps):
+            if self._is_quality_action(step.action.type):
+                return step
+        return None
+
     def _has_action(self, loop: LoopRun, action_type: str) -> bool:
         return any(step.action.type == action_type for step in loop.steps)
 
@@ -3525,9 +3823,7 @@ class AgentLoopRuntime:
 
     def _quality_failed(self, step: LoopStep) -> bool:
         payload = step.observation.payload
-        if payload.get("passed") is False:
-            return True
-        return str(payload.get("quality") or "").lower() in {"failed", "error", "blocked"}
+        return not quality_report_passed(payload)
 
     def _max_remediation_turns(self, loop: LoopRun) -> int:
         value = loop.metadata.get("maxRemediationTurns", loop.metadata.get("max_remediation_turns", 1))

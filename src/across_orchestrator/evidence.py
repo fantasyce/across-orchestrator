@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 from .models import Task
+from .findings import enrich_with_finding_state
 
 
 def artifact_record(project_root: str, path: str) -> dict[str, Any]:
@@ -31,7 +32,12 @@ def build_quality(task: Task) -> dict[str, Any]:
     if app_grade.get("quality_report"):
         report = dict(app_grade["quality_report"])
         report.setdefault("status", report.get("quality_gate", "unknown"))
-        return report
+        return enrich_with_finding_state(
+            report,
+            finding_id="app_grade_quality",
+            source_gate="app_grade",
+            summary="App-grade quality report.",
+        )
     required = list(task.contract.get("requiredArtifacts", []))
     artifacts = [artifact_record(task.project_root, path) for path in required]
     present = [artifact for artifact in artifacts if artifact.get("present")]
@@ -42,7 +48,7 @@ def build_quality(task: Task) -> dict[str, Any]:
         gates["no_artifacts_outside_project"] = True
         gates["artifact_integrity"] = not missing
         failed = [key for key, passed in gates.items() if not passed]
-        return {
+        return enrich_with_finding_state({
             "status": "passed" if not failed else "failed",
             "required_artifacts": len(required),
             "present_artifacts": len(present),
@@ -51,8 +57,8 @@ def build_quality(task: Task) -> dict[str, Any]:
             "failures": failed,
             "produced_files": sorted(artifact["path"] for artifact in present),
             "required_files": required,
-        }
-    return {
+        }, finding_id="reference_delivery_quality", source_gate="reference_delivery", summary="Reference delivery quality gate.")
+    return enrich_with_finding_state({
         "status": "passed" if len(present) == len(required) else "failed",
         "required_artifacts": len(required),
         "present_artifacts": len(present),
@@ -61,7 +67,16 @@ def build_quality(task: Task) -> dict[str, Any]:
             "required_artifacts_present": not missing,
             "no_artifacts_outside_project": True,
         },
-    }
+        "findings": [{
+            "id": "task_artifact_quality",
+            "state": "pass" if not missing else "failed",
+            "severity": "info" if not missing else "error",
+            "summary": "Required artifact quality gate passed." if not missing else "Required artifacts are missing.",
+            "source_gate": "required_artifacts",
+            "evidence": {"missing_artifacts": missing, "required_artifacts": required},
+            "suggested_action": None if not missing else "Produce the missing required artifacts.",
+        }],
+    }, finding_id="task_artifact_quality", source_gate="required_artifacts", summary="Required artifact quality gate.")
 
 
 def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -78,6 +93,9 @@ def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str,
         "metadata": task.metadata,
         "subtasks": [subtask.__dict__ for subtask in task.subtasks],
         "artifacts": artifacts,
+        "finding_state": quality.get("finding_state") or task.finding_state,
+        "findings": quality.get("findings") or task.findings,
+        "finding_history": task.finding_history,
         "quality": quality,
         "events": events,
     }

@@ -17,6 +17,7 @@ from .agent_loop import (
 from .cancellation import ActionCancelledError
 from .evidence import build_evidence_bundle, build_quality
 from .failures import failure_type_for_exception, failure_type_for_loop, failure_type_for_reason
+from .findings import failed_gate_ids_from_findings, normalize_quality_report, quality_report_passed
 from .models import SubTask, Task
 from .planning import ensure_strict_dependency_chain
 from .store import LocalStore
@@ -276,6 +277,9 @@ class OrchestratorRuntime:
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "error": loop.error,
+            "finding_state": loop.finding_state,
+            "failed_gates": failed_gate_ids_from_findings(loop.findings),
+            "findings": loop.findings,
         }
         if str(loop.status or "") in {"failed", "stopped"}:
             payload["failure_type"] = failure_type_for_loop(loop)
@@ -286,6 +290,9 @@ class OrchestratorRuntime:
             "turn_count": loop.turn_count,
             "checkpoint_count": loop.checkpoint_count,
             "error": loop.error,
+            "finding_state": loop.finding_state,
+            "failed_gates": failed_gate_ids_from_findings(loop.findings),
+            "findings": loop.findings,
         }
         if str(loop.status or "") in {"failed", "stopped"}:
             agent_loop_metadata["failure_type"] = failure_type_for_loop(loop)
@@ -314,6 +321,9 @@ class OrchestratorRuntime:
             "loop_id": getattr(loop, "loop_id", None),
             "loop_status": loop_status,
             "error": getattr(loop, "error", None),
+            "finding_state": getattr(loop, "finding_state", None),
+            "failed_gates": failed_gate_ids_from_findings(getattr(loop, "findings", [])),
+            "findings": getattr(loop, "findings", []),
         }
         if target_status == "failed":
             payload["failure_type"] = failure_type_for_loop(loop)
@@ -436,14 +446,43 @@ class OrchestratorRuntime:
         self.store.append_event(task.task_id, "subtask.completed", {**subtask.__dict__, "result": result})
         self.store.save_task(task)
 
-    def _evaluate_task_quality(self, task: Task) -> dict[str, Any]:
+    def _evaluate_task_quality(self, task: Task, *, repair_round: int = 0) -> dict[str, Any]:
         task = self.store.load_task(task.task_id)
-        quality = build_quality(task)
-        status = str(quality.get("status") or "failed")
-        task.status = "completed" if status == "passed" else "failed"
+        quality = normalize_quality_report(
+            build_quality(task),
+            finding_id="task_quality",
+            source_gate="task_quality",
+            owner=task.agent,
+            repair_round=repair_round,
+        )
+        task.finding_state = quality["finding_state"]
+        task.findings = [dict(item) for item in quality["findings"]]
+        for item in task.findings:
+            history_item = dict(item)
+            metadata = dict(history_item.get("metadata") or {})
+            metadata["task_id"] = task.task_id
+            history_item["metadata"] = metadata
+            history_key = (
+                history_item.get("id"),
+                history_item.get("state"),
+                history_item.get("repair_round"),
+                history_item.get("source_gate"),
+            )
+            existing_keys = {
+                (
+                    existing.get("id"),
+                    existing.get("state"),
+                    existing.get("repair_round"),
+                    existing.get("source_gate"),
+                )
+                for existing in task.finding_history
+            }
+            if history_key not in existing_keys:
+                task.finding_history.append(history_item)
+        task.status = "completed" if quality_report_passed(quality) else "failed"
         self.store.save_task(task)
         payload = dict(quality)
-        if status != "passed":
+        if not quality_report_passed(quality):
             payload["failure_type"] = failure_type_for_reason("quality_gate_failed")
         self.store.append_event(
             task.task_id,
@@ -518,6 +557,9 @@ class OrchestratorRuntime:
             "action_types": [step.action.type for step in loop.steps],
             "memory_policy": loop.memory_policy,
             "approval_policy": loop.approval_policy,
+            "finding_state": loop.finding_state,
+            "findings": loop.findings,
+            "finding_history": loop.finding_history,
             "final_output": loop.final_output,
             "events": self.loop_runtime.list_loop_events(loop.loop_id),
         }
@@ -562,12 +604,18 @@ class RuntimeQualityGate:
         task_id = _task_id_from_loop_context(loop, context)
         if not task_id:
             return self._fallback.evaluate(loop=loop, context=context)
-        quality = dict(self.runtime._evaluate_task_quality(self.runtime.store.load_task(task_id)))
+        repair_round = sum(1 for step in getattr(loop, "steps", []) if step.action.type == "remediation_dispatch")
+        quality = dict(
+            self.runtime._evaluate_task_quality(
+                self.runtime.store.load_task(task_id),
+                repair_round=repair_round,
+            )
+        )
         status = str(quality.get("status") or "failed")
         quality.update({
             "task_id": task_id,
             "quality": status,
-            "passed": status == "passed",
+            "passed": quality_report_passed(quality),
             "summary": _quality_summary(quality),
         })
         return quality
@@ -588,13 +636,16 @@ class RuntimeFinalizer:
         quality = build_quality(task)
         status = str(task.status or "unknown")
         quality_status = str(quality.get("status") or "unknown")
+        quality_passed = quality_report_passed(quality)
         return {
             "final_output": f"Task {task.task_id} {status} for: {task.goal}",
             "status": "completed" if status == "completed" else status,
             "task_id": task.task_id,
             "task_status": status,
             "quality": quality_status,
-            "passed": status == "completed" and quality_status == "passed",
+            "finding_state": quality.get("finding_state"),
+            "findings": quality.get("findings") or [],
+            "passed": status == "completed" and quality_passed,
         }
 
 

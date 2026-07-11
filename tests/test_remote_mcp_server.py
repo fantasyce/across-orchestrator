@@ -39,6 +39,14 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _with_loopback_no_proxy(value: str | None) -> str:
+    entries = [item.strip() for item in (value or "").split(",") if item.strip()]
+    for required in ("127.0.0.1", "localhost"):
+        if required not in entries:
+            entries.append(required)
+    return ",".join(entries)
+
+
 def _mint_token(*, secret: str, claims: dict) -> str:
     from across_orchestrator._remote_mcp_oauth_runtime import sign_hs256_token
 
@@ -55,6 +63,10 @@ class _RemoteMcpServerTestCase(unittest.TestCase):
         self.home = Path(self.tempdir.name) / "home"
         self.home.mkdir()
         self._old_across_home = os.environ.get("ACROSS_HOME")
+        self._old_no_proxy = os.environ.get("NO_PROXY")
+        self._old_no_proxy_lower = os.environ.get("no_proxy")
+        os.environ["NO_PROXY"] = _with_loopback_no_proxy(self._old_no_proxy)
+        os.environ["no_proxy"] = _with_loopback_no_proxy(self._old_no_proxy_lower)
         os.environ["ACROSS_HOME"] = str(self.home / ".across")
         self.secret = "test-secret-do-not-use-in-prod"
         self.audience = "across-orchestrator"
@@ -103,6 +115,14 @@ class _RemoteMcpServerTestCase(unittest.TestCase):
             os.environ.pop("ACROSS_HOME", None)
         else:
             os.environ["ACROSS_HOME"] = self._old_across_home
+        if self._old_no_proxy is None:
+            os.environ.pop("NO_PROXY", None)
+        else:
+            os.environ["NO_PROXY"] = self._old_no_proxy
+        if self._old_no_proxy_lower is None:
+            os.environ.pop("no_proxy", None)
+        else:
+            os.environ["no_proxy"] = self._old_no_proxy_lower
         self.tempdir.cleanup()
 
     def get(self, path: str, *, headers: dict | None = None):
@@ -423,6 +443,7 @@ class RemoteMcpJsonRpcTests(_RemoteMcpServerTestCase):
         uris = {item["uri"] for item in json.loads(body)["result"]["resources"]}
         self.assertIn("across-orchestrator://agent-card", uris)
         self.assertIn("across-orchestrator://plugin-manifest", uris)
+        self.assertIn("across-orchestrator://finding-schema", uris)
 
     def test_resources_read_returns_agent_card_content(self):
         token = self.make_token(scope="mcp.resources across.evidence.read")

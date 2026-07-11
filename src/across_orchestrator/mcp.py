@@ -19,6 +19,7 @@ from .plugin_manifest import render_plugin_manifest, render_plugin_status
 from .redaction import redact_sensitive_value
 from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
+from .findings import FINDING_SCHEMA_VERSION, FINDING_STATES
 from .remote_mcp import render_remote_mcp_oauth_template
 from .sandbox import evaluate_sandbox_policy
 
@@ -578,6 +579,12 @@ def resource_definitions() -> list[dict[str, Any]]:
             "mimeType": "application/json",
         },
         {
+            "uri": "across-orchestrator://finding-schema",
+            "name": "Across Finding Schema",
+            "description": "Autopilot-compatible normalized Finding and remediation lifecycle contract.",
+            "mimeType": "application/json",
+        },
+        {
             "uri": "across-orchestrator://sandbox-policy",
             "name": "Across Sandbox Policy",
             "description": "Host-neutral sandbox policy shape and enforcement semantics.",
@@ -641,6 +648,27 @@ def agent_loop_schema() -> dict[str, Any]:
             ],
             "failureBehavior": "blocking by default; recoveryPolicy may route quality_failed to remediation.",
         },
+        "findingProtocol": {
+            "schemaVersion": FINDING_SCHEMA_VERSION,
+            "lifecycleSchemaVersion": "across-finding-lifecycle/1.0",
+            "states": list(FINDING_STATES),
+            "requiredFields": [
+                "schema_version",
+                "id",
+                "state",
+                "severity",
+                "summary",
+                "evidence",
+                "suggested_action",
+                "owner",
+                "repair_round",
+                "source_gate",
+            ],
+            "optionalFields": ["details", "source", "file", "line", "evidence_refs", "metadata"],
+            "successStates": ["pass", "no_op"],
+            "transitions": ["failed -> remediation -> pass", "failed -> repair_exhausted -> blocked"],
+            "failedGateDerivation": "Every non-pass/no_op finding contributes source_gate, falling back to id.",
+        },
         "failureTypes": list(FAILURE_TYPES),
         "controlActions": ["cancel_agent_loop", "approve_agent_loop_action", "reject_agent_loop_action", "retry_agent_loop_step"],
         "inspectionActions": [
@@ -664,6 +692,10 @@ def agent_loop_schema() -> dict[str, Any]:
             "loop.step.lease_expired",
             "loop.step.recovery_decision",
             "loop.step.recovered",
+            "loop.findings.updated",
+            "loop.findings.remediation_scheduled",
+            "loop.findings.remediation_cancelled",
+            "loop.findings.blocked",
             "loop.approval_required",
             "loop.action.approved",
             "loop.action.rejected",
@@ -724,7 +756,7 @@ def agent_loop_schema() -> dict[str, Any]:
         },
         "memoryPolicy": {
             "provider": "across-context",
-            "read": "search active memory before planning",
+            "read": "search active and pinned memory by provider default; pending requires explicit readStatus=pending",
             "writeCandidates": "write durable summaries as pending candidates only",
             "candidateSchema": "agent-loop-memory-candidate/1.0",
             "candidateFields": [
@@ -749,6 +781,10 @@ def agent_loop_schema() -> dict[str, Any]:
             "description": "Read-only loop health snapshot; computing it must not mutate loop state or append events.",
             "fields": [
                 "status",
+                "finding_state",
+                "findings",
+                "failed_gates",
+                "finding_round_count",
                 "current_action_type",
                 "pending_approval",
                 "lease",
@@ -767,6 +803,9 @@ def agent_loop_schema() -> dict[str, Any]:
             ),
             "schemaVersion": "0.1",
             "fields": [
+                "finding_state",
+                "findings",
+                "finding_lifecycle",
                 "event_audit",
                 "routing",
                 "recovery",
@@ -943,6 +982,32 @@ def read_resource(uri: str) -> dict[str, Any]:
         payload = render_plugin_status()
     elif uri == "across-orchestrator://agent-loop-schema":
         payload = agent_loop_schema()
+    elif uri == "across-orchestrator://finding-schema":
+        payload = {
+            "schema_version": FINDING_SCHEMA_VERSION,
+            "states": list(FINDING_STATES),
+            "required_fields": [
+                "schema_version",
+                "id",
+                "state",
+                "severity",
+                "summary",
+                "evidence",
+                "suggested_action",
+                "owner",
+                "repair_round",
+                "source_gate",
+            ],
+            "optional_fields": ["details", "source", "file", "line", "evidence_refs", "metadata"],
+            "compatibility": "across-autopilot",
+            "lifecycle": {
+                "schema_version": "across-finding-lifecycle/1.0",
+                "success_states": ["pass", "no_op"],
+                "failed_to_pass": ["failed", "remediation", "pass"],
+                "failed_to_blocked": ["failed", "repair_exhausted", "blocked"],
+                "history": "All normalized rounds and source gates are retained.",
+            },
+        }
     elif uri == "across-orchestrator://sandbox-policy":
         payload = {
             "schema_version": "across-sandbox-policy/1.0",

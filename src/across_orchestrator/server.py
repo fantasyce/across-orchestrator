@@ -67,7 +67,7 @@ JSON_RPC_METHOD_NOT_FOUND = -32601
 JSON_RPC_INVALID_PARAMS = -32602
 JSON_RPC_INTERNAL_ERROR = -32603
 
-MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.7.13"}
+MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.8.0"}
 
 MCP_SERVER_CAPABILITIES = {
     "tools": {"listChanged": False},
