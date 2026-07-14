@@ -101,6 +101,9 @@ class McpTests(unittest.TestCase):
             self.assertIn("retry_agent_loop_step", tool_names)
             self.assertIn("get_agent_loop_health", tool_names)
             self.assertIn("evaluate_sandbox_policy", tool_names)
+            self.assertIn("execute_sandbox_command", tool_names)
+            self.assertIn("list_sandbox_providers", tool_names)
+            self.assertIn("build_evidence_receipt", tool_names)
             self.assertIn("build_evidence_graph", tool_names)
             self.assertIn("evaluate_agent_team_readiness", tool_names)
             self.assertIn("render_remote_mcp_oauth_template", tool_names)
@@ -514,6 +517,8 @@ class McpTests(unittest.TestCase):
         self.assertIn("row_expectations", validation["properties"]["artifacts"]["items"]["properties"])
         self.assertEqual(metadata["properties"]["validation_contract"]["properties"]["check_action"]["pattern"], validation["properties"]["check_action"]["pattern"])
         self.assertEqual(tools["evaluate_sandbox_policy"]["inputSchema"]["required"], ["policy"])
+        self.assertEqual(tools["execute_sandbox_command"]["inputSchema"]["required"], ["policy", "command", "cwd"])
+        self.assertEqual(tools["build_evidence_receipt"]["inputSchema"]["required"], ["payload"])
         self.assertEqual(tools["build_evidence_graph"]["inputSchema"]["required"], ["payload"])
 
     def test_external_agent_plugin_tool_schema_documents_manifest_contract(self):

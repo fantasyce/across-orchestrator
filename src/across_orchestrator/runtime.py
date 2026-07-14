@@ -441,6 +441,22 @@ class OrchestratorRuntime:
                 "failure_type": failure_type,
             })
             raise
+        sandbox_receipt = result.get("sandbox_receipt") if isinstance(result, dict) else None
+        if isinstance(sandbox_receipt, dict):
+            task.metadata.setdefault("sandbox_executions", []).append({
+                "subtask_id": subtask.subtask_id,
+                "agent": subtask.agent,
+                "receipt": sandbox_receipt,
+            })
+            self.store.append_event(
+                task.task_id,
+                "sandbox.execution.completed",
+                {
+                    "subtask_id": subtask.subtask_id,
+                    "agent": subtask.agent,
+                    "receipt": sandbox_receipt,
+                },
+            )
         subtask.status = "completed"
         subtask.error = None
         self.store.append_event(task.task_id, "subtask.completed", {**subtask.__dict__, "result": result})

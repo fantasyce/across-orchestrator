@@ -142,8 +142,13 @@ def render_agent_card() -> dict:
             },
             {
                 "id": "sandbox-policy",
-                "name": "Sandbox Policy Evaluation",
-                "description": "Evaluate network, filesystem, command, and promotion boundaries before an external agent run.",
+                "name": "Provider Sandbox Runtime",
+                "description": "Evaluate or execute allowlisted argv through provider-based network, filesystem, timeout, and output boundaries.",
+            },
+            {
+                "id": "evidence-receipt",
+                "name": "Unified Evidence Receipt",
+                "description": "Bind commits and workspaces to sandbox, validation, artifact, and provenance hashes without retaining secrets.",
             },
             {
                 "id": "agent-team-readiness",
