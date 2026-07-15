@@ -90,14 +90,16 @@ class LocalWorkspaceSandboxProvider:
     def capabilities(self) -> dict[str, Any]:
         native_backend = self._native_backend()
         network_modes = ["none"]
+        filesystem_modes = ["run_scoped"]
         if native_backend == "macos-sandbox-exec":
             network_modes.append("adapter_scoped")
+            filesystem_modes = sorted(VALID_FILESYSTEM_MODES)
         return {
             "contract_version": SANDBOX_PROVIDER_CONTRACT,
             "runtime": "local",
             "transport": "in_process",
             "network_modes": network_modes,
-            "filesystem_modes": sorted(VALID_FILESYSTEM_MODES),
+            "filesystem_modes": filesystem_modes,
             "native_policy_backend": native_backend,
         }
 

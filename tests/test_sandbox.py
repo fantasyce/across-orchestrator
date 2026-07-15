@@ -24,6 +24,15 @@ class SandboxPolicyTests(unittest.TestCase):
         self.assertNotIn("allowlist", capabilities["network_modes"])
         self.assertNotIn("unrestricted_requires_approval", capabilities["network_modes"])
 
+        expected_filesystem_modes = (
+            sorted({"read_only", "run_scoped", "candidate_workspace_only", "allowlist"})
+            if capabilities["native_policy_backend"] == "macos-sandbox-exec"
+            else ["run_scoped"]
+        )
+        self.assertEqual(capabilities["filesystem_modes"], expected_filesystem_modes)
+        if capabilities["native_policy_backend"] != "macos-sandbox-exec":
+            self.assertNotIn("read_only", capabilities["filesystem_modes"])
+
     def test_network_profiles_keep_none_as_default_and_scope_outbound_to_adapter_mode(self):
         from across_orchestrator.sandbox import (
             SandboxExecutionRequest,
@@ -185,7 +194,7 @@ class SandboxPolicyTests(unittest.TestCase):
             result = execute_sandbox_command(
                 {
                     "network_policy": "none",
-                    "filesystem_policy": "read_only",
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                 },
@@ -212,6 +221,7 @@ class SandboxPolicyTests(unittest.TestCase):
             command = [sys.executable, "-c", "import time; time.sleep(10)"]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                 },
@@ -234,6 +244,7 @@ class SandboxPolicyTests(unittest.TestCase):
             command = [sys.executable, "-c", "import time; time.sleep(10)"]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                     "execution": {
@@ -265,6 +276,7 @@ class SandboxPolicyTests(unittest.TestCase):
             ]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                     "execution": {
@@ -298,6 +310,7 @@ class SandboxPolicyTests(unittest.TestCase):
             ]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                     "execution": {
@@ -330,6 +343,7 @@ class SandboxPolicyTests(unittest.TestCase):
             ]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                 },
@@ -371,6 +385,7 @@ class SandboxPolicyTests(unittest.TestCase):
             command = [sys.executable, "-c", "print('x' * 10000)"]
             result = execute_sandbox_command(
                 {
+                    "filesystem_policy": "run_scoped",
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                 },
@@ -407,7 +422,10 @@ class SandboxPolicyTests(unittest.TestCase):
                 cwd=str(workspace),
             )
 
-            self.assertEqual(blocked["status"], "failed", blocked)
+            expected_blocked_status = "failed" if sys.platform == "darwin" else "blocked"
+            self.assertEqual(blocked["status"], expected_blocked_status, blocked)
+            if sys.platform != "darwin":
+                self.assertFalse(blocked["execution"]["performed"])
             self.assertEqual(written["status"], "completed", written)
             self.assertEqual(target.read_text(encoding="utf-8"), "ok")
 
@@ -451,8 +469,11 @@ class SandboxPolicyTests(unittest.TestCase):
                 self.assertEqual(result["status"], "failed", result)
                 self.assertEqual(allowed_target.read_text(encoding="utf-8"), "ok")
                 self.assertFalse(denied_target.exists())
-            self.assertEqual(result["policy"]["runtime_state_roots"]["count"], 1)
-            self.assertEqual(len(result["policy"]["runtime_state_roots"]["sha256"]), 64)
+                self.assertEqual(result["policy"]["runtime_state_roots"]["count"], 1)
+                self.assertEqual(len(result["policy"]["runtime_state_roots"]["sha256"]), 64)
+            else:
+                self.assertEqual(result["status"], "blocked", result)
+                self.assertFalse(result["execution"]["performed"])
             self.assertNotIn(str(runtime_state), json.dumps(result, sort_keys=True))
 
     def test_runtime_state_roots_reject_unsafe_or_ambiguous_paths(self):
@@ -567,9 +588,12 @@ class SandboxPolicyTests(unittest.TestCase):
                 self.assertEqual(result["status"], "failed", result)
                 self.assertEqual(allowed.read_text(encoding="utf-8"), "allowed")
                 self.assertEqual(denied.read_text(encoding="utf-8"), "before")
-            summary = result["policy"]["runtime_state_files"]
-            self.assertEqual(summary["count"], 1)
-            self.assertEqual(len(summary["sha256"]), 64)
+                summary = result["policy"]["runtime_state_files"]
+                self.assertEqual(summary["count"], 1)
+                self.assertEqual(len(summary["sha256"]), 64)
+            else:
+                self.assertEqual(result["status"], "blocked", result)
+                self.assertFalse(result["execution"]["performed"])
             self.assertNotIn(str(allowed), json.dumps(result, sort_keys=True))
 
     def test_runtime_state_files_profile_uses_literal_without_parent_subpath(self):
