@@ -18,6 +18,7 @@ from .mcp import handle_tool_call, read_resource, resource_definitions, tool_def
 from .paths import COMPONENT_ID, contains_protected_user_reference, is_developer_mode, is_product_mode, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
 from ._remote_mcp_oauth_runtime import (
     is_origin_allowed,
     is_safe_session_id,
@@ -795,6 +796,16 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if path == "/host-conformance":
                 report = evaluate_host_conformance(payload)
                 self.respond(report, status=200 if report["passed"] else 422)
+                return
+            if path == "/contracts/execution-policy":
+                self.respond(build_execution_policy_contract(payload))
+                return
+            if path == "/runs/compare":
+                self.respond(build_run_comparison(payload))
+                return
+            if path == "/runs/replay-plan":
+                replay = build_replay_plan(payload)
+                self.respond(replay)
                 return
             if path == "/loops":
                 loop = self.loop_runtime.start_loop(

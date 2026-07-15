@@ -23,6 +23,7 @@ from .plugin_manifest import install_managed_plugin, render_plugin_health, rende
 from .protocol_gateway import render_protocol_gateway
 from .redaction import redact_sensitive_value
 from .remote_mcp import render_remote_mcp_oauth_template
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
 from .runtime import OrchestratorRuntime
 from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 from .store import LocalStore
@@ -189,6 +190,18 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_receipt = sub.add_parser("evidence-receipt", help="Build a unified secret-free evidence receipt")
     evidence_receipt.add_argument("--payload-json", required=True)
     evidence_receipt.add_argument("--json", action="store_true")
+
+    execution_policy = sub.add_parser("execution-policy", help="Render a public role/model/budget and risk-selected sandbox contract")
+    execution_policy.add_argument("--payload-json", required=True)
+    execution_policy.add_argument("--json", action="store_true")
+
+    run_compare = sub.add_parser("run-compare", help="Compare two evidence-backed run snapshots")
+    run_compare.add_argument("--payload-json", required=True)
+    run_compare.add_argument("--json", action="store_true")
+
+    replay_plan = sub.add_parser("replay-plan", help="Build a non-executing replay plan with renewed-approval enforcement")
+    replay_plan.add_argument("--payload-json", required=True)
+    replay_plan.add_argument("--json", action="store_true")
 
     evidence_graph = sub.add_parser("evidence-graph", help="Build a host-neutral evidence graph from an evidence payload")
     evidence_graph.add_argument("--payload-json", required=True)
@@ -483,6 +496,21 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
             return 2
         _print(receipt, args.json)
+        return 0
+
+    if args.command in {"execution-policy", "run-compare", "replay-plan"}:
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        renderer = {
+            "execution-policy": build_execution_policy_contract,
+            "run-compare": build_run_comparison,
+            "replay-plan": build_replay_plan,
+        }[args.command]
+        result = renderer(payload)
+        _print(result, args.json)
         return 0
 
     if args.command == "evidence-graph":

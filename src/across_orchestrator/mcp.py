@@ -22,6 +22,7 @@ from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
 from .findings import FINDING_SCHEMA_VERSION, FINDING_STATES
 from .remote_mcp import render_remote_mcp_oauth_template
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
 from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 
 
@@ -337,6 +338,33 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "build_evidence_receipt",
             "description": "Build a deterministic across-evidence-receipt/1.0 from workspace, sandbox, validation, artifact, and provenance evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "build_execution_policy_contract",
+            "description": "Render a secret-free role/model/budget contract with risk-selected sandbox policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "compare_run_snapshots",
+            "description": "Compare verdict, checks, evidence, code revision, model policy, and budget for two run snapshots.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "build_replay_plan",
+            "description": "Build a non-executing replay plan; external side effects require a new verified approval.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"payload": {"type": "object"}},
@@ -953,6 +981,12 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
         return {"providers": get_sandbox_provider_registry().list()}
     if name == "build_evidence_receipt":
         return build_evidence_receipt(arguments.get("payload") or {})
+    if name == "build_execution_policy_contract":
+        return build_execution_policy_contract(arguments.get("payload") or {})
+    if name == "compare_run_snapshots":
+        return build_run_comparison(arguments.get("payload") or {})
+    if name == "build_replay_plan":
+        return build_replay_plan(arguments.get("payload") or {})
     if name == "build_evidence_graph":
         return build_evidence_graph_from_payload(arguments.get("payload") or {})
     if name == "evaluate_agent_team_readiness":

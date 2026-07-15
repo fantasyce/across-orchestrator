@@ -217,6 +217,27 @@ class HttpTests(unittest.TestCase):
         self.assertIn('"sequence":', body)
         self.assertIn('"correlation_id":', body)
 
+    def test_http_exposes_policy_comparison_and_blocks_unapproved_side_effect_replay(self):
+        policy = self.post(
+            "/contracts/execution-policy",
+            {"role": "reviewer", "actions": ["inspect"], "budget": {"max_model_calls": 0}},
+        )
+        self.assertEqual(policy["schema_version"], "across-execution-policy/1.0")
+        self.assertEqual(policy["sandbox"]["execution_mode"], "read_only")
+
+        comparison = self.post(
+            "/runs/compare",
+            {"baseline": {"verdict": "blocked"}, "candidate": {"verdict": "ready"}},
+        )
+        self.assertTrue(comparison["changes"]["verdict"]["changed"])
+
+        replay = self.post(
+            "/runs/replay-plan",
+            {"source": {"run_id": "run-1"}, "external_side_effects": ["push"]},
+        )
+        self.assertEqual(replay["status"], "blocked")
+        self.assertFalse(replay["execution"]["performed"])
+
     def test_http_tasks_use_client_project_root_when_explicitly_enabled(self):
         process, base = self.start_additional_server("--allow-client-project-roots")
         try:
