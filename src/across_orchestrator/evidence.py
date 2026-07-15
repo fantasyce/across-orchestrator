@@ -3,12 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import hashlib
+import json
 import re
 import shutil
 import subprocess
 
 from .models import Task
 from .findings import enrich_with_finding_state
+from .redaction import redact_sensitive_value
+
+
+EVIDENCE_RECEIPT_SCHEMA = "across-evidence-receipt/1.0"
 
 
 def artifact_record(project_root: str, path: str) -> dict[str, Any]:
@@ -101,7 +106,184 @@ def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str,
     }
     if task.metadata.get("app_grade"):
         bundle["app_grade"] = task.metadata["app_grade"]
+    sandbox_entries = list(task.metadata.get("sandbox_executions") or [])
+    sandbox_receipts = [
+        dict(entry.get("receipt") or {})
+        for entry in sandbox_entries
+        if isinstance(entry, dict) and isinstance(entry.get("receipt"), dict)
+    ]
+    if sandbox_receipts:
+        unified_receipts = [
+            build_evidence_receipt({
+                "workspace": {
+                    "root": task.project_root,
+                    "workspace_id": task.task_id,
+                    "commit_sha": str(task.metadata.get("commit_sha") or ""),
+                },
+                "sandbox_receipt": receipt,
+                "validations": [quality],
+                "artifacts": artifacts,
+                "provenance": {
+                    "producer": "across-orchestrator",
+                    "task_id": task.task_id,
+                    "sandbox_receipt_sha256": receipt.get("receipt_sha256"),
+                },
+            })
+            for receipt in sandbox_receipts
+        ]
+        bundle["sandbox_executions"] = sandbox_receipts
+        bundle["evidence_receipts"] = unified_receipts
+        bundle["sandbox_execution"] = sandbox_receipts[-1]
+        bundle["evidence_receipt"] = unified_receipts[-1]
     return bundle
+
+
+def build_evidence_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a deterministic, secret-free receipt from execution evidence."""
+
+    workspace = dict(payload.get("workspace") or payload.get("workspace_binding") or {})
+    workspace_root = str(workspace.get("root") or payload.get("workspace_root") or "").strip()
+    commit_sha = str(workspace.get("commit_sha") or payload.get("commit_sha") or "").strip()
+    if workspace_root:
+        resolved_root = Path(workspace_root).expanduser().resolve(strict=True)
+        if not resolved_root.is_dir():
+            raise ValueError("workspace root must be a directory")
+        if not commit_sha:
+            commit_sha = _git_commit_sha(resolved_root)
+        workspace_sha256 = _text_sha256(str(resolved_root))
+    else:
+        workspace_sha256 = str(workspace.get("workspace_sha256") or "").strip()
+    if not commit_sha:
+        commit_sha = "unversioned"
+    if not workspace_sha256:
+        raise ValueError("workspace_root or workspace_sha256 is required")
+
+    binding = {
+        "commit_sha": commit_sha,
+        "commit_state": "bound" if commit_sha != "unversioned" else "unversioned",
+        "workspace_sha256": workspace_sha256,
+        "workspace_id": str(workspace.get("workspace_id") or payload.get("workspace_id") or "workspace"),
+    }
+    sandbox_receipt = _secret_free_sandbox_receipt(payload.get("sandbox_receipt") or payload.get("sandbox") or {})
+    validations = _secret_free_value(payload.get("validations") or [])
+    artifacts = _normalize_receipt_artifacts(payload.get("artifacts") or [])
+    provenance = _secret_free_value(payload.get("provenance") or {})
+    component_hashes = {
+        "workspace_binding_sha256": _canonical_sha256(binding),
+        "sandbox_receipt_sha256": _canonical_sha256(sandbox_receipt),
+        "validations_sha256": _canonical_sha256(validations),
+        "artifacts_sha256": _canonical_sha256(artifacts),
+        "provenance_sha256": _canonical_sha256(provenance),
+    }
+    receipt = {
+        "schema_version": EVIDENCE_RECEIPT_SCHEMA,
+        "verdict": _evidence_verdict(sandbox_receipt, validations),
+        "workspace_binding": binding,
+        "sandbox_receipt": sandbox_receipt,
+        "validations": validations,
+        "artifacts": artifacts,
+        "provenance": {
+            "sources": provenance,
+            "hashes": component_hashes,
+        },
+    }
+    receipt["evidence_sha256"] = _canonical_sha256(receipt)
+    return receipt
+
+
+def _evidence_verdict(sandbox_receipt: dict[str, Any], validations: Any) -> str:
+    sandbox_status = str(sandbox_receipt.get("status") or "").lower()
+    if sandbox_status != "completed":
+        return "blocked"
+
+    validation_rows = validations if isinstance(validations, list) else [validations]
+    validation_statuses = {
+        str(row.get("status") or row.get("quality_gate") or "").lower()
+        for row in validation_rows
+        if isinstance(row, dict)
+    }
+    if validation_statuses.intersection({"blocked", "failed", "error", "cancelled", "timed_out"}):
+        return "blocked"
+    if validation_statuses.intersection({"needs_review", "attention", "pending", "unknown"}):
+        return "needs_review"
+
+    enforcement = sandbox_receipt.get("enforcement")
+    if not isinstance(enforcement, dict) or not enforcement:
+        return "needs_review"
+    enforcement_values = {str(value).lower() for value in enforcement.values()}
+    if any("not_" in value or "declared" in value for value in enforcement_values):
+        return "needs_review"
+    return "ready"
+
+
+def _git_commit_sha(workspace_root: Path) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace_root,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _secret_free_sandbox_receipt(value: Any) -> dict[str, Any]:
+    receipt = _secret_free_value(value)
+    if not isinstance(receipt, dict):
+        return {}
+    output = receipt.get("output")
+    if isinstance(output, dict):
+        safe_output = {key: item for key, item in output.items() if key not in {"stdout", "stderr"}}
+        for stream in ("stdout", "stderr"):
+            raw = output.get(stream)
+            if isinstance(raw, str):
+                safe_output[f"{stream}_sha256"] = _text_sha256(raw)
+        receipt["output"] = safe_output
+    return receipt
+
+
+def _normalize_receipt_artifacts(values: Any) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    if not isinstance(values, list):
+        raise ValueError("artifacts must be an array")
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("each artifact must be an object")
+        original_content = value.get("content")
+        safe = _secret_free_value(value)
+        safe.pop("content", None)
+        if original_content is not None and "sha256" not in safe:
+            safe["sha256"] = _text_sha256(str(original_content))
+        path = str(safe.get("path") or "")
+        if path and Path(path).is_absolute():
+            safe["path"] = Path(path).name
+        artifacts.append(safe)
+    return artifacts
+
+
+def _secret_free_value(value: Any) -> Any:
+    safe = redact_sensitive_value(value)
+    if isinstance(safe, dict):
+        return {
+            str(key): _secret_free_value(item)
+            for key, item in safe.items()
+            if str(key).lower() not in {"env", "environment", "headers", "authorization"}
+        }
+    if isinstance(safe, list):
+        return [_secret_free_value(item) for item in safe]
+    return safe
+
+
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _reference_delivery_gates(task: Task, artifacts: list[dict[str, Any]]) -> dict[str, bool]:

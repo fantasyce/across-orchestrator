@@ -107,6 +107,63 @@ class HttpTests(unittest.TestCase):
             return exc.code, json.loads(exc.read().decode("utf-8"))
         raise AssertionError("expected HTTP error")
 
+    def start_additional_server(self, *extra_args):
+        port = free_port()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.root / "src")
+        env["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "across_orchestrator.cli",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                *extra_args,
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate(timeout=1)
+                self.fail(f"server exited early\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+            try:
+                with request.urlopen(base + "/health", timeout=1) as response:
+                    if json.loads(response.read().decode("utf-8"))["status"] == "ok":
+                        return process, base
+            except Exception:
+                time.sleep(0.1)
+        process.terminate()
+        process.communicate(timeout=5)
+        self.fail("additional server did not start")
+
+    def post_to(self, base, path, payload):
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            base + path,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def post_error_to(self, base, path, payload):
+        try:
+            self.post_to(base, path, payload)
+        except error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+        raise AssertionError("expected HTTP error")
+
     def test_http_submit_run_and_fetch_evidence(self):
         plugin_manifest = self.get("/.well-known/across-plugin.json")
         self.assertEqual(plugin_manifest["id"], "across-orchestrator")
@@ -127,11 +184,14 @@ class HttpTests(unittest.TestCase):
             },
         )
         task_id = task["task_id"]
+        self.assertNotEqual(Path(task["project_root"]), self.project.resolve())
+        self.assertFalse((self.project / "README.md").exists())
 
         completed = self.post(f"/tasks/{task_id}/run", {})
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["finding_state"], "pass")
         self.assertEqual(completed["findings"][0]["schema_version"], "across-autopilot-finding/1.0")
+        self.assertFalse((self.project / "README.md").exists())
 
         status = self.get(f"/tasks/{task_id}")
         self.assertEqual(status["status"], "completed")
@@ -156,6 +216,71 @@ class HttpTests(unittest.TestCase):
         self.assertIn('"event_id":', body)
         self.assertIn('"sequence":', body)
         self.assertIn('"correlation_id":', body)
+
+    def test_http_exposes_policy_comparison_and_blocks_unapproved_side_effect_replay(self):
+        policy = self.post(
+            "/contracts/execution-policy",
+            {"role": "reviewer", "actions": ["inspect"], "budget": {"max_model_calls": 0}},
+        )
+        self.assertEqual(policy["schema_version"], "across-execution-policy/1.0")
+        self.assertEqual(policy["sandbox"]["execution_mode"], "read_only")
+
+        comparison = self.post(
+            "/runs/compare",
+            {"baseline": {"verdict": "blocked"}, "candidate": {"verdict": "ready"}},
+        )
+        self.assertTrue(comparison["changes"]["verdict"]["changed"])
+
+        replay = self.post(
+            "/runs/replay-plan",
+            {"source": {"run_id": "run-1"}, "external_side_effects": ["push"]},
+        )
+        self.assertEqual(replay["status"], "blocked")
+        self.assertFalse(replay["execution"]["performed"])
+
+    def test_http_tasks_use_client_project_root_when_explicitly_enabled(self):
+        process, base = self.start_additional_server("--allow-client-project-roots")
+        try:
+            task = self.post_to(
+                base,
+                "/tasks",
+                {
+                    "goal": "Use the host-selected local project",
+                    "projectRoot": str(self.project),
+                    "deliverables": ["README.md"],
+                },
+            )
+            self.assertEqual(Path(task["project_root"]), self.project.resolve())
+            completed = self.post_to(base, f"/tasks/{task['task_id']}/run", {})
+            self.assertEqual(completed["status"], "completed")
+            self.assertTrue((self.project / "README.md").exists())
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
+
+    def test_http_tasks_reject_invalid_enabled_client_project_roots(self):
+        project_file = Path(self.tempdir.name) / "project-file"
+        project_file.write_text("not a directory", encoding="utf-8")
+        process, base = self.start_additional_server("--allow-client-project-roots")
+        try:
+            invalid_paths = [
+                "relative/project",
+                str(Path(self.tempdir.name) / "missing"),
+                str(project_file),
+                str(Path(self.project.anchor)),
+            ]
+            for project_root in invalid_paths:
+                with self.subTest(project_root=project_root):
+                    status, payload = self.post_error_to(
+                        base,
+                        "/tasks",
+                        {"goal": "Reject invalid path", "projectRoot": project_root},
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertEqual(payload["error"], "bad_request")
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
 
     def test_http_declared_agent_adapter_executes_arbitrary_agent(self):
         agent_script = self.project / "http_agent_adapter.py"
@@ -185,6 +310,11 @@ class HttpTests(unittest.TestCase):
                     "http-custom-agent": {
                         "type": "command",
                         "command": [sys.executable, str(agent_script)],
+                        "sandboxPolicy": {
+                            "network_policy": "none",
+                            "filesystem_policy": "run_scoped",
+                            "execution": {"timeout_seconds": 10, "max_output_bytes": 4096},
+                        },
                     }
                 },
             },
@@ -197,6 +327,31 @@ class HttpTests(unittest.TestCase):
         task_root = Path(completed["project_root"])
         self.assertEqual((task_root / "out/http.txt").read_text(encoding="utf-8"), "http-adapter=http-custom-agent\n")
         self.assertFalse((self.project / "out/http.txt").exists())
+
+        evidence = self.get(f"/tasks/{task['task_id']}/evidence-bundle")
+        sandbox_receipt = evidence["sandbox_execution"]
+        self.assertEqual(sandbox_receipt["schema_version"], "across-sandbox-execution/1.0")
+        self.assertEqual(sandbox_receipt["status"], "completed")
+        self.assertTrue(sandbox_receipt["execution"]["performed"])
+        self.assertEqual(sandbox_receipt["provider"]["provider_id"], "local-workspace")
+        self.assertEqual(sandbox_receipt["policy"]["network_mode"], "none")
+        self.assertEqual(sandbox_receipt["policy"]["filesystem_mode"], "run_scoped")
+        self.assertTrue(sandbox_receipt["enforcement"]["argv_without_shell"])
+        if sys.platform == "darwin":
+            self.assertEqual(sandbox_receipt["enforcement"]["backend"], "macos-sandbox-exec")
+            self.assertEqual(sandbox_receipt["enforcement"]["filesystem_policy"], "kernel_enforced")
+
+        unified = evidence["evidence_receipt"]
+        self.assertEqual(unified["schema_version"], "across-evidence-receipt/1.0")
+        self.assertEqual(unified["sandbox_receipt"]["schema_version"], "across-sandbox-execution/1.0")
+        self.assertEqual(unified["workspace_binding"]["workspace_id"], task["task_id"])
+        self.assertEqual(unified["artifacts"][0]["path"], "out/http.txt")
+        self.assertEqual(len(unified["evidence_sha256"]), 64)
+        self.assertNotIn("stdout", unified["sandbox_receipt"]["output"])
+
+        events = self.get(f"/tasks/{task['task_id']}/events")
+        sandbox_event = next(event for event in events if event["type"] == "sandbox.execution.completed")
+        self.assertEqual(sandbox_event["payload"]["receipt"]["receipt_sha256"], sandbox_receipt["receipt_sha256"])
 
     def test_http_agent_loop_lifecycle(self):
         loop = self.post(

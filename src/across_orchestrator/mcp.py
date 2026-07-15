@@ -12,6 +12,7 @@ from .agent_team import create_agent_team
 from .agent_team_readiness import evaluate_agent_team_readiness
 from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES, HOST_DECLARED_CHECK_ACTION_PATTERN, SUPPORTED_LOOP_ACTION_TYPES
+from .evidence import build_evidence_receipt
 from .evidence_graph import build_evidence_graph_from_payload
 from .external_agents import ExternalAgentRegistry, normalize_agent_plugin_manifest
 from .otel_export import export_otel_genai_spans
@@ -21,7 +22,8 @@ from .runtime import OrchestratorRuntime
 from .failures import FAILURE_TYPES
 from .findings import FINDING_SCHEMA_VERSION, FINDING_STATES
 from .remote_mcp import render_remote_mcp_oauth_template
-from .sandbox import evaluate_sandbox_policy
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
+from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 
 
 def _loop_action_plan_item_schema() -> dict[str, Any]:
@@ -310,6 +312,63 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "cwd": {"type": "string"},
                 },
                 "required": ["policy"],
+            },
+        },
+        {
+            "name": "execute_sandbox_command",
+            "description": "Execute allowlisted argv inside an allowlisted workspace through a registered sandbox provider.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "policy": {"type": "object"},
+                    "command": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                    "providerId": {"type": "string", "default": "local-workspace"},
+                    "timeoutSeconds": {"type": "number"},
+                    "maxOutputBytes": {"type": "integer"},
+                },
+                "required": ["policy", "command", "cwd"],
+            },
+        },
+        {
+            "name": "list_sandbox_providers",
+            "description": "List registered local and remote-compatible sandbox provider adapters.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "build_evidence_receipt",
+            "description": "Build a deterministic across-evidence-receipt/1.0 from workspace, sandbox, validation, artifact, and provenance evidence.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "build_execution_policy_contract",
+            "description": "Render a secret-free role/model/budget contract with risk-selected sandbox policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "compare_run_snapshots",
+            "description": "Compare verdict, checks, evidence, code revision, model policy, and budget for two run snapshots.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
+            },
+        },
+        {
+            "name": "build_replay_plan",
+            "description": "Build a non-executing replay plan; external side effects require a new verified approval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"payload": {"type": "object"}},
+                "required": ["payload"],
             },
         },
         {
@@ -901,6 +960,33 @@ def handle_tool_call(runtime: OrchestratorRuntime, name: str, arguments: dict[st
             command=arguments.get("command"),
             cwd=arguments.get("cwd"),
         )
+    if name == "execute_sandbox_command":
+        return execute_sandbox_command(
+            arguments.get("policy") or {},
+            command=arguments.get("command") or [],
+            cwd=arguments.get("cwd") or "",
+            provider_id=arguments.get("providerId") or arguments.get("provider_id") or "local-workspace",
+            timeout_seconds=(
+                arguments.get("timeoutSeconds")
+                if "timeoutSeconds" in arguments
+                else arguments.get("timeout_seconds")
+            ),
+            max_output_bytes=(
+                arguments.get("maxOutputBytes")
+                if "maxOutputBytes" in arguments
+                else arguments.get("max_output_bytes")
+            ),
+        )
+    if name == "list_sandbox_providers":
+        return {"providers": get_sandbox_provider_registry().list()}
+    if name == "build_evidence_receipt":
+        return build_evidence_receipt(arguments.get("payload") or {})
+    if name == "build_execution_policy_contract":
+        return build_execution_policy_contract(arguments.get("payload") or {})
+    if name == "compare_run_snapshots":
+        return build_run_comparison(arguments.get("payload") or {})
+    if name == "build_replay_plan":
+        return build_replay_plan(arguments.get("payload") or {})
     if name == "build_evidence_graph":
         return build_evidence_graph_from_payload(arguments.get("payload") or {})
     if name == "evaluate_agent_team_readiness":
@@ -1017,7 +1103,11 @@ def read_resource(uri: str) -> dict[str, Any]:
                 "human_approval_required": True,
                 "merge_release_signing_blocked": True,
             },
-            "command_execution": "Commands are never executed by evaluate_sandbox_policy; argv is checked against command_allowlist and workspace_root only.",
+            "command_execution": {
+                "dry_run": "evaluate_sandbox_policy checks command_allowlist and workspace_root without execution.",
+                "provider_runtime": "execute_sandbox_command runs validated argv through a registered across-sandbox-provider/1.0 adapter.",
+                "receipt_schema": "across-sandbox-execution/1.0",
+            },
         }
     elif uri == "across-orchestrator://external-agent-plugins":
         payload = ExternalAgentRegistry().registry_payload()

@@ -18,6 +18,13 @@ human can review. It is the execution layer under Autopilot loops, but it can
 also be consumed directly by Codex, Claude Desktop,
 AAA, or any CLI, HTTP, MCP, or Python-SDK capable host.
 
+Command adapters run argv through a provider sandbox contract. The local macOS
+provider enforces workspace, filesystem, network, timeout, cancellation, and
+bounded-output policy without a shell. Normal command tasks record an
+`across-sandbox-execution/1.0` receipt and an
+`across-evidence-receipt/1.0` verdict (`ready`, `needs_review`, or `blocked`)
+that binds workspace and commit to validation and artifact hashes.
+
 Common workflows:
 
 - Run a multi-step implementation task and keep task evidence outside chat
@@ -37,9 +44,15 @@ Agent-readable entrypoints:
 
 ## Current Status
 
-`v0.8.0` adds the durable shared Finding lifecycle across runtime, HTTP, MCP,
+`v0.9.0` adds the host-governed provider sandbox and evidence-receipt contract,
+including bounded filesystem and network policy, runtime cancellation, output
+limits, deterministic receipts, and an explicit opt-in sidecar mode for
+host-selected client project roots. It also expands host conformance metadata
+so packaged hosts can verify these capabilities before accepting work.
+
+`v0.8.0` added the durable shared Finding lifecycle across runtime, HTTP, MCP,
 and evidence summaries. Failed gates, bounded repair, terminal pass, and blocked
-outcomes now keep one normalized, auditable contract across the ecosystem.
+outcomes keep one normalized, auditable contract across the ecosystem.
 
 `v0.7.13` is the stdio MCP output-sink hardening patch release. It keeps
 redacted JSON-RPC responses on the same byte-oriented stdout path used by the
@@ -282,11 +295,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.8.0"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.9.0"
 ```
 
 The GitHub release is source-first. There is no attached wheel asset for
-`v0.8.0`; if a packaged host needs a wheel, build it from the pinned tag or
+`v0.9.0`; if a packaged host needs a wheel, build it from the pinned tag or
 attach the wheel to the release before using a wheel URL.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached

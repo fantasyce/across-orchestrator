@@ -8,10 +8,10 @@
   "part_of": "Across",
   "repository": "fantasyce/across-orchestrator",
   "current_release": {
-    "version": "v0.8.0",
+    "version": "v0.9.0",
     "published_at": "2026-07-11",
-    "tag": "v0.8.0",
-    "release_url": "https://github.com/fantasyce/across-orchestrator/releases/tag/v0.8.0"
+    "tag": "v0.9.0",
+    "release_url": "https://github.com/fantasyce/across-orchestrator/releases/tag/v0.9.0"
   },
   "role": "durable execution runtime",
   "hosts": [

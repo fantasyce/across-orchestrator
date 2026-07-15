@@ -18,6 +18,7 @@ from .mcp import handle_tool_call, read_resource, resource_definitions, tool_def
 from .paths import COMPONENT_ID, contains_protected_user_reference, is_developer_mode, is_product_mode, run_home
 from .plugin_manifest import render_plugin_health, render_plugin_manifest
 from .runtime import OrchestratorRuntime
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
 from ._remote_mcp_oauth_runtime import (
     is_origin_allowed,
     is_safe_session_id,
@@ -67,7 +68,7 @@ JSON_RPC_METHOD_NOT_FOUND = -32601
 JSON_RPC_INVALID_PARAMS = -32602
 JSON_RPC_INTERNAL_ERROR = -32603
 
-MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.8.0"}
+MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.9.0"}
 
 MCP_SERVER_CAPABILITIES = {
     "tools": {"listChanged": False},
@@ -103,6 +104,27 @@ def _server_managed_project_root(kind: str) -> str:
     if not safe_kind:
         safe_kind = "task"
     return str(run_home() / "http-workspaces" / safe_kind / f"{safe_kind}-{uuid.uuid4().hex}")
+
+
+def _http_task_project_root(server: OrchestratorHTTPServer, payload: dict[str, Any]) -> str:
+    if not server.allow_client_project_roots or "projectRoot" not in payload:
+        return _server_managed_project_root("http-task")
+
+    value = payload["projectRoot"]
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError("projectRoot must be an absolute, existing directory")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise ValueError("projectRoot must be an absolute, existing directory")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("projectRoot must be an absolute, existing directory") from exc
+    if not resolved.is_dir():
+        raise ValueError("projectRoot must be an absolute, existing directory")
+    if resolved.parent == resolved:
+        raise ValueError("projectRoot must not be a filesystem root")
+    return str(resolved)
 
 
 def build_remote_mcp_oauth_config(
@@ -751,7 +773,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if path == "/tasks":
                 task = self.runtime.submit_task(
                     goal=payload.get("goal") or payload.get("text") or "",
-                    project_root=_server_managed_project_root("http-task"),
+                    project_root=_http_task_project_root(self.server, payload),
                     deliverables=payload.get("deliverables") or ["README.md"],
                     agent=payload.get("agent") or "demo",
                     subtasks=payload.get("subtasks") or None,
@@ -774,6 +796,16 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if path == "/host-conformance":
                 report = evaluate_host_conformance(payload)
                 self.respond(report, status=200 if report["passed"] else 422)
+                return
+            if path == "/contracts/execution-policy":
+                self.respond(build_execution_policy_contract(payload))
+                return
+            if path == "/runs/compare":
+                self.respond(build_run_comparison(payload))
+                return
+            if path == "/runs/replay-plan":
+                replay = build_replay_plan(payload)
+                self.respond(replay)
                 return
             if path == "/loops":
                 loop = self.loop_runtime.start_loop(
@@ -984,8 +1016,9 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
 
 
 class OrchestratorHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int]):
+    def __init__(self, server_address: tuple[str, int], *, allow_client_project_roots: bool = False):
         super().__init__(server_address, OrchestratorHandler)
+        self.allow_client_project_roots = allow_client_project_roots
         self.runtime = OrchestratorRuntime()
         self.loop_runtime = self.runtime.loop_runtime
         self.remote_mcp_oauth: dict[str, Any] = {}
@@ -1043,8 +1076,12 @@ def serve(
     runtime_id: str | None = None,
     runtime_info: str | None = None,
     remote_mcp_oauth_config: dict[str, Any] | None = None,
+    allow_client_project_roots: bool = False,
 ) -> None:
-    server = OrchestratorHTTPServer((host, port))
+    server = OrchestratorHTTPServer(
+        (host, port),
+        allow_client_project_roots=allow_client_project_roots,
+    )
     if remote_mcp_oauth_config:
         apply_remote_mcp_oauth_config(server, remote_mcp_oauth_config)
     info_path = _write_runtime_info(server, host, runtime_id, runtime_info) if runtime_id else None

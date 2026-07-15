@@ -13,6 +13,7 @@ from .agent_team import create_agent_team
 from .agent_team_readiness import evaluate_agent_team_readiness
 from .a2a_delegation import create_a2a_task_delegation
 from .agent_loop import CANCEL_CATEGORY_VALUES
+from .evidence import build_evidence_receipt
 from .evidence_graph import build_evidence_graph_from_payload
 from .external_agents import ExternalAgentRegistry
 from .host_install import install_agent_host
@@ -22,8 +23,9 @@ from .plugin_manifest import install_managed_plugin, render_plugin_health, rende
 from .protocol_gateway import render_protocol_gateway
 from .redaction import redact_sensitive_value
 from .remote_mcp import render_remote_mcp_oauth_template
+from .run_contracts import build_execution_policy_contract, build_replay_plan, build_run_comparison
 from .runtime import OrchestratorRuntime
-from .sandbox import evaluate_sandbox_policy
+from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 from .store import LocalStore
 
 
@@ -173,6 +175,34 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_probe.add_argument("--cwd")
     sandbox_probe.add_argument("--json", action="store_true")
 
+    sandbox_execute = sub.add_parser("sandbox-execute", help="Execute allowlisted argv through a sandbox provider")
+    sandbox_execute.add_argument("--policy-json", required=True)
+    sandbox_execute.add_argument("--command-json", required=True)
+    sandbox_execute.add_argument("--cwd", required=True)
+    sandbox_execute.add_argument("--provider", default="local-workspace")
+    sandbox_execute.add_argument("--timeout-seconds", type=float)
+    sandbox_execute.add_argument("--max-output-bytes", type=int)
+    sandbox_execute.add_argument("--json", action="store_true")
+
+    sandbox_providers = sub.add_parser("sandbox-providers", help="List registered sandbox providers")
+    sandbox_providers.add_argument("--json", action="store_true")
+
+    evidence_receipt = sub.add_parser("evidence-receipt", help="Build a unified secret-free evidence receipt")
+    evidence_receipt.add_argument("--payload-json", required=True)
+    evidence_receipt.add_argument("--json", action="store_true")
+
+    execution_policy = sub.add_parser("execution-policy", help="Render a public role/model/budget and risk-selected sandbox contract")
+    execution_policy.add_argument("--payload-json", required=True)
+    execution_policy.add_argument("--json", action="store_true")
+
+    run_compare = sub.add_parser("run-compare", help="Compare two evidence-backed run snapshots")
+    run_compare.add_argument("--payload-json", required=True)
+    run_compare.add_argument("--json", action="store_true")
+
+    replay_plan = sub.add_parser("replay-plan", help="Build a non-executing replay plan with renewed-approval enforcement")
+    replay_plan.add_argument("--payload-json", required=True)
+    replay_plan.add_argument("--json", action="store_true")
+
     evidence_graph = sub.add_parser("evidence-graph", help="Build a host-neutral evidence graph from an evidence payload")
     evidence_graph.add_argument("--payload-json", required=True)
     evidence_graph.add_argument("--json", action="store_true")
@@ -260,6 +290,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--runtime-id")
     serve.add_argument("--runtime-info")
+    serve.add_argument(
+        "--allow-client-project-roots",
+        action="store_true",
+        help="Allow local HTTP /tasks clients to select an existing absolute project directory",
+    )
     return parser
 
 
@@ -427,6 +462,56 @@ def main(argv: list[str] | None = None) -> int:
         payload = evaluate_sandbox_policy(policy, command=command, cwd=args.cwd)
         _print(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
+
+    if args.command == "sandbox-execute":
+        try:
+            policy = _json_object_arg(args.policy_json, "--policy-json")
+            command_payload = json.loads(args.command_json)
+            if not isinstance(command_payload, list):
+                parser.error("--command-json must be a JSON array")
+            command = [str(item) for item in command_payload]
+            payload = execute_sandbox_command(
+                policy,
+                command=command,
+                cwd=args.cwd,
+                provider_id=args.provider,
+                timeout_seconds=args.timeout_seconds,
+                max_output_bytes=args.max_output_bytes,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            parser.error(str(exc))
+            return 2
+        _print(payload, args.json)
+        return 0 if payload["status"] == "completed" else 1
+
+    if args.command == "sandbox-providers":
+        _print({"providers": get_sandbox_provider_registry().list()}, args.json)
+        return 0
+
+    if args.command == "evidence-receipt":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+            receipt = build_evidence_receipt(payload)
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        _print(receipt, args.json)
+        return 0
+
+    if args.command in {"execution-policy", "run-compare", "replay-plan"}:
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2
+        renderer = {
+            "execution-policy": build_execution_policy_contract,
+            "run-compare": build_run_comparison,
+            "replay-plan": build_replay_plan,
+        }[args.command]
+        result = renderer(payload)
+        _print(result, args.json)
+        return 0
 
     if args.command == "evidence-graph":
         try:
@@ -614,7 +699,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         from .server import serve
 
-        serve(args.host, args.port, runtime_id=args.runtime_id, runtime_info=args.runtime_info)
+        serve(
+            args.host,
+            args.port,
+            runtime_id=args.runtime_id,
+            runtime_info=args.runtime_info,
+            allow_client_project_roots=args.allow_client_project_roots,
+        )
         return 0
 
     parser.print_help()

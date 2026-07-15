@@ -94,6 +94,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(quality_node["payload"]["password"], "[redacted]")
         self.assertEqual(quality_node["payload"]["notes"], "token [redacted] should be hidden")
 
+    def test_cli_exposes_policy_comparison_and_read_only_replay_contracts(self):
+        policy = self.run_cli(
+            "execution-policy",
+            "--payload-json",
+            json.dumps({"role": "reviewer", "actions": ["inspect"], "budget": {"max_model_calls": 0}}),
+            "--json",
+        )
+        self.assertEqual(policy.returncode, 0, policy.stderr)
+        self.assertEqual(json.loads(policy.stdout)["schema_version"], "across-execution-policy/1.0")
+
+        comparison = self.run_cli(
+            "run-compare",
+            "--payload-json",
+            json.dumps({"baseline": {"verdict": "blocked"}, "candidate": {"verdict": "ready"}}),
+            "--json",
+        )
+        self.assertEqual(comparison.returncode, 0, comparison.stderr)
+        self.assertTrue(json.loads(comparison.stdout)["changes"]["verdict"]["changed"])
+
+        replay = self.run_cli(
+            "replay-plan",
+            "--payload-json",
+            json.dumps({"source": {"run_id": "run-1"}, "external_side_effects": ["push"]}),
+            "--json",
+        )
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        replay_payload = json.loads(replay.stdout)
+        self.assertEqual(replay_payload["status"], "blocked")
+        self.assertFalse(replay_payload["execution"]["performed"])
+
     def test_cli_submit_preserves_explicit_serial_plan(self):
         subtasks = [
             {

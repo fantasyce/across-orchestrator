@@ -39,6 +39,9 @@ def test_host_conformance_passes_for_generic_host_contract():
     text = json.dumps(report, sort_keys=True)
 
     assert report["passed"] is True
+    assert "sandbox_execution" in report["pluginProvides"]
+    assert "sandbox_provider_registry" in report["pluginProvides"]
+    assert "unified_evidence_receipt" in report["pluginProvides"]
     assert report["pluginId"] == "across-orchestrator"
     assert report["host"]["platformId"] == "generic-agent-host"
     assert report["host"]["agentCount"] == 2

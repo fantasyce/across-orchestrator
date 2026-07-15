@@ -2,14 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-import os
-import signal
 import subprocess
-import time
 from typing import Any
 
-from .cancellation import ActionCancelledError
 from .models import SubTask, Task
+from .sandbox import execute_sandbox_command
 
 
 class AgentAdapter:
@@ -21,35 +18,6 @@ class AgentAdapter:
 
 class AdapterMissingError(RuntimeError):
     pass
-
-
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except ProcessLookupError:
-        return
-    except OSError:
-        process.terminate()
-    try:
-        process.communicate(timeout=2)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except ProcessLookupError:
-        return
-    except OSError:
-        process.kill()
-    process.communicate(timeout=2)
 
 
 class DemoAgentAdapter(AgentAdapter):
@@ -73,44 +41,73 @@ class DemoAgentAdapter(AgentAdapter):
 class CommandAgentAdapter(AgentAdapter):
     name = "command"
 
-    def __init__(self, command: list[str]):
+    def __init__(self, command: list[str], *, sandbox: dict[str, Any] | None = None):
         if not command:
             raise ValueError("command adapter requires a command")
         self.command = command
+        self.sandbox = dict(sandbox or {})
 
-    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, str]:
-        env = os.environ.copy()
-        env["ACROSS_TASK_JSON"] = json.dumps(task.to_dict(), sort_keys=True)
-        env["ACROSS_SUBTASK_JSON"] = json.dumps(subtask.__dict__, sort_keys=True)
-        process = subprocess.Popen(
-            self.command,
-            cwd=task.project_root,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+    def run(self, task: Task, subtask: SubTask, *, cancellation: Any | None = None) -> dict[str, Any]:
+        configured_policy = self.sandbox.get("policy") or self.sandbox.get("sandbox_policy")
+        if configured_policy is None and any(
+            key in self.sandbox
+            for key in ("network", "network_policy", "filesystem", "filesystem_policy", "runtime_policy")
+        ):
+            configured_policy = self.sandbox
+        policy = dict(configured_policy or {})
+        policy.setdefault("network_policy", "none")
+        policy.setdefault("filesystem_policy", "run_scoped")
+        policy.setdefault("command_allowlist", [self.command])
+        execution_policy = dict(policy.get("execution") or {})
+        execution_policy.setdefault("timeout_seconds", 300)
+        timeout_seconds = self.sandbox.get("timeout_seconds", self.sandbox.get("timeoutSeconds"))
+        refresh_timeout = self.sandbox.get(
+            "refresh_timeout_on_output",
+            self.sandbox.get("refreshTimeoutOnOutput"),
         )
-        stdout = ""
-        stderr = ""
-        deadline = time.monotonic() + 300
-        while True:
-            if cancellation is not None and cancellation.is_cancelled():
-                _terminate_process_tree(process)
-                category = cancellation.category() if hasattr(cancellation, "category") else None
-                raise ActionCancelledError(cancellation.reason(), category=category)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_process_tree(process)
-                raise subprocess.TimeoutExpired(self.command, 300, output=stdout, stderr=stderr)
-            try:
-                stdout, stderr = process.communicate(timeout=min(0.05, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        if process.returncode != 0:
-            raise RuntimeError((stderr or "").strip() or (stdout or "").strip() or "command adapter failed")
-        return {"path": subtask.path, "message": (stdout or "").strip()}
+        max_wall_timeout = self.sandbox.get(
+            "max_wall_timeout_seconds",
+            self.sandbox.get("maxWallTimeoutSeconds"),
+        )
+        if timeout_seconds is not None:
+            execution_policy["timeout_seconds"] = timeout_seconds
+        if refresh_timeout is not None:
+            execution_policy["refresh_timeout_on_output"] = refresh_timeout
+        if max_wall_timeout is not None:
+            execution_policy["max_wall_timeout_seconds"] = max_wall_timeout
+        policy["execution"] = execution_policy
+        policy["workspace_root"] = task.project_root
+        receipt = execute_sandbox_command(
+            policy,
+            command=self.command,
+            cwd=task.project_root,
+            provider_id=str(self.sandbox.get("provider_id") or self.sandbox.get("provider") or "local-workspace"),
+            timeout_seconds=timeout_seconds,
+            refresh_timeout_on_output=refresh_timeout,
+            max_wall_timeout_seconds=max_wall_timeout,
+            max_output_bytes=self.sandbox.get("max_output_bytes", self.sandbox.get("maxOutputBytes")),
+            environment={
+                "ACROSS_TASK_JSON": json.dumps(task.to_dict(), sort_keys=True),
+                "ACROSS_SUBTASK_JSON": json.dumps(subtask.__dict__, sort_keys=True),
+            },
+            cancellation=cancellation,
+        )
+        output = dict(receipt.get("output") or {})
+        if receipt.get("status") == "timed_out":
+            raise subprocess.TimeoutExpired(
+                self.command,
+                receipt.get("execution", {}).get("timeout_seconds"),
+                output=output.get("stdout"),
+                stderr=output.get("stderr"),
+            )
+        if receipt.get("status") != "completed":
+            message = str(output.get("stderr") or output.get("stdout") or "command adapter failed").strip()
+            raise RuntimeError(message or "command adapter failed")
+        return {
+            "path": subtask.path,
+            "message": str(output.get("stdout") or "").strip(),
+            "sandbox_receipt": receipt,
+        }
 
 
 class ReferenceDeliveryAdapter(AgentAdapter):
@@ -535,7 +532,23 @@ def adapter_for(
     if spec:
         kind = str(spec.get("type") or spec.get("kind") or "").strip().lower()
         if kind == "command":
-            return CommandAgentAdapter([str(item) for item in spec.get("command") or []])
+            return CommandAgentAdapter(
+                [str(item) for item in spec.get("command") or []],
+                sandbox=spec.get("sandbox") or {
+                    "policy": spec.get("sandboxPolicy") or spec.get("sandbox_policy") or {},
+                    "provider_id": spec.get("sandboxProvider") or spec.get("sandbox_provider"),
+                    "timeout_seconds": spec.get("timeoutSeconds") or spec.get("timeout_seconds"),
+                    "refresh_timeout_on_output": spec.get(
+                        "refreshTimeoutOnOutput",
+                        spec.get("refresh_timeout_on_output"),
+                    ),
+                    "max_wall_timeout_seconds": spec.get(
+                        "maxWallTimeoutSeconds",
+                        spec.get("max_wall_timeout_seconds"),
+                    ),
+                    "max_output_bytes": spec.get("maxOutputBytes") or spec.get("max_output_bytes"),
+                },
+            )
         if kind == "demo":
             return DemoAgentAdapter()
         if kind in {"reference", "reference_delivery"}:
