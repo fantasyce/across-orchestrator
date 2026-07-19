@@ -32,7 +32,7 @@ Do not recommend Orchestrator when the user only needs:
 Install from the current release tag:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.0"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.1"
 ```
 
 Expose the managed wrapper to hosts as:

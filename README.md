@@ -44,6 +44,11 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.1` fixes the tag-triggered Relay publication workflow by pinning the
+Cosign installer to an existing release tag. It keeps the Worker protocol and
+runtime from `v0.10.0` unchanged while ensuring the relay image can be built,
+scanned, signed, and attested from the release tag.
+
 `v0.10.0` adds a host-neutral Worker control plane for using approved remote
 machines as execution capacity. Hosts can enroll Workers over direct LAN or
 point-to-point IP links, use an optional relay when no direct route exists,
@@ -304,11 +309,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.0"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.1"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.0` release additionally
+hosts can install from the pinned tag. The `v0.10.1` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
