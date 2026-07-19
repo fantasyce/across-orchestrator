@@ -1050,8 +1050,8 @@ class RelayWorkerLocalGrantProxy:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802
-                status = 403
-                body = b'{"detail":{"code":"worker_model_proxy_rejected","category":"security"}}'
+                status: int
+                body: bytes
                 try:
                     length = int(self.headers.get("content-length") or 0)
                     if self.path != "/invoke" or length < 2 or length > 512 * 1024:

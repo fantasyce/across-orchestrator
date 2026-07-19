@@ -159,7 +159,7 @@ class BoundedProcessExecutor:
         stdout_file = sandbox / "stdout.log"
         stderr_file = sandbox / "stderr.log"
         started = time.time()
-        state = "failed"
+        state: str
         exit_code: int | None = None
         reason: str | None = None
         process: subprocess.Popen[bytes] | None = None

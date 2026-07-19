@@ -303,7 +303,8 @@ def test_nw_008_009_016_enrollment_requires_human_code_and_revocation_stops_sess
     coordinator.enrollment.revoke(cap.node_id)
     with pytest.raises(CoordinatorError, match="revoked"):
         coordinator.connect_node(cap, transport="direct")
-    assert coordinator.enrollment.delete(cap.node_id)
+    deleted = coordinator.enrollment.delete(cap.node_id)
+    assert deleted
 
 
 def test_nw_017_018_019_020_capability_probe_and_stable_scheduler(tmp_path):
@@ -703,6 +704,10 @@ def test_nw_013_relay_runs_complete_job_and_returns_verified_artifact(tmp_path):
     assert artifact.read_text() == '{"transport":"relay"}'
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="bounded loopback allowlists use sandbox-exec; Linux requires the OCI executor",
+)
 def test_sim_004_relay_live_model_uses_e2e_grant_proxy_without_worker_credentials(tmp_path):
     ca, server_cert, server_key, _, _ = _write_tls_fixture(tmp_path / "tls-relay-model")
     host_cert, host_key = _issue_tls_client(tmp_path / "tls-relay-model", "node-host")
