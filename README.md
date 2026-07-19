@@ -44,6 +44,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.5` makes the Worker status surface follow the atomically activated
+runtime version after an update or rollback, instead of continuing to show the
+original bootstrap installation version.
+
 `v0.10.4` removes duplicated runtime version constants so the Worker capability
 manifest and MCP handshake always report the same version as the released
 package. This closes the gap where a correctly installed newer Worker could
@@ -323,11 +327,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.4"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.5"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.4` release additionally
+hosts can install from the pinned tag. The `v0.10.5` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.

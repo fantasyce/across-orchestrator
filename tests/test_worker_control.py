@@ -971,6 +971,7 @@ def test_nw_002_003_004_005_036_050_051_worker_lifecycle_is_user_scoped(tmp_path
     assert updated["status"] == "updated"
     assert updated["service_restart"]["reason"] == "deferred_until_session_acknowledged"
     assert (root / "runtime" / "current").resolve().name == "0.10.1-rc.1"
+    assert worker_status(root)["version"] == "0.10.1-rc.1"
     (root / "state" / "session.json").write_text(
         json.dumps(
             {
@@ -999,6 +1000,7 @@ def test_nw_002_003_004_005_036_050_051_worker_lifecycle_is_user_scoped(tmp_path
     rolled_back = rollback_worker(root)
     assert rolled_back["status"] == "rolled_back"
     assert (root / "runtime" / "current").resolve().name == WORKER_VERSION
+    assert worker_status(root)["version"] == WORKER_VERSION
     pack = tmp_path / "scenario-pack.tar.gz"
     with tarfile.open(pack, "w:gz") as archive:
         for name, body, mode in (

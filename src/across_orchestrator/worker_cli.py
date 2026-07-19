@@ -818,12 +818,17 @@ def _validated_enrollment_endpoint(value: str | None) -> str | None:
 def worker_status(root: Path) -> dict[str, Any]:
     root = _safe_root(root)
     install = _read_json(root / "state" / "install.json", default={})
+    current = _read_json(root / "state" / "current-version.json", default={})
     node = _read_json(root / "state" / "node.json", default={})
     runtime = _read_json(root / "state" / "runtime.json", default={})
     return {
         "schema_version": "across-worker-status/1.0",
         "status": "installed" if install else "not_installed",
-        "version": install.get("version"),
+        # The install record describes the bootstrap installation. Managed
+        # updates atomically switch ``current-version.json`` without rewriting
+        # that immutable provenance record, so the user-facing status must
+        # report the active runtime rather than the originally installed one.
+        "version": current.get("version") or install.get("version"),
         "node": sanitize_public(node),
         "runtime": sanitize_public(runtime),
         "draining": (root / "state" / "draining").exists(),
