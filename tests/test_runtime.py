@@ -15,15 +15,23 @@ class RuntimeTests(unittest.TestCase):
         self.home = Path(self.tempdir.name) / "home"
         self.project.mkdir()
         self.home.mkdir()
+        self.across_home = Path(self.tempdir.name) / "across-home"
+        self.across_home.mkdir()
         self._old_home = os.environ.get("ACROSS_ORCHESTRATOR_HOME")
+        self._old_across_home = os.environ.get("ACROSS_HOME")
         self._old_allowed_roots = os.environ.get("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS")
         os.environ["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
+        os.environ["ACROSS_HOME"] = str(self.across_home)
 
     def tearDown(self):
         if self._old_home is None:
             os.environ.pop("ACROSS_ORCHESTRATOR_HOME", None)
         else:
             os.environ["ACROSS_ORCHESTRATOR_HOME"] = self._old_home
+        if self._old_across_home is None:
+            os.environ.pop("ACROSS_HOME", None)
+        else:
+            os.environ["ACROSS_HOME"] = self._old_across_home
         if self._old_allowed_roots is None:
             os.environ.pop("ACROSS_ORCHESTRATOR_ALLOWED_PROJECT_ROOTS", None)
         else:
@@ -66,6 +74,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(events[0]["correlation_id"], f"loop:{task.metadata['agent_loop']['loop_id']}")
         subtask_events = [event for event in events if event["type"] == "subtask.created"]
         self.assertTrue(all(event["correlation_id"].startswith("subtask:") for event in subtask_events))
+
+    def test_remote_worker_task_never_starts_a_duplicate_local_loop(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Run one bounded scenario on a Worker",
+            project_root=str(self.project),
+            deliverables=["report.md"],
+            metadata={
+                "execution_contract": {
+                    "workflow_id": "scenario-simulation",
+                    "route": "worker",
+                    "phases": ["local-plan", "remote-run", "local-verify"],
+                }
+            },
+        )
+
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.metadata["execution_mode"], "remote_worker")
+        self.assertEqual(task.metadata["agent_loop"]["mode"], "remote-managed")
+        self.assertNotIn("loop_id", task.metadata["agent_loop"])
+        self.assertEqual(
+            [event["type"] for event in runtime.list_events(task.task_id)],
+            ["task.created", "contract.created", "task.remote_worker.created", "subtask.created"],
+        )
+
+        unchanged = runtime.run_task(task.task_id)
+        self.assertEqual(unchanged.status, "pending")
+        self.assertFalse((self.project / "report.md").exists())
 
     def test_submit_task_rejects_invalid_project_root(self):
         from across_orchestrator.runtime import OrchestratorRuntime

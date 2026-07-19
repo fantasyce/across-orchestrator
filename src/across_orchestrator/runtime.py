@@ -77,6 +77,7 @@ class OrchestratorRuntime:
         strict_dependency: bool = False,
         task_types: list[str] | None = None,
         agent_adapters: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Task:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
@@ -102,11 +103,41 @@ class OrchestratorRuntime:
         clean_agent_adapters = normalize_agent_adapter_specs(agent_adapters)
         if clean_agent_adapters:
             task.metadata["agent_adapters"] = clean_agent_adapters
+        host_metadata = dict(metadata or {})
+        if host_metadata:
+            task.metadata["host_metadata"] = host_metadata
+        execution_contract = host_metadata.get("execution_contract")
+        remote_managed = (
+            isinstance(execution_contract, dict)
+            and str(execution_contract.get("route") or "").strip().lower() == "worker"
+        )
+        if remote_managed:
+            # A Worker-routed task is a durable control-plane parent. The host
+            # owns its Worker Job and projects that Job's status/evidence back
+            # onto this task; starting the normal agent loop here would execute
+            # the same user request a second time on the Coordinator.
+            task.metadata["execution_mode"] = "remote_worker"
+            task.metadata["agent_loop"] = {
+                "runtime": "across-orchestrator",
+                "mode": "remote-managed",
+                "status": "queued",
+            }
+            self.store.save_task(task)
+            self.store.append_event(task.task_id, "task.created", {"goal": task.goal, "agent": task.agent})
+            self.store.append_event(task.task_id, "contract.created", task.contract)
+            self.store.append_event(
+                task.task_id,
+                "task.remote_worker.created",
+                {"execution_contract": execution_contract},
+            )
+            for subtask in task.subtasks:
+                self.store.append_event(task.task_id, "subtask.created", subtask.__dict__)
+            return task
         loop = self.loop_runtime.start_loop(
             goal=task.goal,
             project_root=str(root),
             agent=agent,
-            metadata={"task_id": task.task_id, "task_kind": "delivery"},
+            metadata={"task_id": task.task_id, "task_kind": "delivery", "host_metadata": dict(metadata or {})},
         )
         task.metadata["agent_loop"] = {
             "loop_id": loop.loop_id,
@@ -190,6 +221,21 @@ class OrchestratorRuntime:
             self.store.append_event(task.task_id, "subtask.created", subtask.__dict__)
         return task
 
+    def cancel_task(self, task_id: str, *, reason: str = "cancelled_by_user") -> Task:
+        task = self.store.load_task(task_id)
+        if task is None:
+            raise ValueError("task not found")
+        if task.status in TERMINAL_TASK_STATUSES:
+            return task
+        loop_id = str((task.metadata.get("agent_loop") or {}).get("loop_id") or "")
+        if loop_id:
+            self.loop_runtime.cancel_loop(loop_id, reason=reason, cancel_category="user")
+        task.status = "cancelled"
+        task.error = reason
+        self.store.save_task(task)
+        self.store.append_event(task.task_id, "task.cancelled", {"reason": reason, "source": "host"})
+        return task
+
     def get_task(self, task_id: str) -> Task:
         return self.store.load_task(task_id)
 
@@ -199,6 +245,11 @@ class OrchestratorRuntime:
     def run_task(self, task_id: str, command: list[str] | None = None) -> Task:
         task = self.store.load_task(task_id)
         if task.status in TERMINAL_TASK_STATUSES:
+            return task
+        if task.metadata.get("execution_mode") == "remote_worker":
+            # Remote-managed tasks can only be advanced by their Worker Job.
+            # Keeping this endpoint idempotent also prevents an old client from
+            # accidentally launching a local duplicate.
             return task
         self._mark_task_started(task)
         loop = self._run_task_loop(task, command=command)

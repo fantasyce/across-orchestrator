@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "across-orchestrator"
-version = "0.9.0"
+version = "0.10.0"
 description = "Local-first task orchestration runtime for agent-to-agent delivery work."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "cryptography>=42.0",
+  "psutil>=5.9",
+]
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -18,6 +21,7 @@ keywords = ["agent", "a2a", "mcp", "orchestration", "tasks"]
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
 ]
 remote-mcp = [
   "PyJWT[crypto]>=2.8",
@@ -26,6 +30,8 @@ remote-mcp = [
 [project.scripts]
 across-orchestrator = "across_orchestrator.cli:main"
 across-tasks = "across_orchestrator.cli:main"
+across-worker = "across_orchestrator.worker_cli:main"
+across-relay = "across_orchestrator.worker_cli:relay_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

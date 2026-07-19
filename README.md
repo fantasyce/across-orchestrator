@@ -44,7 +44,16 @@ Agent-readable entrypoints:
 
 ## Current Status
 
-`v0.9.0` adds the host-governed provider sandbox and evidence-receipt contract,
+`v0.10.0` adds a host-neutral Worker control plane for using approved remote
+machines as execution capacity. Hosts can enroll Workers over direct LAN or
+point-to-point IP links, use an optional relay when no direct route exists,
+dispatch bounded jobs, revoke device identities, and verify signed artifacts
+and evidence before accepting a result. Mutual TLS, expiring enrollment codes,
+resource leases, model-gateway grants, and redacted telemetry keep credentials
+and final approval with the host. The runtime never changes VPN, DNS, default
+routes, firewall rules, or network extensions on either machine.
+
+`v0.9.0` added the host-governed provider sandbox and evidence-receipt contract,
 including bounded filesystem and network policy, runtime cancellation, output
 limits, deterministic receipts, and an explicit opt-in sidecar mode for
 host-selected client project roots. It also expands host conformance metadata
@@ -295,12 +304,14 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.9.0"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.0"
 ```
 
-The GitHub release is source-first. There is no attached wheel asset for
-`v0.9.0`; if a packaged host needs a wheel, build it from the pinned tag or
-attach the wheel to the release before using a wheel URL.
+The GitHub release is source-first. There is no attached Python wheel; packaged
+hosts can install from the pinned tag. The `v0.10.0` release additionally
+publishes checksummed Worker source bundles for macOS and Linux plus a
+multi-architecture relay container. Those assets are remote execution
+components, not a notarized macOS application.
 
 Packaged hosts should install from the pinned Git tag or an explicitly attached
 release wheel into a managed runtime under
