@@ -44,6 +44,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.3` keeps the zero-HIGH/CRITICAL Alpine 3.23 relay base and upgrades the
+runtime packaging toolchain to the fixed pip 26.1.2 release before the image is
+scanned or published.
+
 `v0.10.2` moves the relay to the zero-HIGH/CRITICAL Alpine 3.23 base verified
 against the release-day Trivy database. Its tag workflow now scans a local
 single-architecture candidate before any multi-architecture image is pushed;
@@ -314,11 +318,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.2"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.3"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.2` release additionally
+hosts can install from the pinned tag. The `v0.10.3` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
