@@ -1,4 +1,12 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-alpine3.23 AS builder
+
+RUN apk add --no-cache build-base cargo libffi-dev linux-headers openssl-dev
+
+WORKDIR /build
+COPY . .
+RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels .
+
+FROM python:3.12-alpine3.23
 
 LABEL org.opencontainers.image.source="https://github.com/fantasyce/across-orchestrator"
 
@@ -7,13 +15,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ACROSS_ORCHESTRATOR_HOME=/var/lib/across-relay
 
-RUN addgroup --system across-relay \
-    && adduser --system --ingroup across-relay --home /var/lib/across-relay across-relay
+RUN addgroup -S across-relay \
+    && adduser -S -G across-relay -h /var/lib/across-relay across-relay
 
-WORKDIR /opt/across-orchestrator
-COPY . .
-RUN python -m pip install --no-cache-dir . \
-    && rm -rf /root/.cache /opt/across-orchestrator/.git
+COPY --from=builder /wheels /wheels
+RUN python -m pip install --no-cache-dir /wheels/* \
+    && rm -rf /root/.cache /wheels
 
 USER across-relay
 EXPOSE 9444
