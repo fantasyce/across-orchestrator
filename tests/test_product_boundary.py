@@ -20,6 +20,8 @@ def test_distribution_only_packages_across_orchestrator_namespace():
 
 def test_development_package_metadata_tracks_distribution_version():
     from across_orchestrator import __version__
+    from across_orchestrator.server import MCP_SERVER_INFO
+    from across_orchestrator.worker_runtime import WORKER_VERSION
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
@@ -31,6 +33,8 @@ def test_development_package_metadata_tracks_distribution_version():
     assert package["version"] == expected_version
     assert package_lock["version"] == expected_version
     assert package_lock["packages"][""]["version"] == expected_version
+    assert WORKER_VERSION == expected_version
+    assert MCP_SERVER_INFO["version"] == expected_version
 
 
 def test_across_orchestrator_production_code_does_not_import_aaa_internals():

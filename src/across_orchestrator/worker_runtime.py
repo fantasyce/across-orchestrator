@@ -19,11 +19,12 @@ import urllib.parse
 import pwd
 import psutil
 
+from . import __version__
 from .coordinator import CoordinatorError, safe_cleanup_plan
 from .worker_protocol import ArtifactDescriptor, CapabilityManifest, JobLease, JobManifest, ProtocolError, canonical_json, new_protocol_id, normalize_relative_path, payload_hash, sanitize_public
 
 
-WORKER_VERSION = "0.10.0"
+WORKER_VERSION = __version__
 DEFAULT_WORKER_HOME = Path("~/.across/worker")
 _DENIED_ENV_PREFIXES = ("AWS_", "AZURE_", "GOOGLE_", "OPENAI_", "ANTHROPIC_", "GITHUB_", "SSH_")
 _DENIED_ENV_NAMES = {"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "DOCKER_CONFIG", "KUBECONFIG", "GNUPGHOME"}
