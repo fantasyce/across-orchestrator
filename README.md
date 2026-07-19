@@ -44,6 +44,11 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.2` moves the relay to the zero-HIGH/CRITICAL Alpine 3.23 base verified
+against the release-day Trivy database. Its tag workflow now scans a local
+single-architecture candidate before any multi-architecture image is pushed;
+only a clean candidate can be published, signed, and attested.
+
 `v0.10.1` fixes the tag-triggered Relay publication workflow by pinning the
 Cosign installer to an existing release tag. It keeps the Worker protocol and
 runtime from `v0.10.0` unchanged while ensuring the relay image can be built,
@@ -309,11 +314,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.1"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.2"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.1` release additionally
+hosts can install from the pinned tag. The `v0.10.2` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
