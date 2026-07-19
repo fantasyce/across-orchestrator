@@ -19,7 +19,8 @@ RUN addgroup -S across-relay \
     && adduser -S -G across-relay -h /var/lib/across-relay across-relay
 
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-cache-dir /wheels/* \
+RUN python -m pip install --no-cache-dir --upgrade "pip==26.1.2" \
+    && python -m pip install --no-cache-dir /wheels/* \
     && rm -rf /root/.cache /wheels
 
 USER across-relay
