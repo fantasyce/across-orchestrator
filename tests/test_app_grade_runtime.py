@@ -13,14 +13,22 @@ class AppGradeRuntimeTests(unittest.TestCase):
         self.home = Path(self.tempdir.name) / "home"
         self.project.mkdir()
         self.home.mkdir()
+        self.across_home = Path(self.tempdir.name) / "across-home"
+        self.across_home.mkdir()
         self._old_home = os.environ.get("ACROSS_ORCHESTRATOR_HOME")
+        self._old_across_home = os.environ.get("ACROSS_HOME")
         os.environ["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
+        os.environ["ACROSS_HOME"] = str(self.across_home)
 
     def tearDown(self):
         if self._old_home is None:
             os.environ.pop("ACROSS_ORCHESTRATOR_HOME", None)
         else:
             os.environ["ACROSS_ORCHESTRATOR_HOME"] = self._old_home
+        if self._old_across_home is None:
+            os.environ.pop("ACROSS_HOME", None)
+        else:
+            os.environ["ACROSS_HOME"] = self._old_across_home
         self.tempdir.cleanup()
 
     def test_release_e2e_task_runs_mature_quality_path(self):

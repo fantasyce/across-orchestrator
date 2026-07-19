@@ -23,11 +23,14 @@ class HttpTests(unittest.TestCase):
         self.root = Path(__file__).resolve().parents[1]
         self.project = Path(self.tempdir.name) / "project"
         self.home = Path(self.tempdir.name) / "home"
+        self.across_home = Path(self.tempdir.name) / "across-home"
         self.project.mkdir()
         self.home.mkdir()
+        self.across_home.mkdir()
         self.port = free_port()
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.root / "src")
+        env["ACROSS_HOME"] = str(self.across_home)
         env["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
         self.process = subprocess.Popen(
             [
@@ -111,6 +114,7 @@ class HttpTests(unittest.TestCase):
         port = free_port()
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.root / "src")
+        env["ACROSS_HOME"] = str(self.across_home)
         env["ACROSS_ORCHESTRATOR_HOME"] = str(self.home)
         process = subprocess.Popen(
             [

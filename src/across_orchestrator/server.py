@@ -68,7 +68,7 @@ JSON_RPC_METHOD_NOT_FOUND = -32601
 JSON_RPC_INVALID_PARAMS = -32602
 JSON_RPC_INTERNAL_ERROR = -32603
 
-MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.9.0"}
+MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.10.0"}
 
 MCP_SERVER_CAPABILITIES = {
     "tools": {"listChanged": False},
@@ -780,6 +780,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     strict_dependency=bool(payload.get("strictDependency") or payload.get("strict_dependency")),
                     task_types=payload.get("taskTypes") or payload.get("task_types") or None,
                     agent_adapters=payload.get("agentAdapters") or payload.get("agent_adapters") or None,
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
                 )
                 self.respond(task.to_dict(), status=201)
                 return
@@ -822,6 +823,10 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "run":
                 task = self.runtime.run_task(parts[1])
+                self.respond(task.to_dict())
+                return
+            if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
+                task = self.runtime.cancel_task(parts[1], reason=str(payload.get("reason") or "cancelled_by_user"))
                 self.respond(task.to_dict())
                 return
             if len(parts) == 3 and parts[0] == "loops" and parts[2] == "run":

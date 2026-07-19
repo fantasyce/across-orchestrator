@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .agui_projection import project_events_to_agui
 from .agent_card import render_agent_card
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--strict-dependency", action="store_true")
     submit.add_argument("--subtasks-json")
     submit.add_argument("--agent-adapters-json")
+    submit.add_argument("--metadata-json")
     submit.add_argument("--json", action="store_true")
 
     release_e2e = sub.add_parser("submit-release-e2e", help="Submit the app-grade host conformance scenario")
@@ -84,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Run a task")
     run.add_argument("task_id")
     run.add_argument("--json", action="store_true")
+
+    cancel = sub.add_parser("cancel", help="Cancel a task and its durable execution loop")
+    cancel.add_argument("task_id")
+    cancel.add_argument("--reason", default="cancelled_by_user")
+    cancel.add_argument("--json", action="store_true")
 
     status = sub.add_parser("status", help="Show task status")
     status.add_argument("task_id")
@@ -285,6 +293,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("mcp", help="Start MCP stdio server")
 
+    worker_control = sub.add_parser("worker-control", help="Run one host-controlled Worker protocol operation from stdin")
+    worker_control.add_argument("--json", action="store_true")
+
+    worker_control_server = sub.add_parser("worker-control-server", help="Serve host-controlled Worker protocol operations on a private Unix socket")
+    worker_control_server.add_argument("--socket", required=True)
+
+    worker_listener = sub.add_parser("worker-listener", help="Start the explicit-interface TLS 1.3 Worker session listener")
+    worker_listener.add_argument("--host", required=True)
+    worker_listener.add_argument("--port", type=int, required=True)
+    worker_listener.add_argument("--certificate", required=True)
+    worker_listener.add_argument("--private-key", required=True)
+    worker_listener.add_argument("--client-ca", required=True)
+    worker_listener.add_argument("--artifact-root", required=True)
+    worker_listener.add_argument("--transport", choices=("direct", "overlay"), default="direct")
+    worker_listener.add_argument("--model-gateway-url")
+
+    worker_relay = sub.add_parser("worker-relay-session", help="Connect the Coordinator to one opaque Relay Worker session")
+    worker_relay.add_argument("--endpoint", required=True)
+    worker_relay.add_argument("--server-name")
+    worker_relay.add_argument("--node-id", required=True, help="Coordinator Relay identity")
+    worker_relay.add_argument("--peer-node-id", required=True, help="Approved Worker Node ID")
+    worker_relay.add_argument("--session-id", required=True)
+    worker_relay.add_argument("--session-key-file", required=True, help="0600 file containing the base64 E2E key")
+    worker_relay.add_argument("--certificate", required=True)
+    worker_relay.add_argument("--private-key", required=True)
+    worker_relay.add_argument("--server-ca", help="Optional private Relay CA; omit for the system trust store")
+    worker_relay.add_argument("--artifact-root", required=True)
+    worker_relay.add_argument("--model-gateway-unix-socket", help="AAA Unix socket used for encrypted Relay Model Grant calls")
+    worker_relay.add_argument("--once", action="store_true")
+
     serve = sub.add_parser("serve", help="Start HTTP server")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
@@ -320,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--subtasks-json must be a JSON array")
         try:
             agent_adapters = _json_object_arg(args.agent_adapters_json, "--agent-adapters-json")
+            metadata = _json_object_arg(args.metadata_json, "--metadata-json")
         except ValueError as exc:
             parser.error(str(exc))
             return 2
@@ -332,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
             strict_dependency=bool(args.strict_dependency),
             task_types=args.task_type or None,
             agent_adapters=agent_adapters or None,
+            metadata=metadata or None,
         )
         _print(task.to_dict(), args.json)
         return 0
@@ -347,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         task = runtime.run_task(args.task_id)
+        _print(task.to_dict(), args.json)
+        return 0
+
+    if args.command == "cancel":
+        task = runtime.cancel_task(args.task_id, reason=args.reason)
         _print(task.to_dict(), args.json)
         return 0
 
@@ -695,6 +740,112 @@ def main(argv: list[str] | None = None) -> int:
         from .mcp import main as mcp_main
 
         return mcp_main()
+
+    if args.command == "worker-control":
+        from .worker_control_command import handle_worker_control_command
+
+        try:
+            request = json.loads(sys.stdin.read())
+            if not isinstance(request, dict):
+                raise ValueError("worker control request must be a JSON object")
+            result = handle_worker_control_command(request)
+        except (json.JSONDecodeError, ValueError) as exc:
+            _print({"status": "error", "error": str(exc)}, True)
+            return 2
+        _print(result, True)
+        return 0
+
+    if args.command == "worker-control-server":
+        import asyncio
+        from .worker_control_command import serve_worker_control
+
+        asyncio.run(serve_worker_control(args.socket))
+        return 0
+
+    if args.command == "worker-listener":
+        import asyncio
+        from .coordinator import WorkerCoordinator
+        from .worker_transport import CoordinatorSessionServer, tls_server_context
+
+        async def run_worker_listener() -> None:
+            server = CoordinatorSessionServer(
+                WorkerCoordinator(),
+                host=args.host,
+                port=args.port,
+                ssl_context=tls_server_context(certificate=args.certificate, private_key=args.private_key, client_ca=args.client_ca),
+                artifact_root=args.artifact_root,
+                transport=args.transport,
+                model_gateway_url=args.model_gateway_url,
+            )
+            await server.start()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await server.close()
+
+        asyncio.run(run_worker_listener())
+        return 0
+
+    if args.command == "worker-relay-session":
+        import asyncio
+        from .coordinator import WorkerCoordinator
+        from .relay import RelayEndpoint, create_tls_context
+        from .worker_transport import RelayCoordinatorSession, UnixSocketModelGateway
+
+        parsed = urlparse(args.endpoint)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            parser.error("Worker Relay endpoint must be a credential-free HTTPS URL")
+        key_path = Path(args.session_key_file).expanduser().resolve()
+        if key_path.stat().st_mode & 0o077:
+            parser.error("Worker Relay session key file must be private (0600)")
+        try:
+            session_key = base64.urlsafe_b64decode(key_path.read_text(encoding="ascii").strip().encode())
+        except Exception:
+            parser.error("Worker Relay session key file is invalid")
+        context = create_tls_context(
+            server=False,
+            certificate=args.certificate,
+            private_key=args.private_key,
+            trust_store=args.server_ca,
+        )
+        coordinator = WorkerCoordinator()
+        model_gateway = UnixSocketModelGateway(args.model_gateway_unix_socket) if args.model_gateway_unix_socket else None
+
+        async def run_worker_relay() -> None:
+            backoff = 1.0
+            while True:
+                endpoint = RelayEndpoint(
+                    host=parsed.hostname,
+                    port=int(parsed.port or 443),
+                    server_hostname=args.server_name or parsed.hostname,
+                    ssl_context=context,
+                    node_id=args.node_id,
+                    peer_node_id=args.peer_node_id,
+                    session_id=args.session_id,
+                    session_key=session_key,
+                )
+                try:
+                    await endpoint.connect()
+                    await endpoint.register_session(ttl_seconds=3600)
+                    await RelayCoordinatorSession(
+                        coordinator,
+                        endpoint,
+                        artifact_root=args.artifact_root,
+                        model_gateway=model_gateway,
+                    ).run_once()
+                    backoff = 1.0
+                    if args.once:
+                        return
+                except (OSError, asyncio.TimeoutError, ConnectionError):
+                    if args.once:
+                        raise
+                    await asyncio.sleep(backoff)
+                    backoff = min(30.0, backoff * 2)
+                finally:
+                    await endpoint.close()
+
+        asyncio.run(run_worker_relay())
+        return 0
 
     if args.command == "serve":
         from .server import serve
