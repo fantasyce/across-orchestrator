@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 
+from . import __version__
 from .agui_projection import project_event_sse, project_events_to_agui
 from .agent_card import render_agent_card
 from .agent_loop import AgentLoopConcurrencyError, AgentLoopRuntime
@@ -68,7 +69,7 @@ JSON_RPC_METHOD_NOT_FOUND = -32601
 JSON_RPC_INVALID_PARAMS = -32602
 JSON_RPC_INTERNAL_ERROR = -32603
 
-MCP_SERVER_INFO = {"name": "across-orchestrator", "version": "0.10.0"}
+MCP_SERVER_INFO = {"name": "across-orchestrator", "version": __version__}
 
 MCP_SERVER_CAPABILITIES = {
     "tools": {"listChanged": False},

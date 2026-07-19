@@ -40,7 +40,7 @@ from across_orchestrator.worker_protocol import (
     payload_hash,
     sanitize_public,
 )
-from across_orchestrator.worker_runtime import BoundedProcessExecutor, ChunkedArtifactReceiver
+from across_orchestrator.worker_runtime import BoundedProcessExecutor, ChunkedArtifactReceiver, WORKER_VERSION
 from across_orchestrator.worker_store import WorkerControlStore
 from across_orchestrator.worker_control_command import handle_worker_control_command, serve_worker_control
 from across_orchestrator.worker_transport import CoordinatorSessionServer, RelayCoordinatorSession, RelayWorkerSessionClient, WorkerSessionClient, WorkerTransportError, _model_grant_ttl_seconds, tls_client_context, tls_server_context
@@ -998,7 +998,7 @@ def test_nw_002_003_004_005_036_050_051_worker_lifecycle_is_user_scoped(tmp_path
     assert json.loads((root / "state" / "session.json").read_text())["relay_peer_node_id"] == "node-host"
     rolled_back = rollback_worker(root)
     assert rolled_back["status"] == "rolled_back"
-    assert (root / "runtime" / "current").resolve().name == "0.10.0"
+    assert (root / "runtime" / "current").resolve().name == WORKER_VERSION
     pack = tmp_path / "scenario-pack.tar.gz"
     with tarfile.open(pack, "w:gz") as archive:
         for name, body, mode in (
