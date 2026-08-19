@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -6,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from across_orchestrator import __version__
 
 
 class PluginRuntimeTests(unittest.TestCase):
@@ -102,6 +105,36 @@ class PluginRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["mcpServers"]["across-orchestrator"]["args"], ["-lc", f"exec '{self.home / 'bin' / 'across-orchestrator'}' mcp"])
         self.assertTrue((self.home / "bin" / "across-orchestrator").is_file())
         self.assertTrue((self.home / "plugins" / "across-orchestrator" / "venv" / "bin" / "across-orchestrator").is_file())
+
+    def test_claude_desktop_registration_preserves_valid_bundled_native_provenance(self):
+        initial = self.run_cli("plugin-install", "--json")
+        self.assertEqual(initial.returncode, 0, initial.stderr)
+        plugin_dir = self.home / "plugins" / "across-orchestrator"
+        executable = plugin_dir / "venv" / "bin" / "across-orchestrator"
+        state_path = plugin_dir / "install-state.json"
+        provenance = {
+            "runtime": "bundled_native",
+            "sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+            "source": f"bundle://across-orchestrator/{__version__}",
+            "status": "installed",
+        }
+        expected_bytes = (json.dumps(provenance, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        state_path.write_bytes(expected_bytes)
+        claude_config = self.home / "claude_desktop_config.json"
+        claude_config.write_text("{}\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "install",
+            "claude-desktop",
+            "--config-file",
+            str(claude_config),
+            "--json",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state_path.read_bytes(), expected_bytes)
+        payload = json.loads(claude_config.read_text(encoding="utf-8"))
+        self.assertIn("across-orchestrator", payload["mcpServers"])
 
     def test_plugin_status_expands_tilde_path_with_env_home(self):
         bin_dir = self.home / "tools"
