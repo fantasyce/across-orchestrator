@@ -44,6 +44,9 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.10` resolves the outstanding CodeQL quality findings in the Worker,
+Relay, sandbox, and test surfaces without changing their public contracts.
+
 `v0.10.9` retains the Relay image refresh from v0.10.8 and makes the macOS
 sandbox acceptance probe independent of the repository checkout location.
 
@@ -341,11 +344,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.9"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.10"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.9` release additionally
+hosts can install from the pinned tag. The `v0.10.10` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
