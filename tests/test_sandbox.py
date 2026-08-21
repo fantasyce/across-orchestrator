@@ -271,7 +271,7 @@ class SandboxPolicyTests(unittest.TestCase):
                 "-c",
                 (
                     "import sys, time; "
-                    "[(print(i, file=sys.stderr, flush=True), time.sleep(0.04)) for i in range(6)]"
+                    "[(print(i, file=sys.stderr, flush=True), time.sleep(0.04)) for i in range(16)]"
                 ),
             ]
             result = execute_sandbox_command(
@@ -292,7 +292,64 @@ class SandboxPolicyTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed", result)
         self.assertFalse(result["execution"]["timed_out"])
         self.assertIsNone(result["execution"]["timeout_kind"])
-        self.assertEqual(result["output"]["stderr"], "0\n1\n2\n3\n4\n5\n")
+        # The producer runs for 640ms, beyond the 500ms idle budget; every
+        # output gap is still only 40ms. Completion therefore proves output
+        # refreshed the idle deadline instead of merely finishing before it.
+        self.assertGreaterEqual(result["execution"]["duration_ms"], 500)
+        self.assertEqual(
+            result["output"]["stderr"],
+            "".join(f"{index}\n" for index in range(16)),
+        )
+
+    def test_local_provider_drains_simultaneous_stream_backpressure(self):
+        from across_orchestrator.sandbox import execute_sandbox_command
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir)
+            bytes_per_stream = 10 * 128 * 1024
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import os, threading\n"
+                    "chunk = 128 * 1024\n"
+                    "rounds = 10\n"
+                    "gate = threading.Event()\n"
+                    "def emit(fd, byte):\n"
+                    "    gate.wait()\n"
+                    "    data = byte * chunk\n"
+                    "    for _ in range(rounds):\n"
+                    "        view = memoryview(data)\n"
+                    "        while view:\n"
+                    "            view = view[os.write(fd, view):]\n"
+                    "stdout = threading.Thread(target=emit, args=(1, b'O'))\n"
+                    "stderr = threading.Thread(target=emit, args=(2, b'E'))\n"
+                    "stdout.start(); stderr.start(); gate.set()\n"
+                    "stdout.join(); stderr.join()\n"
+                ),
+            ]
+            result = execute_sandbox_command(
+                {
+                    "filesystem_policy": "run_scoped",
+                    "workspace_root": str(workspace),
+                    "command_allowlist": [command],
+                },
+                command=command,
+                cwd=str(workspace),
+                timeout_seconds=5,
+                max_output_bytes=256,
+            )
+
+        self.assertEqual(result["status"], "completed", result)
+        self.assertEqual(result["execution"]["exit_code"], 0)
+        self.assertFalse(result["execution"]["timed_out"])
+        for stream, expected_byte in (("stdout", b"O"), ("stderr", b"E")):
+            with self.subTest(stream=stream):
+                output = result["output"]
+                self.assertEqual(output[f"{stream}_bytes"], bytes_per_stream)
+                self.assertTrue(output[f"{stream}_truncated"])
+                self.assertEqual(len(output[stream].encode("utf-8")), 256)
+                self.assertEqual(output[stream].encode("utf-8"), expected_byte * 256)
 
     def test_local_provider_max_wall_timeout_caps_continuous_output(self):
         from across_orchestrator.sandbox import execute_sandbox_command
