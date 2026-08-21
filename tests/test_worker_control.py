@@ -449,11 +449,11 @@ def test_nw_040_041_macos_sandbox_hides_worker_identity_and_denies_undeclared_ne
     listener.listen(1)
     port = listener.getsockname()[1]
     login_home = Path.home()
-    repository = Path(__file__).resolve().parents[1]
+    protected_user_directory = login_home / "Documents"
     script = (
         "import json,os,pathlib,socket; "
         f"secret=pathlib.Path({str(secret)!r}); "
-        f"probes={[str(login_home / 'Desktop'), str(login_home / 'Downloads'), str(login_home / '.config'), str(repository)]!r}; "
+        f"probes={[str(login_home / 'Desktop'), str(login_home / 'Downloads'), str(login_home / '.config'), str(protected_user_directory)]!r}; "
         "readable=True; network=True; hidden=[]; "
         "\ntry: secret.read_text()\nexcept Exception: readable=False\n"
         "\nfor probe in probes:\n"
