@@ -148,7 +148,7 @@ class HttpTests(unittest.TestCase):
                 time.sleep(0.1)
         process.terminate()
         process.communicate(timeout=5)
-        self.fail("additional server did not start")
+        raise AssertionError("additional server did not start")
 
     def post_to(self, base, path, payload):
         data = json.dumps(payload).encode("utf-8")

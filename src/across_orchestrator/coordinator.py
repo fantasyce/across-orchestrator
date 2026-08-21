@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 import hmac
 import base64
-import os
 import re
 import secrets
 import time
