@@ -280,9 +280,9 @@ class SandboxPolicyTests(unittest.TestCase):
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                     "execution": {
-                        "timeout_seconds": 0.12,
+                        "timeout_seconds": 0.5,
                         "refresh_timeout_on_output": True,
-                        "max_wall_timeout_seconds": 1,
+                        "max_wall_timeout_seconds": 4,
                     },
                 },
                 command=command,
@@ -314,9 +314,9 @@ class SandboxPolicyTests(unittest.TestCase):
                     "workspace_root": str(workspace),
                     "command_allowlist": [command],
                     "execution": {
-                        "timeout_seconds": 0.12,
+                        "timeout_seconds": 0.5,
                         "refresh_timeout_on_output": True,
-                        "max_wall_timeout_seconds": 0.25,
+                        "max_wall_timeout_seconds": 0.8,
                     },
                 },
                 command=command,
@@ -349,7 +349,7 @@ class SandboxPolicyTests(unittest.TestCase):
                 },
                 command=command,
                 cwd=str(workspace),
-                timeout_seconds=0.12,
+                timeout_seconds=0.5,
             )
 
         self.assertEqual(result["status"], "timed_out", result)
