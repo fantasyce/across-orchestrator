@@ -15,7 +15,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ACROSS_ORCHESTRATOR_HOME=/var/lib/across-relay
 
-RUN addgroup -S across-relay \
+RUN apk upgrade --no-cache \
+    && addgroup -S across-relay \
     && adduser -S -G across-relay -h /var/lib/across-relay across-relay
 
 COPY --from=builder /wheels /wheels

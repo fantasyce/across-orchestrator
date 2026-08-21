@@ -26,6 +26,7 @@ def test_development_package_metadata_tracks_distribution_version():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
+    uv_lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
 
     expected_version = pyproject["project"]["version"]
 
@@ -33,8 +34,27 @@ def test_development_package_metadata_tracks_distribution_version():
     assert package["version"] == expected_version
     assert package_lock["version"] == expected_version
     assert package_lock["packages"][""]["version"] == expected_version
+    assert next(
+        item["version"] for item in uv_lock["package"] if item["name"] == "across-orchestrator"
+    ) == expected_version
     assert WORKER_VERSION == expected_version
     assert MCP_SERVER_INFO["version"] == expected_version
+
+
+def test_relay_release_upgrades_base_packages_without_weakening_security_gate():
+    dockerfile = (ROOT / "packaging" / "relay" / "Dockerfile").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "release-worker.yml").read_text(
+        encoding="utf-8"
+    )
+    final_stage = "FROM " + dockerfile.rsplit("\nFROM ", maxsplit=1)[-1]
+    scan_step = workflow.split(
+        "      - name: Scan Relay candidate before publication\n", maxsplit=1
+    )[1].split("\n      - name:", maxsplit=1)[0]
+
+    assert "RUN apk upgrade --no-cache" in final_stage
+    assert final_stage.index("RUN apk upgrade --no-cache") < final_stage.index("USER across-relay")
+    assert "severity: CRITICAL,HIGH" in scan_step
+    assert 'exit-code: "1"' in scan_step
 
 
 def test_across_orchestrator_production_code_does_not_import_aaa_internals():
