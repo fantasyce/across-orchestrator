@@ -44,6 +44,9 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.9` retains the Relay image refresh from v0.10.8 and makes the macOS
+sandbox acceptance probe independent of the repository checkout location.
+
 `v0.10.8` refreshes Alpine packages in the published Relay image before
 runtime installation, closing the SQLite vulnerabilities detected by the
 `v0.10.7` tag gate. The gate remains strict: HIGH or CRITICAL findings still
@@ -338,11 +341,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.8"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.9"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.8` release additionally
+hosts can install from the pinned tag. The `v0.10.9` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
