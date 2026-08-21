@@ -8,10 +8,10 @@ import json
 import math
 import os
 import platform
+import selectors
 import signal
 import stat
 import subprocess
-import threading
 import time
 
 from .redaction import redact_sensitive_value
@@ -120,57 +120,66 @@ class LocalWorkspaceSandboxProvider:
         stdout = _BoundedOutput(request.max_output_bytes)
         stderr = _BoundedOutput(request.max_output_bytes)
         output_activity = _OutputActivity(started)
-        stdout_thread = threading.Thread(
-            target=_drain_stream,
-            args=(process.stdout, stdout, output_activity),
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=_drain_stream,
-            args=(process.stderr, stderr, output_activity),
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
+        stream_selector = selectors.DefaultSelector()
+        if process.stdout is not None:
+            stream_selector.register(process.stdout, selectors.EVENT_READ, stdout)
+        if process.stderr is not None:
+            stream_selector.register(process.stderr, selectors.EVENT_READ, stderr)
         timed_out = False
         timeout_kind: str | None = None
         fixed_deadline = started + request.timeout_seconds
         max_wall_deadline = started + request.max_wall_timeout_seconds
-        while True:
-            if request.cancellation is not None and request.cancellation.is_cancelled():
-                _terminate_process_group(process)
-                category = (
-                    request.cancellation.category()
-                    if hasattr(request.cancellation, "category")
-                    else None
-                )
-                from .cancellation import ActionCancelledError
+        try:
+            while True:
+                if request.cancellation is not None and request.cancellation.is_cancelled():
+                    _terminate_process_group(process)
+                    category = (
+                        request.cancellation.category()
+                        if hasattr(request.cancellation, "category")
+                        else None
+                    )
+                    from .cancellation import ActionCancelledError
 
-                raise ActionCancelledError(request.cancellation.reason(), category=category)
-            now = time.monotonic()
-            if request.refresh_timeout_on_output:
-                idle_deadline = output_activity.last_activity() + request.timeout_seconds
-                deadline = min(idle_deadline, max_wall_deadline)
-            else:
-                deadline = min(fixed_deadline, max_wall_deadline)
-            remaining = deadline - now
-            if remaining <= 0:
-                timed_out = True
-                timeout_kind = (
-                    "max_wall"
-                    if now >= max_wall_deadline or not request.refresh_timeout_on_output
-                    else "idle"
+                    raise ActionCancelledError(request.cancellation.reason(), category=category)
+                # Count bytes already waiting in either pipe before deciding the process is idle.
+                _drain_ready_streams(stream_selector, 0, output_activity)
+                now = time.monotonic()
+                if now >= max_wall_deadline:
+                    timed_out = True
+                    timeout_kind = "max_wall"
+                    _terminate_process_group(process)
+                    exit_code = process.wait()
+                    break
+                if request.refresh_timeout_on_output:
+                    deadline = output_activity.last_activity() + request.timeout_seconds
+                    if now >= deadline:
+                        timed_out = True
+                        timeout_kind = "idle"
+                        _terminate_process_group(process)
+                        exit_code = process.wait()
+                        break
+                else:
+                    deadline = fixed_deadline
+                    if now >= deadline:
+                        timed_out = True
+                        timeout_kind = "max_wall"
+                        _terminate_process_group(process)
+                        exit_code = process.wait()
+                        break
+                if process.poll() is not None:
+                    exit_code = process.returncode
+                    break
+                _drain_ready_streams(
+                    stream_selector,
+                    min(0.05, deadline - now, max_wall_deadline - now),
+                    output_activity,
                 )
-                _terminate_process_group(process)
-                exit_code = process.wait()
-                break
-            try:
-                exit_code = process.wait(timeout=min(0.05, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        stdout_thread.join(timeout=2)
-        stderr_thread.join(timeout=2)
+            while _drain_ready_streams(stream_selector, 0, output_activity):
+                pass
+        finally:
+            for key in list(stream_selector.get_map().values()):
+                key.fileobj.close()
+            stream_selector.close()
         duration_ms = int((time.monotonic() - started) * 1000)
         return _execution_receipt(
             request,
@@ -232,15 +241,12 @@ class _BoundedOutput:
 class _OutputActivity:
     def __init__(self, started: float) -> None:
         self._last_activity = started
-        self._lock = threading.Lock()
 
     def record(self) -> None:
-        with self._lock:
-            self._last_activity = time.monotonic()
+        self._last_activity = time.monotonic()
 
     def last_activity(self) -> float:
-        with self._lock:
-            return self._last_activity
+        return self._last_activity
 
 
 def get_sandbox_provider_registry() -> SandboxProviderRegistry:
@@ -691,19 +697,22 @@ def _execution_environment(request: SandboxExecutionRequest) -> dict[str, str]:
     return env
 
 
-def _drain_stream(stream: Any, output: _BoundedOutput, activity: _OutputActivity) -> None:
-    if stream is None:
-        return
-    try:
-        while True:
-            read = getattr(stream, "read1", stream.read)
-            chunk = read(64 * 1024)
-            if not chunk:
-                return
-            output.append(chunk)
+def _drain_ready_streams(
+    stream_selector: selectors.BaseSelector,
+    timeout: float,
+    activity: _OutputActivity,
+) -> bool:
+    drained = False
+    for key, _ in stream_selector.select(timeout=max(0.0, timeout)):
+        chunk = os.read(key.fd, 64 * 1024)
+        if chunk:
+            key.data.append(chunk)
             activity.record()
-    finally:
-        stream.close()
+            drained = True
+        else:
+            stream_selector.unregister(key.fileobj)
+            key.fileobj.close()
+    return drained
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:

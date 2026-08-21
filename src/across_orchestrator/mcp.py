@@ -31,12 +31,9 @@ def _loop_action_plan_item_schema() -> dict[str, Any]:
         "type": "string",
         "description": (
             "One loop action type. Use built-in actions or host-declared read-only check actions "
-            "ending in _check such as business_contract_check. Object actionPlan entries are invalid."
+            "ending in _check such as business_contract_check. Object actionPlan entries are invalid. "
+            "The runtime performs the authoritative built-in and *_check validation."
         ),
-        "anyOf": [
-            {"enum": sorted(SUPPORTED_LOOP_ACTION_TYPES)},
-            {"pattern": HOST_DECLARED_CHECK_ACTION_PATTERN.pattern},
-        ],
     }
 
 
@@ -167,19 +164,10 @@ def agent_plugin_manifest_schema() -> dict[str, Any]:
                 "type": "array",
                 "description": "Flat capability list. Each item may be a string id or an object with id, kind, risk, description.",
                 "items": {
-                    "anyOf": [
-                        {"type": "string"},
-                        {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "kind": {"type": "string"},
-                                "risk": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["id"],
-                        },
-                    ]
+                    "description": (
+                        "String id or capability object with id, kind, risk, and description. "
+                        "The runtime performs the authoritative item-shape validation."
+                    ),
                 },
             },
             "entrypoints": {
@@ -1151,8 +1139,28 @@ def response(message_id: Any, result: Any = None, error: str | None = None) -> d
     return payload
 
 
-def emit_stdio_response(message_id: Any, result: Any = None, error: str | None = None, stdout_fd: int | None = None) -> None:
-    payload = redact_sensitive_value(response(message_id, result=result, error=error))
+def _redact_code_owned_schema_value(value: Any) -> Any:
+    """Redact secret-looking scalar strings without changing JSON Schema node shapes."""
+
+    if isinstance(value, dict):
+        return {str(key): _redact_code_owned_schema_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_code_owned_schema_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_value(value)
+    return value
+
+
+def emit_stdio_response(
+    message_id: Any,
+    result: Any = None,
+    error: str | None = None,
+    stdout_fd: int | None = None,
+    *,
+    code_owned_schema: bool = False,
+) -> None:
+    raw_payload = response(message_id, result=result, error=error)
+    payload = _redact_code_owned_schema_value(raw_payload) if code_owned_schema else redact_sensitive_value(raw_payload)
     target_fd = sys.stdout.fileno() if stdout_fd is None else stdout_fd
     os.write(target_fd, json.dumps(payload).encode("utf-8", errors="replace"))
     os.write(target_fd, b"\n")
@@ -1186,7 +1194,7 @@ def main() -> int:
                 result = text_result(handle_tool_call(runtime, params.get("name"), params.get("arguments") or {}))
             else:
                 raise ValueError(f"Unsupported method: {method}")
-            emit_stdio_response(message_id, result=result)
+            emit_stdio_response(message_id, result=result, code_owned_schema=method == "tools/list")
         except ValueError as exc:
             emit_stdio_response(message_id, error=str(exc))
         except Exception:

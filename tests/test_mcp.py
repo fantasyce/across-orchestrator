@@ -28,6 +28,54 @@ def agent_plugin_manifest():
     }
 
 
+PORTABLE_DENIED_SCHEMA_KEYWORDS = {
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "dependentSchemas",
+    "patternProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+}
+SCHEMA_MAP_KEYWORDS = {"properties", "$defs", "definitions"}
+SCHEMA_ARRAY_KEYWORDS = {"anyOf", "oneOf", "allOf", "prefixItems"}
+SCHEMA_SINGLE_KEYWORDS = {
+    "additionalProperties",
+    "items",
+    "contains",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "contentSchema",
+}
+
+
+def assert_portable_schema(testcase, node, path="inputSchema"):
+    testcase.assertIsInstance(node, (dict, bool), f"{path} must remain a schema node")
+    if isinstance(node, bool):
+        return
+    testcase.assertFalse(PORTABLE_DENIED_SCHEMA_KEYWORDS.intersection(node), f"{path} contains a denied keyword")
+    for keyword, value in node.items():
+        if keyword in SCHEMA_MAP_KEYWORDS:
+            testcase.assertIsInstance(value, dict, f"{path}.{keyword} must be an object")
+            for child_name, child in value.items():
+                assert_portable_schema(testcase, child, f"{path}.{keyword}.{child_name}")
+        elif keyword in SCHEMA_ARRAY_KEYWORDS:
+            testcase.assertIsInstance(value, list, f"{path}.{keyword} must be an array")
+            for index, child in enumerate(value):
+                assert_portable_schema(testcase, child, f"{path}.{keyword}[{index}]")
+        elif keyword in SCHEMA_SINGLE_KEYWORDS:
+            assert_portable_schema(testcase, value, f"{path}.{keyword}")
+
+
 class McpTests(unittest.TestCase):
     def test_mcp_submit_run_and_fetch_evidence(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -118,6 +166,14 @@ class McpTests(unittest.TestCase):
             self.assertIn("register_external_agent_plugin", tool_names)
             self.assertIn("list_external_agent_plugins", tool_names)
             self.assertIn("get_external_agent_plugin_health", tool_names)
+            tools_by_name = {tool["name"]: tool for tool in responses[1]["result"]["tools"]}
+            for tool_name in (
+                "start_agent_loop",
+                "validate_external_agent_plugin",
+                "register_external_agent_plugin",
+            ):
+                with self.subTest(portable_tool=tool_name):
+                    assert_portable_schema(self, tools_by_name[tool_name]["inputSchema"], tool_name)
             submit_tool = next(tool for tool in responses[1]["result"]["tools"] if tool["name"] == "submit_task")
             submit_properties = submit_tool["inputSchema"]["properties"]
             self.assertIn("agentAdapters", submit_properties)
@@ -509,9 +565,9 @@ class McpTests(unittest.TestCase):
         self.assertIn("business_contract_check", action_plan["description"])
         self.assertIn("turn budget", action_plan["description"])
         self.assertIn("Object actionPlan entries are invalid", action_item["description"])
-        self.assertIn("anyOf", action_item)
-        self.assertIn("memory_search", action_item["anyOf"][0]["enum"])
-        self.assertIn("_check", action_item["anyOf"][1]["pattern"])
+        self.assertEqual(action_item["type"], "string")
+        self.assertNotIn("anyOf", action_item)
+        self.assertIn("authoritative", action_item["description"])
         self.assertEqual(autopilot["required"], ["schema_version", "run_id", "evidence_contract"])
         self.assertEqual(autopilot["properties"]["schema_version"]["enum"], ["across-loop-spec/1.0"])
         self.assertEqual(autopilot["properties"]["evidence_contract"]["enum"], ["across-loop-evidence/1.0"])
@@ -537,7 +593,9 @@ class McpTests(unittest.TestCase):
             "Direct executable argv array",
             validate_manifest["properties"]["entrypoints"]["additionalProperties"]["properties"]["command"]["description"],
         )
-        self.assertEqual(validate_manifest["properties"]["capabilities"]["items"]["anyOf"][1]["required"], ["id"])
+        capability_item = validate_manifest["properties"]["capabilities"]["items"]
+        self.assertNotIn("anyOf", capability_item)
+        self.assertIn("runtime", capability_item["description"])
         self.assertEqual(register_manifest["properties"]["entrypoints"]["additionalProperties"]["properties"]["command"]["type"], "array")
 
     def test_mcp_agent_loop_tools(self):

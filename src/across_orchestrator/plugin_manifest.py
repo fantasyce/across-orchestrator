@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import hashlib
 import json
 import os
 import shutil
@@ -377,6 +378,21 @@ def install_managed_plugin(env: Mapping[str, str] | None = None, *, force: bool 
     manifest_path = plugin_dir / "manifest.json"
     state_path = plugin_dir / "install-state.json"
 
+    if not force and _valid_bundled_native_install(
+        state_path=state_path,
+        entrypoint=venv_dir / "bin" / "across-orchestrator",
+        wrapper=wrapper,
+        manifest_path=manifest_path,
+    ):
+        return {
+            "pluginId": COMPONENT_ID,
+            "installed": True,
+            "pluginDir": str(plugin_dir),
+            "wrapper": str(wrapper),
+            "venv": str(venv_dir),
+            "manifestPath": str(manifest_path),
+        }
+
     if force:
         shutil.rmtree(venv_dir, ignore_errors=True)
 
@@ -419,6 +435,41 @@ def install_managed_plugin(env: Mapping[str, str] | None = None, *, force: bool 
         "venv": str(venv_dir) if entrypoint.is_file() else None,
         "manifestPath": str(manifest_path),
     }
+
+
+def _valid_bundled_native_install(
+    *,
+    state_path: Path,
+    entrypoint: Path,
+    wrapper: Path,
+    manifest_path: Path,
+) -> bool:
+    if not all(path.is_file() for path in (state_path, entrypoint, wrapper, manifest_path)):
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    expected_sha256 = state.get("sha256")
+    if (
+        state.get("runtime") != "bundled_native"
+        or state.get("status") != "installed"
+        or state.get("source") != f"bundle://{COMPONENT_ID}/{__version__}"
+        or not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        return False
+    digest = hashlib.sha256()
+    try:
+        with entrypoint.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest() == expected_sha256
 
 
 def uninstall_managed_plugin(env: Mapping[str, str] | None = None) -> dict:

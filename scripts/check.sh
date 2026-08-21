@@ -31,7 +31,7 @@ PATH_PATTERN='/U''sers/[^[:space:])]+'
 TOKEN_PATTERN='(^|[^A-Za-z0-9_])(gho_''[A-Za-z0-9_]{20,}|sk-''[A-Za-z0-9_-]{20,})'
 SENSITIVE_PATTERN="(${PATH_PATTERN}|${TOKEN_PATTERN})"
 if command -v rg >/dev/null 2>&1; then
-  if rg -n --hidden -g '!.git/**' -g '!*.pyc' "$SENSITIVE_PATTERN" .; then
+  if rg -n --hidden -g '!.git' -g '!.git/**' -g '!*.pyc' "$SENSITIVE_PATTERN" .; then
     echo "Potential secret, private path, or signing metadata found." >&2
     exit 1
   fi
