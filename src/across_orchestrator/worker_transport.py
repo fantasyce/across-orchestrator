@@ -247,11 +247,13 @@ class CoordinatorSessionServer:
                 try:
                     self.coordinator.disconnect_node(node_id, reason=disconnect_reason)
                 except CoordinatorError:
+                    # Disconnect is idempotent when the coordinator already removed the node.
                     pass
             writer.close()
             try:
                 await writer.wait_closed()
             except (ConnectionError, ssl.SSLError):
+                # The peer may close first; local stream cleanup is complete.
                 pass
 
 
@@ -388,7 +390,7 @@ class WorkerSessionClient:
                     execution = await execution_task
                 finally:
                     execution_done.set()
-                    await control_task
+                    _ = await control_task
             finally:
                 if proxy:
                     proxy.close()
@@ -892,7 +894,7 @@ class RelayWorkerSessionClient:
                 execution = await execution_task
             finally:
                 execution_done.set()
-                await control_task
+                _ = await control_task
         finally:
             if proxy:
                 proxy.close()
@@ -1104,11 +1106,12 @@ class UnixSocketModelGateway:
     def _invoke(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         if not self.socket_path.is_socket():
             raise WorkerTransportError("AAA model gateway socket is unavailable")
+        socket_path = self.socket_path
 
         class Connection(http.client.HTTPConnection):
-            def connect(connection_self) -> None:
-                connection_self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                connection_self.sock.connect(str(self.socket_path))
+            def connect(self) -> None:
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.connect(str(socket_path))
 
         connection = Connection("localhost", timeout=65)
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1171,6 +1174,7 @@ def _tls_peer_identity(writer: asyncio.StreamWriter) -> dict[str, str]:
             if value.startswith(prefix) and value[len(prefix) :]
         )
     except x509.ExtensionNotFound:
+        # Common Name is the supported fallback when SAN is absent.
         pass
     candidates.update(
         value.value

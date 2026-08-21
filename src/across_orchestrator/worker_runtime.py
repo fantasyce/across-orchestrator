@@ -20,8 +20,8 @@ import pwd
 import psutil
 
 from . import __version__
-from .coordinator import CoordinatorError, safe_cleanup_plan
-from .worker_protocol import ArtifactDescriptor, CapabilityManifest, JobLease, JobManifest, ProtocolError, canonical_json, new_protocol_id, normalize_relative_path, payload_hash, sanitize_public
+from .coordinator import safe_cleanup_plan
+from .worker_protocol import ArtifactDescriptor, CapabilityManifest, JobLease, JobManifest, ProtocolError, canonical_json, new_protocol_id, normalize_relative_path, sanitize_public
 
 
 WORKER_VERSION = __version__
@@ -527,11 +527,13 @@ def _apply_resource_limits(budgets: Mapping[str, Any]) -> None:
         try:
             resource.setrlimit(resource_id, limits)
         except (ValueError, OSError):
+            # Unsupported host limits remain bounded by the other active controls.
             pass
     if sys.platform != "darwin":
         try:
             resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
         except (ValueError, OSError):
+            # Some hosts reject address-space limits; other sandbox controls remain active.
             pass
 
 
@@ -579,7 +581,7 @@ def _sandboxed_command(manifest: JobManifest, sandbox: Path, environment: Mappin
         ]
         lines.extend(
             f"(deny file-read* (subpath {json.dumps(str(root))}))"
-            for root in sorted(denied_roots, key=lambda item: str(item))
+            for root in sorted(denied_roots, key=str)
         )
         lines.append(f"(allow file-write* (subpath {quoted_sandbox}))")
         if network_mode == "allowlist":
@@ -683,6 +685,7 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
+        # The process group exited after TERM and before the KILL fallback.
         pass
 
 

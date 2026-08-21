@@ -8,7 +8,6 @@ import json
 import os
 import platform
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -21,7 +20,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -207,8 +206,6 @@ def relay_main(argv: Sequence[str] | None = None) -> int:
                 await asyncio.Event().wait()
             finally:
                 await server.close()
-
-        import asyncio
 
         asyncio.run(serve())
         return 0
@@ -495,6 +492,7 @@ def run_worker(root: Path, *, once: bool = False, poll_seconds: float = 2.0) -> 
                     _atomic_json(root / "state" / "runtime.json", state)
                     continue
                 except ValueError:
+                    # An invalid fallback is ignored in favor of normal reconnect handling.
                     pass
             state.update(
                 {

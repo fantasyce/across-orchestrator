@@ -24,11 +24,9 @@ from cryptography.x509.oid import NameOID
 
 from across_orchestrator.coordinator import CoordinatorError, WorkerCoordinator
 from across_orchestrator.relay import AsyncRelayServer, RelayEndpoint, RelayFrame, RelayRouter, create_tls_context, open_relay_payload, seal_relay_payload
-from across_orchestrator.worker_cli import apply_transport_directive, create_join_request, install_worker, install_worker_pack, leave_worker, list_worker_packs, remove_worker_pack, rollback_worker, uninstall_worker, update_worker, worker_status
+from across_orchestrator.worker_cli import _identity_renewal_due, _renew_identity_once, apply_transport_directive, create_join_request, install_worker, install_worker_pack, leave_worker, list_worker_packs, remove_worker_pack, rollback_worker, uninstall_worker, update_worker, worker_status
 from across_orchestrator.worker_protocol import (
     ArtifactDescriptor,
-    CAPABILITY_SCHEMA,
-    JOB_SCHEMA,
     CapabilityManifest,
     JobEvent,
     JobLease,
@@ -36,7 +34,6 @@ from across_orchestrator.worker_protocol import (
     ProtocolError,
     build_evidence_receipt,
     canonical_json,
-    new_protocol_id,
     payload_hash,
     sanitize_public,
 )
@@ -44,7 +41,6 @@ from across_orchestrator.worker_runtime import BoundedProcessExecutor, ChunkedAr
 from across_orchestrator.worker_store import WorkerControlStore
 from across_orchestrator.worker_control_command import handle_worker_control_command, serve_worker_control
 from across_orchestrator.worker_transport import CoordinatorSessionServer, RelayCoordinatorSession, RelayWorkerSessionClient, WorkerSessionClient, WorkerTransportError, _model_grant_ttl_seconds, tls_client_context, tls_server_context
-import across_orchestrator.worker_cli as worker_cli_module
 
 
 class Clock:
@@ -91,7 +87,7 @@ async def test_worker_control_server_round_trip_uses_private_socket(tmp_path):
     finally:
         server_task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await server_task
+            _ = await server_task
     assert not socket_path.exists()
 
 
@@ -380,10 +376,8 @@ def test_nw_030_033_039_040_043_048_049_bounded_executor_and_cleanup(tmp_path):
         "import json,os,pathlib; p=pathlib.Path(os.environ['ACROSS_OUTPUT_DIR'])/'result.json'; p.write_text(json.dumps({'home':os.environ['HOME'],'network':os.environ['ACROSS_NETWORK_POLICY'],'worker_python':os.environ['ACROSS_WORKER_PYTHON']}))",
     )
     job = manifest(command_argv=command, expected_outputs=("result.json",), cleanup_policy={"retention_seconds": 0})
-    lease = approved_coordinator(tmp_path / "coordinator").submit_job(job)
+    approved_coordinator(tmp_path / "coordinator").submit_job(job)
     # Runtime needs only the lease binding; the coordinator lifecycle is tested separately.
-    from across_orchestrator.worker_protocol import JobLease
-
     runtime_lease = JobLease(
         lease_id="lease-runtime", job_id=job.job_id, run_id=job.run_id, node_id="node-test",
         attempt=1, manifest_hash=job.manifest_hash, issued_at=time.time(), expires_at=time.time() + 60, heartbeat_interval_seconds=10,
@@ -1037,8 +1031,8 @@ def test_worker_renews_identity_automatically_before_or_after_expiry(tmp_path, m
     node = json.loads(node_path.read_text())
     node.update({"identity_generation": 1, "certificate_not_after": time.time() - 1})
     node_path.write_text(json.dumps(node), encoding="utf-8")
-    assert worker_cli_module._identity_renewal_due(node)
-    assert not worker_cli_module._identity_renewal_due({**node, "certificate_not_after": time.time() + 8 * 24 * 60 * 60})
+    assert _identity_renewal_due(node)
+    assert not _identity_renewal_due({**node, "certificate_not_after": time.time() + 8 * 24 * 60 * 60})
 
     observed = {}
 
@@ -1076,9 +1070,9 @@ def test_worker_renews_identity_automatically_before_or_after_expiry(tmp_path, m
         node_path.write_text(json.dumps(refreshed), encoding="utf-8")
         return {"status": "activated", "node_id": "node-renewal"}
 
-    monkeypatch.setattr(worker_cli_module, "_enrollment_post", fake_post)
-    monkeypatch.setattr(worker_cli_module, "activate_worker", fake_activate)
-    renewed = worker_cli_module._renew_identity_once(root)
+    monkeypatch.setattr("across_orchestrator.worker_cli._enrollment_post", fake_post)
+    monkeypatch.setattr("across_orchestrator.worker_cli.activate_worker", fake_activate)
+    renewed = _renew_identity_once(root)
     assert renewed["status"] == "activated"
     assert observed["url"] == "https://127.0.0.1:39445/v1/identity/renew"
     assert observed["payload"]["current_generation"] == 1

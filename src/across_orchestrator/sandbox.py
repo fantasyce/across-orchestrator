@@ -52,9 +52,11 @@ class SandboxProvider(Protocol):
 
     provider_id: str
 
-    def capabilities(self) -> dict[str, Any]: ...
+    def capabilities(self) -> dict[str, Any]:
+        raise NotImplementedError
 
-    def execute(self, request: SandboxExecutionRequest) -> dict[str, Any]: ...
+    def execute(self, request: SandboxExecutionRequest) -> dict[str, Any]:
+        raise NotImplementedError
 
 
 class SandboxProviderRegistry:
@@ -395,7 +397,6 @@ def evaluate_sandbox_policy(
             runtime_state_roots,
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        runtime_state_files = []
         blocked_reasons.append(str(exc))
         checks.append(_check("runtime_state_files", False, reason=str(exc)))
     else:
@@ -730,6 +731,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # The process group exited between the TERM and KILL attempts.
             pass
 
 

@@ -54,6 +54,7 @@ async def serve_worker_control(socket_path: str | Path, coordinator: WorkerCoord
         try:
             path.unlink()
         except FileNotFoundError:
+            # Another shutdown path may already have removed the socket.
             pass
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Mapping
 import asyncio
 import base64
 import json
@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.x509.oid import NameOID
 
-from .worker_protocol import ProtocolError, canonical_json, require_identifier, sanitize_public
+from .worker_protocol import ProtocolError, canonical_json, require_identifier
 
 
 RELAY_SCHEMA = "across-relay-frame/1.0"
@@ -322,6 +322,7 @@ class AsyncRelayServer:
             try:
                 await writer.wait_closed()
             except ConnectionError:
+                # The peer may already be gone; local cleanup is complete.
                 pass
 
 
@@ -372,6 +373,7 @@ class RelayEndpoint:
             try:
                 await self.writer.wait_closed()
             except (ConnectionError, ssl.SSLError):
+                # Closing an already-failed TLS stream is best-effort.
                 pass
         self.reader = None
         self.writer = None
@@ -436,6 +438,7 @@ def _tls_peer_identity(writer: asyncio.StreamWriter) -> dict[str, str]:
                 if value.startswith(prefix) and value[len(prefix) :]:
                     candidates.add(value[len(prefix) :])
     except x509.ExtensionNotFound:
+        # Common Name is the supported fallback when SAN is absent.
         pass
     candidates.update(
         attribute.value
