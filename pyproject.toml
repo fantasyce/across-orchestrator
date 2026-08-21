@@ -8,7 +8,7 @@ version = "0.10.7"
 description = "Local-first task orchestration runtime for agent-to-agent delivery work."
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=42.0",
+  "cryptography>=50.0.0",
   "psutil>=5.9",
 ]
 license = "MIT"
