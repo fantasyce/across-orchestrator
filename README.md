@@ -44,6 +44,12 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.7` publishes portable MCP tool schemas that strict hosts can consume,
+preserves host-managed plugin provenance across runtime calls, and refreshes
+sandbox idle timeouts from actual stdout/stderr activity without weakening the
+maximum wall-clock limit. Its regression suite also covers simultaneous
+stdout/stderr backpressure and linked-worktree release scans.
+
 `v0.10.5` makes the Worker status surface follow the atomically activated
 runtime version after an update or rollback, instead of continuing to show the
 original bootstrap installation version.
@@ -327,11 +333,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.5"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.7"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.5` release additionally
+hosts can install from the pinned tag. The `v0.10.7` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
