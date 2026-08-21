@@ -282,7 +282,7 @@ class SandboxPolicyTests(unittest.TestCase):
                     "execution": {
                         "timeout_seconds": 0.5,
                         "refresh_timeout_on_output": True,
-                        "max_wall_timeout_seconds": 4,
+                        "max_wall_timeout_seconds": 8,
                     },
                 },
                 command=command,
