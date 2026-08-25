@@ -44,6 +44,11 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.11` keeps read-only agent reports in Orchestrator-owned task storage,
+so hosts can display and review results without forcing agents to modify the
+inspected project. Managed report paths and hashes are revalidated when
+evidence is read, and invalid or tampered records fail closed.
+
 `v0.10.10` resolves the outstanding CodeQL quality findings in the Worker,
 Relay, sandbox, and test surfaces without changing their public contracts.
 
@@ -344,11 +349,11 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.10"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.11"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.10` release additionally
+hosts can install from the pinned tag. The `v0.10.11` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.
