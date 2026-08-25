@@ -121,7 +121,6 @@ def build_quality(task: Task) -> dict[str, Any]:
 
 
 def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str, Any]:
-    required = list(task.contract.get("requiredArtifacts", []))
     artifacts = task_artifact_records(task)
     quality = build_quality(task)
     bundle = {
