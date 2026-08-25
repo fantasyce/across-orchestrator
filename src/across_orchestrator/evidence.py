@@ -32,6 +32,42 @@ def artifact_record(project_root: str, path: str) -> dict[str, Any]:
     }
 
 
+def task_artifact_records(task: Task) -> list[dict[str, Any]]:
+    required = list(task.contract.get("requiredArtifacts", []))
+    if task.metadata.get("artifact_delivery_mode") != "managed_read_only":
+        return [artifact_record(task.project_root, path) for path in required]
+
+    managed = task.metadata.get("managed_artifacts") or {}
+    root_value = str(task.metadata.get("managed_artifact_root") or "")
+    root = Path(root_value).resolve() if root_value else None
+    root_is_valid = bool(root and root.name == task.task_id and root.parent.name == "artifacts")
+    records: list[dict[str, Any]] = []
+    for path in required:
+        item = dict(managed.get(path) or {})
+        parts = [part for part in str(path).replace("\\", "/").lstrip("/").split("/") if part and part != "."]
+        if not root_is_valid or not parts or any(part == ".." for part in parts):
+            records.append({"path": path, "present": False, "fresh": False, "error": "invalid_managed_path"})
+            continue
+        target = (root / "/".join(parts)).resolve()
+        if root not in target.parents or not target.is_file():
+            records.append({"path": path, "present": False, "fresh": False})
+            continue
+        data = target.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        expected_path = str(item.get("storage_path") or "")
+        valid = expected_path == str(target) and digest == str(item.get("sha256") or "")
+        records.append({
+            "path": path,
+            "storage_path": str(target),
+            "present": valid,
+            "fresh": True,
+            "size": len(data),
+            "sha256": digest,
+            "source": "managed_read_only",
+        })
+    return records
+
+
 def build_quality(task: Task) -> dict[str, Any]:
     app_grade = task.metadata.get("app_grade") or {}
     if app_grade.get("quality_report"):
@@ -44,7 +80,7 @@ def build_quality(task: Task) -> dict[str, Any]:
             summary="App-grade quality report.",
         )
     required = list(task.contract.get("requiredArtifacts", []))
-    artifacts = [artifact_record(task.project_root, path) for path in required]
+    artifacts = task_artifact_records(task)
     present = [artifact for artifact in artifacts if artifact.get("present")]
     missing = [artifact["path"] for artifact in artifacts if not artifact.get("present")]
     if task.metadata.get("execution_mode") == "reference_delivery":
@@ -86,7 +122,7 @@ def build_quality(task: Task) -> dict[str, Any]:
 
 def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str, Any]:
     required = list(task.contract.get("requiredArtifacts", []))
-    artifacts = [artifact_record(task.project_root, path) for path in required]
+    artifacts = task_artifact_records(task)
     quality = build_quality(task)
     bundle = {
         "schema_version": "0.1",
