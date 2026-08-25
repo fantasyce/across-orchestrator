@@ -31,6 +31,7 @@ class LocalStore:
         self.loops_dir = self.home / "loops"
         self.loop_events_dir = self.home / "loop-events"
         self.loop_cancel_requests_dir = self.home / "loop-cancel-requests"
+        self.artifacts_dir = self.home / "artifacts"
         self.locks_dir = self.home / "locks"
         self.init()
 
@@ -40,6 +41,7 @@ class LocalStore:
         self.loops_dir.mkdir(parents=True, exist_ok=True)
         self.loop_events_dir.mkdir(parents=True, exist_ok=True)
         self.loop_cancel_requests_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.locks_dir.mkdir(parents=True, exist_ok=True)
 
     def save_task(self, task: Task) -> None:

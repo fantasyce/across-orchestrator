@@ -376,6 +376,120 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("subtask.completed", event_types)
         self.assertIn("task.completed", event_types)
 
+    def test_read_only_adapter_report_is_managed_without_mutating_project(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        source = self.project / "README.md"
+        source.write_text("original project content\n", encoding="utf-8")
+        original = source.read_bytes()
+        agent_script = self.project / "read_only_adapter.py"
+        agent_script.write_text(
+            "import json\nprint(json.dumps({'output': '# Review\\n\\nNo project changes were made.'}))\n",
+            encoding="utf-8",
+        )
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Review the project without changing files",
+            project_root=str(self.project),
+            deliverables=["across-results/task-review.md"],
+            agent="review-agent",
+            agent_adapters={
+                "review-agent": {
+                    "type": "command",
+                    "command": [sys.executable, str(agent_script)],
+                }
+            },
+            metadata={"intent_mode": "read_only_analysis", "require_fresh_artifacts": False},
+        )
+
+        completed = runtime.run_task(task.task_id)
+        evidence = runtime.evidence_bundle(task.task_id)
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertFalse((self.project / "across-results/task-review.md").exists())
+        self.assertEqual(evidence["quality"]["status"], "passed")
+        self.assertEqual(evidence["artifacts"][0]["source"], "managed_read_only")
+        managed_path = Path(evidence["artifacts"][0]["storage_path"])
+        self.assertTrue(managed_path.is_file())
+        self.assertIn("No project changes", managed_path.read_text(encoding="utf-8"))
+
+    def test_read_only_managed_artifact_path_cannot_escape_task_storage(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "read_only_adapter.py"
+        agent_script.write_text("print('bounded report')\n", encoding="utf-8")
+        runtime = OrchestratorRuntime()
+        with self.assertRaisesRegex(ValueError, "deliverable path must stay inside project root"):
+            runtime.submit_task(
+                goal="Review without changing files",
+                project_root=str(self.project),
+                deliverables=["../escaped.md"],
+                agent="review-agent",
+                agent_adapters={
+                    "review-agent": {
+                        "type": "command",
+                        "command": [sys.executable, str(agent_script)],
+                    }
+                },
+                metadata={"intent_mode": "read_only_analysis"},
+            )
+        self.assertFalse((self.project.parent / "escaped.md").exists())
+
+    def test_tampered_managed_read_only_artifact_fails_evidence_integrity(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "read_only_adapter.py"
+        agent_script.write_text("print('original report')\n", encoding="utf-8")
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Review without changing files",
+            project_root=str(self.project),
+            deliverables=["review.md"],
+            agent="review-agent",
+            agent_adapters={
+                "review-agent": {
+                    "type": "command",
+                    "command": [sys.executable, str(agent_script)],
+                }
+            },
+            metadata={"intent_mode": "read_only_analysis"},
+        )
+        self.assertEqual(runtime.run_task(task.task_id).status, "completed")
+        managed_path = Path(runtime.evidence_bundle(task.task_id)["artifacts"][0]["storage_path"])
+        managed_path.write_text("tampered\n", encoding="utf-8")
+
+        evidence = runtime.evidence_bundle(task.task_id)
+
+        self.assertFalse(evidence["artifacts"][0]["present"])
+        self.assertEqual(evidence["quality"]["status"], "failed")
+
+    def test_empty_read_only_adapter_report_fails_task_without_project_artifact(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "empty_adapter.py"
+        agent_script.write_text("pass\n", encoding="utf-8")
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Review without changing files",
+            project_root=str(self.project),
+            deliverables=["review.md"],
+            agent="review-agent",
+            agent_adapters={
+                "review-agent": {
+                    "type": "command",
+                    "command": [sys.executable, str(agent_script)],
+                }
+            },
+            metadata={"intent_mode": "read_only_analysis"},
+        )
+
+        completed = runtime.run_task(task.task_id)
+
+        self.assertEqual(completed.status, "failed")
+        self.assertFalse((self.project / "review.md").exists())
+        self.assertIn("no report content", str(completed.subtasks[0].error))
+
     def test_run_task_fails_when_non_demo_agent_has_no_adapter(self):
         from across_orchestrator.runtime import OrchestratorRuntime
 

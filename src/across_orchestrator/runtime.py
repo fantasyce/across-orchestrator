@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,52 @@ from .store import LocalStore
 
 
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _persist_managed_adapter_artifact(
+    store: LocalStore,
+    task: Task,
+    subtask: SubTask,
+    result: Any,
+) -> None:
+    relative = str(subtask.path or "").replace("\\", "/").lstrip("/")
+    parts = [part for part in relative.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("managed artifact path is unsafe")
+    root = (store.artifacts_dir / task.task_id).resolve()
+    target = (root / "/".join(parts)).resolve()
+    if root not in target.parents:
+        raise ValueError("managed artifact path escaped task storage")
+    message = str(result.get("message") or "") if isinstance(result, dict) else str(result or "")
+    content = _adapter_report_content(message)
+    if not content.strip():
+        raise ValueError("read-only adapter returned no report content")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(content.rstrip() + "\n", encoding="utf-8")
+    os.replace(temporary, target)
+    data = target.read_bytes()
+    task.metadata["managed_artifact_root"] = str(root)
+    task.metadata.setdefault("managed_artifacts", {})[relative] = {
+        "path": relative,
+        "storage_path": str(target),
+        "present": True,
+        "fresh": True,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "source": "command_adapter_inline",
+    }
+
+
+def _adapter_report_content(stdout: str) -> str:
+    for line in reversed(str(stdout or "").splitlines()):
+        try:
+            payload = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and str(payload.get("output") or "").strip():
+            return str(payload["output"])
+    return str(stdout or "")
 
 
 def _resolve_project_root(project_root: str) -> Path:
@@ -106,6 +154,8 @@ class OrchestratorRuntime:
         host_metadata = dict(metadata or {})
         if host_metadata:
             task.metadata["host_metadata"] = host_metadata
+        if str(host_metadata.get("intent_mode") or "").strip().lower() == "read_only_analysis":
+            task.metadata["artifact_delivery_mode"] = "managed_read_only"
         execution_contract = host_metadata.get("execution_contract")
         remote_managed = (
             isinstance(execution_contract, dict)
@@ -463,6 +513,8 @@ class OrchestratorRuntime:
             result = adapter.run(task, subtask, cancellation=cancellation)
             if cancellation is not None:
                 cancellation.raise_if_cancelled()
+            if task.metadata.get("artifact_delivery_mode") == "managed_read_only":
+                _persist_managed_adapter_artifact(self.store, task, subtask, result)
         except ActionCancelledError as exc:
             cancel_category = normalize_cancel_category(exc.category, exc.reason)
             subtask.status = "cancelled"
