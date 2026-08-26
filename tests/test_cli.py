@@ -24,7 +24,7 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def run_cli(self, *args):
+    def run_cli(self, *args, input_text=None):
         return subprocess.run(
             [sys.executable, "-m", "across_orchestrator.cli", *args],
             cwd=self.root,
@@ -32,7 +32,30 @@ class CliTests(unittest.TestCase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            input=input_text,
             check=False,
+        )
+
+    def test_worker_control_protocol_errors_use_stable_contract_payload(self):
+        result = self.run_cli(
+            "worker-control",
+            input_text=json.dumps(
+                {
+                    "schema_version": "unsupported/1.0",
+                    "action": "snapshot",
+                    "payload": {},
+                }
+            ),
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "status": "error",
+                "code": "worker_protocol_rejected",
+                "category": "contract",
+            },
         )
 
     def test_cli_submit_run_and_inspect_task(self):

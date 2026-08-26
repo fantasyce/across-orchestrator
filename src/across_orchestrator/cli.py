@@ -751,11 +751,11 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(request, dict):
                 raise ValueError("worker control request must be a JSON object")
             result = handle_worker_control_command(request)
-        except (json.JSONDecodeError, ValueError) as exc:
-            _print({"status": "error", "error": str(exc)}, True)
-            return 2
         except (CoordinatorError, ProtocolError) as exc:
             _print(worker_control_error_payload(exc), True)
+            return 2
+        except (json.JSONDecodeError, ValueError) as exc:
+            _print({"status": "error", "error": str(exc)}, True)
             return 2
         _print(result, True)
         return 0
