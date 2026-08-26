@@ -39,7 +39,7 @@ from across_orchestrator.worker_protocol import (
 )
 from across_orchestrator.worker_runtime import BoundedProcessExecutor, ChunkedArtifactReceiver, WORKER_VERSION
 from across_orchestrator.worker_store import WorkerControlStore
-from across_orchestrator.worker_control_command import handle_worker_control_command, serve_worker_control
+from across_orchestrator.worker_control_command import handle_worker_control_command, serve_worker_control, worker_control_error_payload
 from across_orchestrator.worker_transport import CoordinatorSessionServer, RelayCoordinatorSession, RelayWorkerSessionClient, WorkerSessionClient, WorkerTransportError, _model_grant_ttl_seconds, tls_client_context, tls_server_context
 
 
@@ -873,6 +873,12 @@ def test_security_model_grant_rejects_wrong_binding_scope_audience_and_expiry(tm
         coordinator.consume_model_grant(grant.grant_id, **base)
 
 
+def test_model_grant_budget_errors_have_a_stable_policy_category():
+    assert worker_control_error_payload(CoordinatorError("model grant token budget exceeded")) == {
+        "status": "error",
+        "code": "model_grant_token_budget_exceeded",
+        "category": "policy",
+    }
 def test_security_rejects_false_isolation_symlink_artifact_archive_escape_and_log_flood(tmp_path):
     assert not capability("node-false", capability_source="self-report", isolation_level="isolated", executors=("oci-container",)).supports({"isolation_level": "isolated"})
     from across_orchestrator.worker_protocol import JobLease

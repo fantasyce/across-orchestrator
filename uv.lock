@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "across-orchestrator"
-version = "0.10.11"
+version = "0.10.12"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

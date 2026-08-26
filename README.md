@@ -44,6 +44,11 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.10.12` rejects pre-existing artifacts when a task requires fresh output,
+prevents local deliveries from claiming unrecorded remote Worker execution,
+separates structural delivery success from pending human semantic review, and
+returns stable policy categories for Worker-control budget errors.
+
 `v0.10.11` keeps read-only agent reports in Orchestrator-owned task storage,
 so hosts can display and review results without forcing agents to modify the
 inspected project. Managed report paths and hashes are revalidated when
@@ -349,11 +354,14 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.11"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.12"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.11` release additionally
+hosts can install from the pinned tag. The `v0.10.12` release retains the
+checksummed Worker source bundles and multi-architecture relay container from
+`v0.10.11`; those assets are remote execution components, not a notarized
+macOS application. The `v0.10.11` release additionally
 publishes checksummed Worker source bundles for macOS and Linux plus a
 multi-architecture relay container. Those assets are remote execution
 components, not a notarized macOS application.

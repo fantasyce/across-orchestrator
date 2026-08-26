@@ -8,7 +8,7 @@ import json
 import os
 import stat
 
-from .coordinator import WorkerCoordinator
+from .coordinator import CoordinatorError, WorkerCoordinator
 from .worker_protocol import CapabilityManifest, JobEvent, JobManifest, ProtocolError
 
 
@@ -35,8 +35,10 @@ async def serve_worker_control(socket_path: str | Path, coordinator: WorkerCoord
             if not isinstance(request, dict):
                 raise ValueError("worker control request must be an object")
             response = handle_worker_control_command(request, runtime)
+        except (CoordinatorError, ProtocolError, ValueError) as exc:
+            response = worker_control_error_payload(exc)
         except Exception:
-            response = {"status": "error", "error": "worker_control_request_rejected"}
+            response = {"status": "error", "code": "worker_control_request_rejected", "category": "internal"}
         encoded = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         writer.write(encoded)
         await writer.drain()
@@ -198,3 +200,22 @@ def _object(payload: Mapping[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ProtocolError(f"{key} must be an object")
     return dict(value)
+
+
+def worker_control_error_payload(error: Exception) -> dict[str, str]:
+    message = str(error or "").lower()
+    if "model grant" in message and "budget" in message:
+        if "token" in message:
+            code = "model_grant_token_budget_exceeded"
+        elif "call" in message:
+            code = "model_grant_call_budget_exceeded"
+        elif "concurrency" in message:
+            code = "model_grant_concurrency_budget_exceeded"
+        else:
+            code = "model_grant_budget_exceeded"
+        return {"status": "error", "code": code, "category": "policy"}
+    if "model grant" in message:
+        return {"status": "error", "code": "model_grant_rejected", "category": "policy"}
+    if isinstance(error, ProtocolError):
+        return {"status": "error", "code": "worker_protocol_rejected", "category": "contract"}
+    return {"status": "error", "code": "worker_operation_rejected", "category": "operation"}

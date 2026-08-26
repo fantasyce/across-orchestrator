@@ -74,6 +74,22 @@ def _adapter_report_content(stdout: str) -> str:
     return str(stdout or "")
 
 
+def _artifact_baseline(root: Path, paths: list[str]) -> dict[str, dict[str, Any]]:
+    baseline: dict[str, dict[str, Any]] = {}
+    resolved_root = root.resolve()
+    for raw_path in paths:
+        path = str(raw_path or "").replace("\\", "/").lstrip("/")
+        target = (resolved_root / path).resolve()
+        if not path or resolved_root not in target.parents or not target.is_file():
+            continue
+        data = target.read_bytes()
+        baseline[path] = {
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return baseline
+
+
 def _resolve_project_root(project_root: str) -> Path:
     text = str(project_root or "").strip()
     if not text or "\x00" in text:
@@ -154,6 +170,8 @@ class OrchestratorRuntime:
         host_metadata = dict(metadata or {})
         if host_metadata:
             task.metadata["host_metadata"] = host_metadata
+        if host_metadata.get("require_fresh_artifacts") is True:
+            task.metadata["artifact_baseline"] = _artifact_baseline(root, paths)
         if str(host_metadata.get("intent_mode") or "").strip().lower() == "read_only_analysis":
             task.metadata["artifact_delivery_mode"] = "managed_read_only"
         execution_contract = host_metadata.get("execution_contract")

@@ -436,6 +436,99 @@ class RuntimeTests(unittest.TestCase):
             )
         self.assertFalse((self.project.parent / "escaped.md").exists())
 
+    def test_preexisting_declared_output_does_not_pass_freshness_gate(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        source = self.project / "README.md"
+        source.write_text("pre-existing output\n", encoding="utf-8")
+        agent_script = self.project / "no_change_adapter.py"
+        agent_script.write_text("print('completed without changes')\n", encoding="utf-8")
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Produce a new README delivery",
+            project_root=str(self.project),
+            deliverables=["README.md"],
+            agent="no-change-agent",
+            agent_adapters={
+                "no-change-agent": {
+                    "type": "command",
+                    "command": [sys.executable, str(agent_script)],
+                }
+            },
+            metadata={"intent_mode": "delivery", "require_fresh_artifacts": True},
+        )
+
+        completed = runtime.run_task(task.task_id)
+        evidence = runtime.evidence_bundle(task.task_id)
+
+        self.assertEqual(completed.status, "failed")
+        self.assertEqual(evidence["quality"]["status"], "failed")
+        self.assertEqual(evidence["quality"]["stale_artifacts"], ["README.md"])
+
+    def test_local_delivery_cannot_claim_unrecorded_remote_worker_execution(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "fabricated_remote_claim.py"
+        agent_script.write_text(
+            "import json\nprint(json.dumps({'output': 'We used a remote Worker to execute and produce this report.'}))\n",
+            encoding="utf-8",
+        )
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Return an evidence-bound report",
+            project_root=str(self.project),
+            deliverables=["across-results/task-review.md"],
+            agent="review-agent",
+            agent_adapters={"review-agent": {"type": "command", "command": [sys.executable, str(agent_script)]}},
+            metadata={
+                "intent_mode": "read_only_analysis",
+                "require_fresh_artifacts": False,
+                "semantic_review_required": True,
+                "execution_contract": {"route": "local"},
+            },
+        )
+
+        completed = runtime.run_task(task.task_id)
+        quality = runtime.evidence_bundle(task.task_id)["quality"]
+
+        self.assertEqual(completed.status, "failed")
+        self.assertIn(
+            "unsupported_remote_worker_claim:across-results/task-review.md",
+            quality["failures"],
+        )
+        self.assertFalse(quality["gates"]["execution_claims_bound_to_evidence"])
+
+    def test_infeasible_analysis_is_completed_with_decision_required_semantics(self):
+        from across_orchestrator.runtime import OrchestratorRuntime
+
+        agent_script = self.project / "blocked_decision.py"
+        agent_script.write_text(
+            "import json\nprint(json.dumps({'output': '# 决策报告\\n\\n当前约束下不可安全执行，需要人工选择取舍。'}))\n",
+            encoding="utf-8",
+        )
+        runtime = OrchestratorRuntime()
+        task = runtime.submit_task(
+            goal="Assess whether the requested operation is feasible",
+            project_root=str(self.project),
+            deliverables=["across-results/task-review.md"],
+            agent="review-agent",
+            agent_adapters={"review-agent": {"type": "command", "command": [sys.executable, str(agent_script)]}},
+            metadata={
+                "intent_mode": "read_only_analysis",
+                "require_fresh_artifacts": False,
+                "semantic_review_required": True,
+                "execution_contract": {"route": "local"},
+            },
+        )
+
+        completed = runtime.run_task(task.task_id)
+        quality = runtime.evidence_bundle(task.task_id)["quality"]
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(quality["analysis_outcome"], "decision_required")
+        self.assertEqual(quality["quality_score"], 70)
+        self.assertEqual(quality["quality_report"]["manual_required_count"], 1)
+
     def test_tampered_managed_read_only_artifact_fails_evidence_integrity(self):
         from across_orchestrator.runtime import OrchestratorRuntime
 
