@@ -16,7 +16,7 @@ from .redaction import redact_sensitive_value
 EVIDENCE_RECEIPT_SCHEMA = "across-evidence-receipt/1.0"
 
 
-def artifact_record(project_root: str, path: str) -> dict[str, Any]:
+def artifact_record(project_root: str, path: str, *, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
     root = Path(project_root).resolve()
     target = (root / path).resolve()
     if not str(target).startswith(str(root)):
@@ -24,18 +24,25 @@ def artifact_record(project_root: str, path: str) -> dict[str, Any]:
     if not target.exists() or not target.is_file():
         return {"path": path, "present": False}
     data = target.read_bytes()
-    return {
+    record = {
         "path": path,
         "present": True,
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+    if baseline:
+        record["fresh"] = not (
+            str(baseline.get("sha256") or "") == record["sha256"]
+            and int(baseline.get("size") or -1) == record["size"]
+        )
+    return record
 
 
 def task_artifact_records(task: Task) -> list[dict[str, Any]]:
     required = list(task.contract.get("requiredArtifacts", []))
     if task.metadata.get("artifact_delivery_mode") != "managed_read_only":
-        return [artifact_record(task.project_root, path) for path in required]
+        baseline = task.metadata.get("artifact_baseline") or {}
+        return [artifact_record(task.project_root, path, baseline=baseline.get(path)) for path in required]
 
     managed = task.metadata.get("managed_artifacts") or {}
     root_value = str(task.metadata.get("managed_artifact_root") or "")
@@ -81,11 +88,12 @@ def build_quality(task: Task) -> dict[str, Any]:
         )
     required = list(task.contract.get("requiredArtifacts", []))
     artifacts = task_artifact_records(task)
-    present = [artifact for artifact in artifacts if artifact.get("present")]
+    present = [artifact for artifact in artifacts if artifact.get("present") and artifact.get("fresh") is not False]
     missing = [artifact["path"] for artifact in artifacts if not artifact.get("present")]
+    stale = [artifact["path"] for artifact in artifacts if artifact.get("present") and artifact.get("fresh") is False]
     if task.metadata.get("execution_mode") == "reference_delivery":
         gates = _reference_delivery_gates(task, artifacts)
-        gates["required_artifacts_present"] = not missing
+        gates["required_artifacts_present"] = not missing and not stale
         gates["no_artifacts_outside_project"] = True
         gates["artifact_integrity"] = not missing
         failed = [key for key, passed in gates.items() if not passed]
@@ -99,25 +107,102 @@ def build_quality(task: Task) -> dict[str, Any]:
             "produced_files": sorted(artifact["path"] for artifact in present),
             "required_files": required,
         }, finding_id="reference_delivery_quality", source_gate="reference_delivery", summary="Reference delivery quality gate.")
+    unsupported_claims = _unsupported_execution_claims(task, artifacts)
+    semantic_review_required = bool((task.metadata.get("host_metadata") or {}).get("semantic_review_required"))
+    analysis_outcome = _analysis_outcome(task, artifacts)
+    hard_failures = [
+        *(f"missing_artifact:{path}" for path in missing),
+        *(f"stale_artifact:{path}" for path in stale),
+        *unsupported_claims,
+    ]
+    structurally_passed = not hard_failures and len(present) == len(required)
+    quality_score = 0 if not structurally_passed else 70 if semantic_review_required else 100
     return enrich_with_finding_state({
-        "status": "passed" if len(present) == len(required) else "failed",
+        "status": "passed" if structurally_passed else "failed",
+        "quality_score": quality_score,
+        "verification_scope": "structural_plus_human_semantic_review" if semantic_review_required else "structural",
+        "analysis_outcome": analysis_outcome,
         "required_artifacts": len(required),
         "present_artifacts": len(present),
         "missing_artifacts": missing,
+        "stale_artifacts": stale,
+        "failures": hard_failures,
         "gates": {
-            "required_artifacts_present": not missing,
+            "required_artifacts_present": not missing and not stale,
+            "required_artifacts_fresh": not stale,
             "no_artifacts_outside_project": True,
+            "execution_claims_bound_to_evidence": not unsupported_claims,
+            "semantic_review_recorded": semantic_review_required,
+        },
+        "quality_report": {
+            "quality_gate": "passed" if structurally_passed else "failed",
+            "can_complete": structurally_passed,
+            "generated_quality_score": quality_score,
+            "final_quality_score": quality_score,
+            "required_failed_count": len(hard_failures),
+            "manual_required_count": 1 if semantic_review_required and structurally_passed else 0,
+            "skipped_required_count": 0,
+            "checks": {
+                "artifact_integrity": not missing and not stale,
+                "execution_claims_bound_to_evidence": not unsupported_claims,
+            },
         },
         "findings": [{
             "id": "task_artifact_quality",
-            "state": "pass" if not missing else "failed",
-            "severity": "info" if not missing else "error",
-            "summary": "Required artifact quality gate passed." if not missing else "Required artifacts are missing.",
+            "state": "pass" if structurally_passed else "failed",
+            "severity": "info" if structurally_passed else "error",
+            "summary": "Structural delivery checks passed; semantic acceptance remains human-reviewed." if structurally_passed and semantic_review_required else "Required artifact quality gate passed." if structurally_passed else "Required artifacts are missing, stale, or contain unsupported execution claims.",
             "source_gate": "required_artifacts",
-            "evidence": {"missing_artifacts": missing, "required_artifacts": required},
-            "suggested_action": None if not missing else "Produce the missing required artifacts.",
+            "evidence": {"missing_artifacts": missing, "stale_artifacts": stale, "unsupported_execution_claims": unsupported_claims, "required_artifacts": required},
+            "suggested_action": None if structurally_passed else "Produce fresh artifacts and remove claims that are not backed by durable execution evidence.",
         }],
     }, finding_id="task_artifact_quality", source_gate="required_artifacts", summary="Required artifact quality gate.")
+
+
+def _unsupported_execution_claims(task: Task, artifacts: list[dict[str, Any]]) -> list[str]:
+    host_metadata = task.metadata.get("host_metadata") or {}
+    execution_contract = host_metadata.get("execution_contract") or {}
+    if str(execution_contract.get("route") or "local").lower() == "worker":
+        return []
+    positive_remote = re.compile(
+        r"(?:\b(?:used|ran|executed|dispatched|delegated|through|via)\b.{0,40}\bremote\s+worker\b)|"
+        r"(?:(?:使用|调用|通过|交给|委派给|由).{0,30}(?:远端|远程).{0,12}(?:worker|工作节点|节点))|"
+        r"(?:\bremote\s+worker\b.{0,30}\b(?:completed|executed|returned|produced)\b)",
+        re.IGNORECASE,
+    )
+    negative = re.compile(r"(?:没有|未|并未|不曾|无法|不能|no|not|without).{0,18}(?:远端|远程|remote).{0,12}(?:worker|工作节点|节点)", re.IGNORECASE)
+    claims: list[str] = []
+    for artifact in artifacts:
+        for line in _artifact_text(task, artifact).splitlines():
+            if positive_remote.search(line) and not negative.search(line):
+                claims.append(f"unsupported_remote_worker_claim:{artifact.get('path')}")
+                break
+    return sorted(set(claims))
+
+
+def _analysis_outcome(task: Task, artifacts: list[dict[str, Any]]) -> str:
+    blocked = re.compile(
+        r"不可安全执行|无法安全执行|不应继续执行|not safe to (?:execute|proceed)|cannot safely (?:execute|proceed)",
+        re.IGNORECASE,
+    )
+    return "decision_required" if any(blocked.search(_artifact_text(task, item)) for item in artifacts) else "delivered"
+
+
+def _artifact_text(task: Task, artifact: dict[str, Any], *, max_bytes: int = 2 * 1024 * 1024) -> str:
+    raw_path = artifact.get("storage_path")
+    if raw_path:
+        target = Path(str(raw_path)).resolve()
+    else:
+        root = Path(task.project_root).resolve()
+        target = (root / str(artifact.get("path") or "")).resolve()
+        if target != root and root not in target.parents:
+            return ""
+    try:
+        if not target.is_file() or target.stat().st_size > max_bytes:
+            return ""
+        return target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def build_evidence_bundle(task: Task, events: list[dict[str, Any]]) -> dict[str, Any]:

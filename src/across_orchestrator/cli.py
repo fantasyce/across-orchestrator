@@ -742,7 +742,9 @@ def main(argv: list[str] | None = None) -> int:
         return mcp_main()
 
     if args.command == "worker-control":
-        from .worker_control_command import handle_worker_control_command
+        from .coordinator import CoordinatorError
+        from .worker_control_command import handle_worker_control_command, worker_control_error_payload
+        from .worker_protocol import ProtocolError
 
         try:
             request = json.loads(sys.stdin.read())
@@ -751,6 +753,9 @@ def main(argv: list[str] | None = None) -> int:
             result = handle_worker_control_command(request)
         except (json.JSONDecodeError, ValueError) as exc:
             _print({"status": "error", "error": str(exc)}, True)
+            return 2
+        except (CoordinatorError, ProtocolError) as exc:
+            _print(worker_control_error_payload(exc), True)
             return 2
         _print(result, True)
         return 0
