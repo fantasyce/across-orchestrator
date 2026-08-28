@@ -29,6 +29,7 @@ from .run_contracts import build_execution_policy_contract, build_replay_plan, b
 from .runtime import OrchestratorRuntime
 from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 from .store import LocalStore
+from .goal_contracts import normalize_goal_contract, stable_goal_hash
 
 
 def _emit_public_text(text: str) -> None:
@@ -278,6 +279,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     health = sub.add_parser("health", help="Probe local runtime health")
     health.add_argument("--json", action="store_true")
+
+    goal_contract = sub.add_parser("goal-contract", help="Normalize a Goal Contract through the installed plugin runtime")
+    goal_contract.add_argument("--contract-json", required=True)
+    goal_contract.add_argument("--json", action="store_true")
 
     install = sub.add_parser("install", help="Prepare generic host MCP registrations")
     install.add_argument("target", choices=["codex", "codex-mcp", "claude", "claude-code", "claude-desktop"])
@@ -716,6 +721,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         _print(render_plugin_health(), args.json)
+        return 0
+
+    if args.command == "goal-contract":
+        try:
+            contract = _json_object_arg(args.contract_json, "--contract-json")
+            normalized = normalize_goal_contract(contract)
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+            return 2
+        _print({
+            "schema_version": "across-goal-contract-probe/1.0",
+            "goal_id": normalized["goal_id"],
+            "goal_revision": normalized["revision"],
+            "criterion_ids": sorted(item["criterion_id"] for item in normalized["acceptance_criteria"]),
+            "evidence_hash": stable_goal_hash(normalized),
+        }, args.json)
         return 0
 
     if args.command == "install":

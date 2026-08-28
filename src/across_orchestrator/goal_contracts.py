@@ -19,6 +19,10 @@ _PROPOSAL_DECISIONS = {"pending", "accepted", "partially_accepted", "rejected", 
 _HOST_OWNED_PATHS = {"/confirmed_by", "/confirmed_at", "/revision", "/goal_id", "/task_id"}
 
 
+def _is_host_owned_path(path: str) -> bool:
+    return any(path == owned or path.startswith(f"{owned}/") for owned in _HOST_OWNED_PATHS)
+
+
 def _normalized_text(value: Any) -> str:
     if value is None:
         return ""
@@ -127,7 +131,7 @@ def normalize_goal_change_proposal(value: Mapping[str, Any]) -> dict[str, Any]:
         if operation.get("op") not in _PROPOSAL_OPERATIONS:
             raise ValueError("proposal operation is invalid")
         path = _required_text(operation.get("path"), "operation path")
-        if not path.startswith("/") or path in _HOST_OWNED_PATHS:
+        if not path.startswith("/") or _is_host_owned_path(path):
             raise ValueError("proposal operation targets host-owned fields")
         if operation.get("op") != "remove" and "value" not in operation:
             raise ValueError("proposal operation value is required")

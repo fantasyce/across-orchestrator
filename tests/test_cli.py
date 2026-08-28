@@ -301,6 +301,38 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest["protocols"]["http"]["loopStart"], "POST /loops")
         self.assertEqual(manifest["protocols"]["http"]["hostConformance"], "POST /host-conformance")
 
+    def test_cli_goal_contract_probe_is_stable(self):
+        contract = {
+            "schema_version": "across-goal-contract/1.0",
+            "goal_id": "goal-cli",
+            "revision": 1,
+            "task_id": "task-cli",
+            "statement": "Verify the installed contract.",
+            "success_outcome": "Every plugin returns the same binding.",
+            "scope": {"includes": ["verification"], "excludes": ["release"]},
+            "acceptance_criteria": [{
+                "criterion_id": "criterion-cli",
+                "description": "The probe is stable.",
+                "required": True,
+                "validator_kind": "contract_test",
+                "review_policy": "automatic",
+                "source": "user_confirmed",
+            }],
+            "dependencies": [],
+            "execution_profile": "orchestrated",
+            "source": "user",
+            "confirmed_by": "human:user",
+            "confirmed_at": "2026-08-28T00:00:00Z",
+            "created_at": "2026-08-28T00:00:00Z",
+        }
+        result = self.run_cli("goal-contract", "--contract-json", json.dumps(contract), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["goal_id"], "goal-cli")
+        self.assertEqual(payload["goal_revision"], 1)
+        self.assertEqual(payload["criterion_ids"], ["criterion-cli"])
+        self.assertRegex(payload["evidence_hash"], r"^[a-f0-9]{64}$")
+
     def test_cli_sandbox_probe_and_evidence_graph(self):
         policy = {
             "network_policy": "none",

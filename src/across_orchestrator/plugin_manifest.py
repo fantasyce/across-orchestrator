@@ -44,6 +44,7 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "contracts": True,
             "evidenceBundles": True,
             "evidenceGraph": True,
+            "goalContractV1": True,
             "sandboxPolicyEvaluation": True,
             "sandboxExecution": True,
             "sandboxProviderRegistry": True,
@@ -143,6 +144,11 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
             "health": {
                 "command": command,
                 "args": ["health", "--json"],
+            },
+            "goalContract": {
+                "command": command,
+                "args": ["goal-contract", "--json"],
+                "schemaVersion": "across-goal-contract/1.0",
             },
             "sdk": {
                 "pythonModule": "across_orchestrator",

@@ -83,6 +83,10 @@ class GoalContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "operation"):
             normalize_goal_change_proposal(proposal)
 
+        proposal["operations"] = [{"op": "add", "path": "/confirmed_by/agent", "value": "autopilot"}]
+        with self.assertRaisesRegex(ValueError, "host-owned"):
+            normalize_goal_change_proposal(proposal)
+
 
 if __name__ == "__main__":
     unittest.main()
