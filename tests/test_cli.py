@@ -300,6 +300,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest["paths"]["data"], "~/.across/data/across-orchestrator")
         self.assertEqual(manifest["protocols"]["http"]["loopStart"], "POST /loops")
         self.assertEqual(manifest["protocols"]["http"]["hostConformance"], "POST /host-conformance")
+        self.assertEqual(
+            manifest["entrypoints"]["goalRevalidation"]["schemaVersion"],
+            "across-goal-revalidation-attempt/1.0",
+        )
 
     def test_cli_goal_contract_probe_is_stable(self):
         contract = {
@@ -332,6 +336,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["goal_revision"], 1)
         self.assertEqual(payload["criterion_ids"], ["criterion-cli"])
         self.assertRegex(payload["evidence_hash"], r"^[a-f0-9]{64}$")
+
+    def test_cli_goal_revalidation_builds_selective_new_attempt(self):
+        payload = {
+            "graph": {
+                "criteria": {
+                    "criterion-a": {
+                        "input_fingerprints": ["source-a"],
+                        "depends_on": [],
+                        "evidence_ids": ["evidence-a"],
+                    },
+                    "criterion-b": {
+                        "input_fingerprints": ["source-b"],
+                        "depends_on": [],
+                        "evidence_ids": ["evidence-b"],
+                    },
+                }
+            },
+            "changed_fingerprints": ["source-a"],
+            "criterion_ids": ["criterion-a"],
+            "prior_attempt_number": 0,
+        }
+        result = self.run_cli("goal-revalidation", "--payload-json", json.dumps(payload), "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attempt = json.loads(result.stdout)
+        self.assertEqual(attempt["criterion_ids"], ["criterion-a"])
+        self.assertEqual(attempt["supersedes_evidence_ids"], ["evidence-a"])
+        self.assertEqual(attempt["preserved_evidence_ids"], ["evidence-b"])
+        self.assertEqual(attempt["attempt_number"], 1)
+        self.assertEqual(attempt["state"], "queued")
 
     def test_cli_sandbox_probe_and_evidence_graph(self):
         policy = {

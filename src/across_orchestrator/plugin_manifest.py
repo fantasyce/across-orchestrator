@@ -150,6 +150,11 @@ def render_plugin_manifest(command: str = "across-orchestrator") -> dict:
                 "args": ["goal-contract", "--json"],
                 "schemaVersion": "across-goal-contract/1.0",
             },
+            "goalRevalidation": {
+                "command": command,
+                "args": ["goal-revalidation", "--json"],
+                "schemaVersion": "across-goal-revalidation-attempt/1.0",
+            },
             "sdk": {
                 "pythonModule": "across_orchestrator",
             },
