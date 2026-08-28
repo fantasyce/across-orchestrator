@@ -215,6 +215,8 @@ class HeartbeatRenewingDispatcher:
 
 
 class CancellableDispatcher:
+    requires_cancel_ack = True
+
     def __init__(self):
         self.started = threading.Event()
         self.cancel_seen = threading.Event()
