@@ -2,9 +2,38 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 class EvidenceReceiptTests(unittest.TestCase):
+    def test_git_commit_sha_reads_linked_worktree_metadata_without_spawning_git(self):
+        from across_orchestrator.evidence import _git_commit_sha
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            common = root / "repo" / ".git"
+            admin = common / "worktrees" / "acceptance"
+            worktree = root / "acceptance"
+            nested = worktree / "fixture"
+            admin.mkdir(parents=True)
+            nested.mkdir(parents=True)
+            (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+            (admin / "HEAD").write_text("ref: refs/heads/codex/goal-contract-v1\n", encoding="utf-8")
+            (admin / "commondir").write_text("../..\n", encoding="utf-8")
+            ref = common / "refs" / "heads" / "codex" / "goal-contract-v1"
+            ref.parent.mkdir(parents=True)
+            ref.write_text("a" * 40 + "\n", encoding="utf-8")
+
+            with mock.patch("across_orchestrator.evidence.subprocess.run") as run:
+                self.assertEqual(_git_commit_sha(worktree), "a" * 40)
+
+            run.assert_not_called()
+
+            with mock.patch("across_orchestrator.evidence.subprocess.run") as run:
+                self.assertEqual(_git_commit_sha(nested), "")
+
+            run.assert_not_called()
+
     def test_goal_evidence_binding_verifies_receipt_revision_artifacts_and_validator(self):
         from across_orchestrator.evidence import bind_evidence_to_criteria
         from across_orchestrator.worker_protocol import payload_hash

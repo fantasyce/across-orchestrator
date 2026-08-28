@@ -403,17 +403,60 @@ def _evidence_verdict(sandbox_receipt: dict[str, Any], validations: Any) -> str:
 
 
 def _git_commit_sha(workspace_root: Path) -> str:
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=workspace_root,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else ""
+    return _git_commit_sha_from_metadata(workspace_root)
+
+
+def _git_commit_sha_from_metadata(workspace_root: Path) -> str:
+    """Resolve HEAD without spawning Git, including linked worktrees.
+
+    Evidence projection runs inside the long-lived HTTP sidecar. On macOS a
+    nested Git process can stall in that environment, and Git's parent search
+    may escape the client-selected project root. HEAD and refs are stable,
+    read-only metadata, so read them directly only when ``.git`` belongs to
+    the selected root.
+    """
+    root = workspace_root.resolve()
+    marker = root / ".git"
+    if not marker.exists():
+        return ""
+    try:
+        if marker.is_dir():
+            git_dir = marker
+        else:
+            declaration = marker.read_text(encoding="utf-8").strip()
+            if not declaration.startswith("gitdir:"):
+                return ""
+            value = declaration.partition(":")[2].strip()
+            git_dir = (marker.parent / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+            return head.lower()
+        if not head.startswith("ref:"):
+            return ""
+        ref_name = head.partition(":")[2].strip()
+        common_dir = git_dir
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            common_value = common_marker.read_text(encoding="utf-8").strip()
+            common_dir = (git_dir / common_value).resolve()
+        for base in (git_dir, common_dir):
+            ref_path = base / ref_name
+            if ref_path.is_file():
+                commit = ref_path.read_text(encoding="utf-8").strip()
+                if re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+                    return commit.lower()
+            packed_refs = base / "packed-refs"
+            if packed_refs.is_file():
+                for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                    if not line or line.startswith(("#", "^")):
+                        continue
+                    commit, separator, packed_ref = line.partition(" ")
+                    if separator and packed_ref == ref_name and re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+                        return commit.lower()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return ""
 
 
 def _secret_free_sandbox_receipt(value: Any) -> dict[str, Any]:
