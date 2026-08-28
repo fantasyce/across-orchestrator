@@ -5,6 +5,58 @@ from pathlib import Path
 
 
 class EvidenceReceiptTests(unittest.TestCase):
+    def test_goal_evidence_binding_verifies_receipt_revision_artifacts_and_validator(self):
+        from across_orchestrator.evidence import bind_evidence_to_criteria
+        from across_orchestrator.worker_protocol import payload_hash
+
+        receipt = {
+            "schema_version": "across-worker-evidence/1.0",
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt": 2,
+            "lease_id": "lease-1",
+            "goal_id": "goal-1",
+            "goal_revision": 3,
+            "goal_node_id": "goal-node-build",
+            "criterion_ids": ["criterion-tests"],
+            "input_fingerprint": "a" * 64,
+            "terminal_state": "completed",
+            "artifacts": [{"artifact_id": "artifact-1", "sha256": "b" * 64}],
+            "quality_gates": {"tests": "passed"},
+        }
+        receipt["receipt_hash"] = payload_hash(receipt)
+        binding = {
+            "schema_version": "across-goal-evidence-binding/1.0",
+            "evidence_id": "evidence-1",
+            "goal_id": "goal-1",
+            "goal_revision": 3,
+            "criterion_ids": ["criterion-tests"],
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "attempt_id": "attempt-2",
+            "attempt": 2,
+            "lease_id": "lease-1",
+            "lease_state": "terminal_valid",
+            "artifact_digests": {"artifact-1": "b" * 64},
+            "input_fingerprint": "a" * 64,
+            "validator": {"validator_id": "quality-gate:tests", "method": "receipt_quality_gate"},
+        }
+        result = bind_evidence_to_criteria(receipt, binding)
+        self.assertEqual(result["trust_state"], "verified")
+        self.assertEqual(result["verdict"], "verified")
+        self.assertEqual(result["receipt_hash"], receipt["receipt_hash"])
+
+        for mutation in (
+            lambda value: value.update(goal_revision=2),
+            lambda value: value.update(artifact_digests={"artifact-1": "c" * 64}),
+            lambda value: value.update(lease_state="expired"),
+            lambda value: value.update(verified=True),
+        ):
+            invalid = dict(binding)
+            mutation(invalid)
+            with self.assertRaises(ValueError):
+                bind_evidence_to_criteria(receipt, invalid)
+
     def test_hash_is_stable_and_payload_is_secret_free(self):
         from across_orchestrator.evidence import build_evidence_receipt
 

@@ -32,6 +32,7 @@ class WorkerControlStore:
         "grants",
         "audit",
         "idempotency",
+        "quarantine",
     )
 
     def __init__(self, home: str | Path | None = None, env: Mapping[str, str] | None = None):

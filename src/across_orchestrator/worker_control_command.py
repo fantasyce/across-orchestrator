@@ -134,9 +134,20 @@ def handle_worker_control_command(request: Mapping[str, Any], coordinator: Worke
         lease = runtime.lease_next(str(payload.get("node_id") or ""))
         return {"lease": lease.to_dict() if lease else None}
     if action == "job.acknowledge":
-        return runtime.acknowledge_lease(str(payload.get("lease_id") or ""), str(payload.get("manifest_hash") or "")).to_dict()
+        return runtime.acknowledge_lease(
+            str(payload.get("lease_id") or ""),
+            str(payload.get("manifest_hash") or ""),
+            goal_id=payload.get("goal_id"),
+            goal_revision=payload.get("goal_revision"),
+        ).to_dict()
     if action == "job.heartbeat":
-        return runtime.heartbeat_lease(str(payload.get("lease_id") or ""), node_id=str(payload.get("node_id") or ""), attempt=int(payload.get("attempt") or 0)).to_dict()
+        return runtime.heartbeat_lease(
+            str(payload.get("lease_id") or ""),
+            node_id=str(payload.get("node_id") or ""),
+            attempt=int(payload.get("attempt") or 0),
+            goal_id=payload.get("goal_id"),
+            goal_revision=payload.get("goal_revision"),
+        ).to_dict()
     if action == "job.event":
         event = JobEvent(**_object(payload, "event"))
         return runtime.record_event(event)

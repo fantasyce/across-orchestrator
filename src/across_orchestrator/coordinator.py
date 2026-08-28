@@ -602,6 +602,8 @@ class WorkerCoordinator:
                 issued_at=now,
                 expires_at=now + self.lease_seconds,
                 heartbeat_interval_seconds=min(10.0, self.lease_seconds / 3),
+                goal_id=manifest.goal_id,
+                goal_revision=manifest.goal_revision,
             )
             scheduling_decision = {
                 "selected_node_id": node_id,
@@ -624,7 +626,14 @@ class WorkerCoordinator:
             return lease
         return None
 
-    def acknowledge_lease(self, lease_id: str, manifest_hash: str) -> JobLease:
+    def acknowledge_lease(
+        self,
+        lease_id: str,
+        manifest_hash: str,
+        *,
+        goal_id: str | None = None,
+        goal_revision: int | None = None,
+    ) -> JobLease:
         record = self._lease(lease_id)
         if self.clock() >= float(record["expires_at"]):
             self._requeue_expired(record)
@@ -632,14 +641,33 @@ class WorkerCoordinator:
         if not hmac.compare_digest(str(record["manifest_hash"]), str(manifest_hash)):
             self._requeue_expired(record, reason="manifest_hash_mismatch")
             raise CoordinatorError("manifest hash mismatch")
+        if record.get("goal_id") and (
+            record.get("goal_id") != goal_id or int(record.get("goal_revision") or 0) != int(goal_revision or 0)
+        ):
+            self._quarantine_lease_submission(record, "stale_goal_revision")
+            self._requeue_expired(record, reason="goal_revision_mismatch")
+            raise CoordinatorError("lease goal revision mismatch")
         record["acknowledged_at"] = self.clock()
         self.store.put("leases", lease_id, record)
         return JobLease(**record)
 
-    def heartbeat_lease(self, lease_id: str, *, node_id: str, attempt: int) -> JobLease:
+    def heartbeat_lease(
+        self,
+        lease_id: str,
+        *,
+        node_id: str,
+        attempt: int,
+        goal_id: str | None = None,
+        goal_revision: int | None = None,
+    ) -> JobLease:
         record = self._lease(lease_id)
         if record["node_id"] != node_id or int(record["attempt"]) != int(attempt):
             raise CoordinatorError("stale lease heartbeat")
+        if record.get("goal_id") and (
+            record.get("goal_id") != goal_id or int(record.get("goal_revision") or 0) != int(goal_revision or 0)
+        ):
+            self._quarantine_lease_submission(record, "stale_goal_revision")
+            raise CoordinatorError("lease goal revision mismatch")
         if record.get("acknowledged_at") is None:
             raise CoordinatorError("lease must be acknowledged before heartbeat")
         now = self.clock()
@@ -650,8 +678,22 @@ class WorkerCoordinator:
         self.store.put("leases", lease_id, record)
         return JobLease(**record)
 
-    def lease_control(self, lease_id: str, *, node_id: str, attempt: int) -> dict[str, Any]:
-        lease = self.heartbeat_lease(lease_id, node_id=node_id, attempt=attempt)
+    def lease_control(
+        self,
+        lease_id: str,
+        *,
+        node_id: str,
+        attempt: int,
+        goal_id: str | None = None,
+        goal_revision: int | None = None,
+    ) -> dict[str, Any]:
+        lease = self.heartbeat_lease(
+            lease_id,
+            node_id=node_id,
+            attempt=attempt,
+            goal_id=goal_id,
+            goal_revision=goal_revision,
+        )
         job = self._job(lease.job_id)
         return {
             "lease": lease.to_dict(),
@@ -661,7 +703,34 @@ class WorkerCoordinator:
 
     def record_event(self, event: JobEvent) -> dict[str, Any]:
         job = self._job(event.job_id)
+        manifest_goal_id = (job.get("manifest") or {}).get("goal_id")
+        manifest_goal_revision = (job.get("manifest") or {}).get("goal_revision")
+        if manifest_goal_id and (
+            event.goal_id != manifest_goal_id or event.goal_revision != manifest_goal_revision
+        ):
+            self.store.append(
+                "quarantine",
+                event.job_id,
+                {
+                    "reason_code": "stale_goal_revision",
+                    "event": event.to_dict(),
+                    "expected_goal_id": manifest_goal_id,
+                    "expected_goal_revision": manifest_goal_revision,
+                    "created_at": self.clock(),
+                },
+            )
+            self._audit("job.event_quarantined", {"job_id": event.job_id, "reason_code": "stale_goal_revision"})
+            raise CoordinatorError("event goal revision mismatch")
         if job.get("lease_id") != event.lease_id or job.get("node_id") != event.node_id or int(job.get("attempt") or 0) != event.attempt:
+            self.store.append(
+                "quarantine",
+                event.job_id,
+                {
+                    "reason_code": "stale_or_foreign_lease",
+                    "event": event.to_dict(),
+                    "created_at": self.clock(),
+                },
+            )
             raise CoordinatorError("event belongs to an old or different lease")
         events = self.store.read_log("events", event.job_id)
         if any(item.get("event_id") == event.event_id for item in events):
@@ -724,6 +793,20 @@ class WorkerCoordinator:
         self.store.put("jobs", event.job_id, job)
         self._audit("job.event", {"job_id": event.job_id, "event_id": event.event_id, "state": event.state, "attempt": event.attempt})
         return sanitize_public(serialized)
+
+    def _quarantine_lease_submission(self, lease: Mapping[str, Any], reason_code: str) -> None:
+        self.store.append(
+            "quarantine",
+            str(lease["job_id"]),
+            {
+                "reason_code": reason_code,
+                "lease_id": lease["lease_id"],
+                "attempt": lease["attempt"],
+                "goal_id": lease.get("goal_id"),
+                "goal_revision": lease.get("goal_revision"),
+                "created_at": self.clock(),
+            },
+        )
 
     def cancel_job(self, job_id: str, *, reason: str = "user_cancelled") -> dict[str, Any]:
         job = self._job(job_id)

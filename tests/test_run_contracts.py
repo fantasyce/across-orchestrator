@@ -3,6 +3,45 @@ import unittest
 
 
 class RunContractTests(unittest.TestCase):
+    def test_goal_aware_job_manifest_requires_complete_revision_binding(self):
+        from across_orchestrator.worker_protocol import JobManifest, ProtocolError
+
+        base = {
+            "schema_version": "across-job-manifest/1.0",
+            "job_id": "job-goal-1",
+            "run_id": "run-goal-1",
+            "project_id": "project-1",
+            "workflow_id": "workflow-1",
+            "idempotency_key": "goal-job-1",
+            "command_argv": ["python", "-c", "print('ok')"],
+            "required_capabilities": {},
+            "permissions": {"network": {"mode": "none"}},
+            "budgets": {},
+            "expected_outputs": [],
+            "goal_id": "goal-task-1",
+            "goal_revision": 2,
+            "goal_node_id": "goal-node-build",
+            "criterion_ids": ["criterion-tests"],
+            "input_fingerprint": "a" * 64,
+            "required_evidence": ["test_receipt"],
+        }
+        manifest = JobManifest.from_dict(base)
+        self.assertEqual(manifest.goal_revision, 2)
+        self.assertEqual(manifest.to_dict()["criterion_ids"], ["criterion-tests"])
+
+        incomplete = dict(base)
+        incomplete.pop("criterion_ids")
+        with self.assertRaisesRegex(ProtocolError, "goal binding"):
+            JobManifest.from_dict(incomplete)
+
+        legacy = dict(base)
+        for key in (
+            "goal_id", "goal_revision", "goal_node_id", "criterion_ids",
+            "input_fingerprint", "required_evidence",
+        ):
+            legacy.pop(key)
+        self.assertIsNone(JobManifest.from_dict(legacy).goal_id)
+
     def test_policy_selects_visible_role_model_budget_and_risk_sandbox(self):
         from across_orchestrator.run_contracts import build_execution_policy_contract
 

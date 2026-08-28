@@ -368,6 +368,79 @@ def test_nw_025_026_027_031_032_leases_recover_monotonically_and_terminal_is_ide
     assert coordinator.job("job-side-effect")["status"] == "waiting_review"
 
 
+def test_goal_revision_is_bound_through_lease_heartbeat_and_terminal_event(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    goal_manifest = manifest(
+        goal_id="goal-task-1",
+        goal_revision=3,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="a" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(goal_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease.goal_id == "goal-task-1"
+    assert lease.goal_revision == 3
+
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.acknowledge_lease(
+            lease.lease_id,
+            goal_manifest.manifest_hash,
+            goal_id="goal-task-1",
+            goal_revision=2,
+        )
+    lease = coordinator.lease_next("node-test")
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        goal_manifest.manifest_hash,
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    coordinator.heartbeat_lease(
+        lease.lease_id,
+        node_id="node-test",
+        attempt=lease.attempt,
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    stale = JobEvent(
+        event_id="event-stale-goal",
+        job_id=goal_manifest.job_id,
+        run_id=goal_manifest.run_id,
+        node_id="node-test",
+        lease_id=lease.lease_id,
+        attempt=lease.attempt,
+        sequence=1,
+        state="completed",
+        goal_id="goal-task-1",
+        goal_revision=2,
+    )
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.record_event(stale)
+    assert coordinator.job(goal_manifest.job_id)["status"] == "leased"
+    quarantined = coordinator.store.read_log("quarantine", goal_manifest.job_id)
+    assert quarantined[-1]["reason_code"] == "stale_goal_revision"
+    accepted = JobEvent(
+        event_id="event-current-goal",
+        job_id=goal_manifest.job_id,
+        run_id=goal_manifest.run_id,
+        node_id="node-test",
+        lease_id=lease.lease_id,
+        attempt=lease.attempt,
+        sequence=1,
+        state="completed",
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    coordinator.record_event(accepted)
+    receipt = coordinator.job(goal_manifest.job_id)["evidence_receipt"]
+    assert receipt["goal_id"] == "goal-task-1"
+    assert receipt["goal_revision"] == 3
+    assert receipt["criterion_ids"] == ["criterion-tests"]
+
+
+
 def test_nw_030_033_039_040_043_048_049_bounded_executor_and_cleanup(tmp_path):
     executor = BoundedProcessExecutor(tmp_path / "worker")
     command = (

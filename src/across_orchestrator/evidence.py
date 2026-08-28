@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import hashlib
 import json
 import re
@@ -309,6 +309,72 @@ def build_evidence_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     }
     receipt["evidence_sha256"] = _canonical_sha256(receipt)
     return receipt
+
+
+def bind_evidence_to_criteria(
+    receipt: Mapping[str, Any], binding: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Verify a durable receipt before projecting criterion-level evidence."""
+
+    if not isinstance(receipt, Mapping) or not isinstance(binding, Mapping):
+        raise ValueError("evidence receipt and binding must be objects")
+    if binding.get("schema_version") != "across-goal-evidence-binding/1.0":
+        raise ValueError("unsupported goal evidence binding schema")
+    if "verified" in binding or "passed" in binding or "verdict" in binding:
+        raise ValueError("evidence trust cannot be supplied by the caller")
+    receipt_hash_field = (
+        "receipt_hash" if receipt.get("schema_version") == "across-worker-evidence/1.0" else "evidence_sha256"
+    )
+    receipt_hash = str(receipt.get(receipt_hash_field) or "")
+    unhashed = dict(receipt)
+    unhashed.pop(receipt_hash_field, None)
+    observed_hash = (
+        _worker_payload_hash(unhashed)
+        if receipt_hash_field == "receipt_hash"
+        else _canonical_sha256(unhashed)
+    )
+    if receipt_hash != observed_hash:
+        raise ValueError("evidence receipt hash is invalid")
+    for field in ("goal_id", "goal_revision", "run_id", "attempt", "lease_id", "input_fingerprint"):
+        if binding.get(field) != receipt.get(field):
+            raise ValueError(f"evidence {field} binding mismatch")
+    if binding.get("lease_state") != "terminal_valid":
+        raise ValueError("evidence lease is expired or invalid")
+    if receipt.get("terminal_state") != "completed":
+        raise ValueError("evidence receipt is not completed")
+    receipt_criteria = set(map(str, receipt.get("criterion_ids") or ()))
+    bound_criteria = set(map(str, binding.get("criterion_ids") or ()))
+    if not bound_criteria or not bound_criteria.issubset(receipt_criteria):
+        raise ValueError("evidence criterion binding mismatch")
+    receipt_artifacts = {
+        str(item.get("artifact_id")): str(item.get("sha256"))
+        for item in receipt.get("artifacts") or ()
+        if isinstance(item, Mapping)
+    }
+    bound_artifacts = {
+        str(key): str(value) for key, value in (binding.get("artifact_digests") or {}).items()
+    }
+    if not bound_artifacts or any(receipt_artifacts.get(key) != value for key, value in bound_artifacts.items()):
+        raise ValueError("evidence artifact digest mismatch")
+    validator = binding.get("validator")
+    if not isinstance(validator, Mapping) or not validator.get("validator_id") or not validator.get("method"):
+        raise ValueError("evidence validator identity is required")
+    quality_values = list((receipt.get("quality_gates") or {}).values())
+    if not quality_values or any(str(value).lower() not in {"passed", "ready", "verified"} for value in quality_values):
+        raise ValueError("evidence validator output is not satisfied")
+    return {
+        **dict(binding),
+        "criterion_ids": sorted(bound_criteria),
+        "artifact_digests": dict(sorted(bound_artifacts.items())),
+        "receipt_hash": receipt_hash,
+        "verdict": "verified",
+        "trust_state": "verified",
+    }
+
+
+def _worker_payload_hash(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _evidence_verdict(sandbox_receipt: dict[str, Any], validations: Any) -> str:

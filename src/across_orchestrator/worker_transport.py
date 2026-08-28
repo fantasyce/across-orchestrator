@@ -144,6 +144,8 @@ class CoordinatorSessionServer:
                         str(request.get("lease_id") or ""),
                         node_id=node_id,
                         attempt=int(request.get("attempt") or 0),
+                        goal_id=request.get("goal_id"),
+                        goal_revision=request.get("goal_revision"),
                     )
                     self.coordinator.heartbeat_node(node_id, current_load=float(request.get("current_load") or 1.0))
                     await write_framed_json(writer, {"type": "coordinator.lease_status", **control})
@@ -192,7 +194,12 @@ class CoordinatorSessionServer:
                             },
                         )
                 elif kind == "worker.lease_ack":
-                    lease = self.coordinator.acknowledge_lease(str(request.get("lease_id") or ""), str(request.get("manifest_hash") or ""))
+                    lease = self.coordinator.acknowledge_lease(
+                        str(request.get("lease_id") or ""),
+                        str(request.get("manifest_hash") or ""),
+                        goal_id=request.get("goal_id"),
+                        goal_revision=request.get("goal_revision"),
+                    )
                     await write_framed_json(writer, {"type": "coordinator.lease_acknowledged", "lease": lease.to_dict()})
                 elif kind == "worker.event":
                     event = _event_from_dict(dict(request.get("event") or {}))
@@ -328,7 +335,13 @@ class WorkerSessionClient:
             manifest = JobManifest.from_dict(dict(response.get("manifest") or {}))
             if lease.node_id != self.capability.node_id or lease.manifest_hash != manifest.manifest_hash:
                 raise WorkerTransportError("lease and manifest binding mismatch")
-            await write_framed_json(writer, {"type": "worker.lease_ack", "lease_id": lease.lease_id, "manifest_hash": manifest.manifest_hash})
+            await write_framed_json(writer, {
+                "type": "worker.lease_ack",
+                "lease_id": lease.lease_id,
+                "manifest_hash": manifest.manifest_hash,
+                "goal_id": lease.goal_id,
+                "goal_revision": lease.goal_revision,
+            })
             acknowledgement = await read_framed_json(reader)
             if acknowledgement.get("type") != "coordinator.lease_acknowledged":
                 raise WorkerTransportError("coordinator did not acknowledge the manifest hash")
@@ -519,6 +532,8 @@ class WorkerSessionClient:
                 "lease_id": lease.lease_id,
                 "attempt": lease.attempt,
                 "current_load": 1.0,
+                "goal_id": lease.goal_id,
+                "goal_revision": lease.goal_revision,
             },
         )
         response = await read_framed_json(reader)
@@ -547,6 +562,8 @@ class WorkerSessionClient:
             attempt=lease.attempt,
             sequence=sequence,
             state=state,
+            goal_id=lease.goal_id,
+            goal_revision=lease.goal_revision,
             reason_category=reason_category,
             payload=dict(payload or {}),
         )
@@ -711,6 +728,8 @@ class RelayCoordinatorSession:
                         str(request.get("lease_id") or ""),
                         node_id=node_id,
                         attempt=int(request.get("attempt") or 0),
+                        goal_id=request.get("goal_id"),
+                        goal_revision=request.get("goal_revision"),
                     )
                     self.coordinator.heartbeat_node(node_id, current_load=float(request.get("current_load") or 1.0))
                     await self.endpoint.send({"type": "coordinator.lease_status", **control})
@@ -752,7 +771,12 @@ class RelayCoordinatorSession:
                             "model_grant": model_grant,
                         })
                 elif kind == "worker.lease_ack":
-                    lease = self.coordinator.acknowledge_lease(str(request.get("lease_id") or ""), str(request.get("manifest_hash") or ""))
+                    lease = self.coordinator.acknowledge_lease(
+                        str(request.get("lease_id") or ""),
+                        str(request.get("manifest_hash") or ""),
+                        goal_id=request.get("goal_id"),
+                        goal_revision=request.get("goal_revision"),
+                    )
                     await self.endpoint.send({"type": "coordinator.lease_acknowledged", "lease": lease.to_dict()})
                 elif kind == "worker.event":
                     event = self.coordinator.record_event(_event_from_dict(dict(request.get("event") or {})))
@@ -841,7 +865,13 @@ class RelayWorkerSessionClient:
         manifest = JobManifest.from_dict(dict(response.get("manifest") or {}))
         if lease.node_id != self.capability.node_id or lease.manifest_hash != manifest.manifest_hash:
             raise WorkerTransportError("relay lease and manifest binding mismatch")
-        if (await self._request({"type": "worker.lease_ack", "lease_id": lease.lease_id, "manifest_hash": manifest.manifest_hash})).get("type") != "coordinator.lease_acknowledged":
+        if (await self._request({
+            "type": "worker.lease_ack",
+            "lease_id": lease.lease_id,
+            "manifest_hash": manifest.manifest_hash,
+            "goal_id": lease.goal_id,
+            "goal_revision": lease.goal_revision,
+        })).get("type") != "coordinator.lease_acknowledged":
             raise WorkerTransportError("relay Coordinator did not acknowledge the manifest hash")
         await self._event(lease, "preparing", 1)
         inputs = {str(name): base64.b64decode(str(value), validate=True) for name, value in dict(response.get("inputs_base64") or {}).items()}
@@ -962,6 +992,8 @@ class RelayWorkerSessionClient:
                 "lease_id": lease.lease_id,
                 "attempt": lease.attempt,
                 "current_load": 1.0,
+                "goal_id": lease.goal_id,
+                "goal_revision": lease.goal_revision,
             })
         if response.get("type") != "coordinator.lease_status":
             raise WorkerTransportError("relay Coordinator rejected the lease heartbeat")
@@ -969,7 +1001,13 @@ class RelayWorkerSessionClient:
             cancel_event.set()
 
     async def _event(self, lease: JobLease, state: str, sequence: int, *, reason_category: str | None = None, payload: Mapping[str, Any] | None = None) -> None:
-        event = JobEvent(event_id=new_protocol_id("event"), job_id=lease.job_id, run_id=lease.run_id, node_id=lease.node_id, lease_id=lease.lease_id, attempt=lease.attempt, sequence=sequence, state=state, reason_category=reason_category, payload=dict(payload or {}))
+        event = JobEvent(
+            event_id=new_protocol_id("event"), job_id=lease.job_id, run_id=lease.run_id,
+            node_id=lease.node_id, lease_id=lease.lease_id, attempt=lease.attempt,
+            sequence=sequence, state=state, goal_id=lease.goal_id,
+            goal_revision=lease.goal_revision, reason_category=reason_category,
+            payload=dict(payload or {}),
+        )
         if (await self._request({"type": "worker.event", "event": event.to_dict()})).get("type") != "coordinator.event_recorded":
             raise WorkerTransportError("relay Coordinator rejected a job event")
 
