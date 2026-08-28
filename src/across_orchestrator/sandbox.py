@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import re
 import selectors
 import signal
 import stat
@@ -756,6 +757,11 @@ def _execution_receipt(
         request.policy["filesystem_policy"]["runtime_state_files"],
         runtime_state_roots,
     )
+    sensitive_paths = _execution_sensitive_paths(
+        request,
+        runtime_state_roots=runtime_state_roots,
+        runtime_state_files=runtime_state_files,
+    )
     receipt = {
         "schema_version": SANDBOX_EXECUTION_SCHEMA,
         "status": status,
@@ -787,8 +793,8 @@ def _execution_receipt(
         "output": {
             "encoding": "utf-8",
             "max_bytes_per_stream": request.max_output_bytes,
-            "stdout": stdout.text(),
-            "stderr": stderr.text(),
+            "stdout": _redact_execution_output_paths(stdout.text(), sensitive_paths=sensitive_paths),
+            "stderr": _redact_execution_output_paths(stderr.text(), sensitive_paths=sensitive_paths),
             "stdout_bytes": stdout.total_bytes,
             "stderr_bytes": stderr.total_bytes,
             "stdout_truncated": stdout.truncated,
@@ -797,6 +803,31 @@ def _execution_receipt(
         "enforcement": enforcement,
     }
     return _finalize_execution_receipt(receipt)
+
+
+def _execution_sensitive_paths(
+    request: SandboxExecutionRequest,
+    *,
+    runtime_state_roots: tuple[Path, ...],
+    runtime_state_files: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    paths = {request.workspace_root, request.cwd, *runtime_state_roots, *runtime_state_files}
+    quoted_absolute_path = re.compile(r"(?P<quote>['\"])(?P<path>/[^'\"\r\n]+)(?P=quote)")
+    for argument in request.argv:
+        if argument.startswith("/"):
+            paths.add(Path(argument))
+        for match in quoted_absolute_path.finditer(argument):
+            paths.add(Path(match.group("path")))
+    return tuple(sorted(paths, key=lambda item: (-len(str(item)), str(item))))
+
+
+def _redact_execution_output_paths(text: str, *, sensitive_paths: tuple[Path, ...]) -> str:
+    redacted = text
+    for path in sensitive_paths:
+        value = str(path)
+        if value and value != "/":
+            redacted = redacted.replace(value, "<redacted-path>")
+    return redacted
 
 
 def _blocked_execution_receipt(evaluation: dict[str, Any], *, provider_id: str) -> dict[str, Any]:
