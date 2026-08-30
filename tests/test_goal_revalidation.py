@@ -57,3 +57,33 @@ def test_revalidation_attempt_is_persisted_with_real_queued_jobs(tmp_path):
     assert attempt["job_ids"] == ["job-revalidate-a"]
     assert coordinator.store.get("revalidation_attempts", attempt["attempt_id"])["attempt_id"] == attempt["attempt_id"]
     assert coordinator.job("job-revalidate-a")["status"] == "queued"
+
+
+def test_revalidation_rejects_mixed_goal_authority_before_any_write(tmp_path):
+    import sys
+    import pytest
+    from dataclasses import replace
+    from across_orchestrator.coordinator import WorkerCoordinator
+    from across_orchestrator.goal_graph import InvalidationPlan
+    from across_orchestrator.revalidation import create_revalidation_attempt
+    from across_orchestrator.worker_protocol import JobManifest
+    from across_orchestrator.worker_store import WorkerControlStore
+
+    coordinator = WorkerCoordinator(WorkerControlStore(tmp_path / "worker-control"))
+    plan = InvalidationPlan(("source-a",), ("criterion-a", "criterion-b"), ("evidence-a",), ())
+    first = JobManifest(
+        job_id="job-mixed-a", run_id="run-mixed", project_id="project-test", task_id="task-one",
+        workflow_id="goal-revalidation", idempotency_key="idem-mixed-a",
+        command_argv=(sys.executable, "-c", "pass"), required_capabilities={}, permissions={}, budgets={},
+        expected_outputs=(), goal_id="goal-one", goal_revision=1, goal_node_id="node-a",
+        criterion_ids=("criterion-a",), input_fingerprint="a" * 64, required_evidence=("test_receipt",),
+    )
+    second = replace(
+        first, job_id="job-mixed-b", idempotency_key="idem-mixed-b", task_id="task-two",
+        goal_id="goal-two", goal_revision=7, criterion_ids=("criterion-b",),
+    )
+    with pytest.raises(ValueError, match="share one Goal"):
+        create_revalidation_attempt(coordinator, plan, ["criterion-a", "criterion-b"], [first, second])
+    assert coordinator.store.list("invalidation_plans") == []
+    assert coordinator.store.list("revalidation_attempts") == []
+    assert coordinator.store.list("jobs") == []

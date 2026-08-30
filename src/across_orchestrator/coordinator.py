@@ -586,6 +586,7 @@ class WorkerCoordinator:
                         continue
                     job["cancel_requested_at"] = self.clock()
                     job["cancel_reason"] = "stale_goal_revision"
+                    job["status"] = "stale"
                     job["updated_at"] = self.clock()
                     self.store.put("jobs", str(job["job_id"]), job)
             self._audit("goal.revision_authorized", {"goal_id": identifier, "goal_revision": goal_revision})
@@ -627,6 +628,13 @@ class WorkerCoordinator:
             if job.get("status") != "queued":
                 continue
             manifest = JobManifest.from_dict(job["manifest"])
+            if manifest.goal_id and int(manifest.goal_revision or 0) != self._authorized_goal_revision({
+                "goal_id": manifest.goal_id,
+                "goal_revision": manifest.goal_revision,
+            }):
+                job.update({"status": "stale", "cancel_reason": "stale_goal_revision", "updated_at": self.clock()})
+                self.store.put("jobs", str(job["job_id"]), job)
+                continue
             if not manifest_capability.supports({**manifest.required_capabilities, "executor": manifest.executor}):
                 continue
             selected = self.choose_node(manifest)
@@ -696,6 +704,55 @@ class WorkerCoordinator:
         record["acknowledged_at"] = self.clock()
         self.store.put("leases", lease_id, record)
         return JobLease(**record)
+
+    def begin_artifact_upload(self, descriptor: ArtifactDescriptor) -> dict[str, Any]:
+        """Bind an upload to the currently authoritative Job lease before bytes arrive."""
+
+        job = self._job(descriptor.job_id)
+        if job.get("terminal_event_id") or job.get("status") not in {"leased", "running"}:
+            raise CoordinatorError("artifact upload requires an active Job lease")
+        if job.get("run_id") != descriptor.run_id or job.get("node_id") != descriptor.node_id:
+            raise CoordinatorError("artifact upload does not match Job ownership")
+        manifest = JobManifest.from_dict(job["manifest"])
+        if manifest.expected_outputs and descriptor.logical_name not in manifest.expected_outputs:
+            raise CoordinatorError("artifact is not declared by the Job manifest")
+        record = {
+            "schema_version": "across-coordinator-artifact/1.0",
+            "artifact_id": descriptor.artifact_id,
+            "descriptor": descriptor.to_dict(),
+            "job_id": descriptor.job_id,
+            "run_id": descriptor.run_id,
+            "node_id": descriptor.node_id,
+            "lease_id": job.get("lease_id"),
+            "attempt": int(job.get("attempt") or 0),
+            "status": "uploading",
+            "created_at": self.clock(),
+            "updated_at": self.clock(),
+        }
+        existing = self.store.get("artifacts", descriptor.artifact_id)
+        if existing:
+            same_binding = all(existing.get(key) == record.get(key) for key in (
+                "descriptor", "job_id", "run_id", "node_id", "lease_id", "attempt"
+            ))
+            if not same_binding:
+                raise CoordinatorError("artifact id is already bound to another upload")
+            return sanitize_public(existing)
+        self.store.put("artifacts", descriptor.artifact_id, record)
+        return sanitize_public(record)
+
+    def finalize_artifact_upload(self, artifact_id: str, *, sha256_digest: str, size: int) -> dict[str, Any]:
+        record = self.store.get("artifacts", artifact_id)
+        if record is None:
+            raise CoordinatorError("artifact upload was not registered")
+        descriptor = ArtifactDescriptor(**dict(record["descriptor"]))
+        if descriptor.sha256 != sha256_digest or descriptor.size != int(size):
+            raise CoordinatorError("final artifact does not match its authoritative descriptor")
+        job = self._job(str(record["job_id"]))
+        if job.get("lease_id") != record.get("lease_id") or int(job.get("attempt") or 0) != int(record.get("attempt") or 0):
+            raise CoordinatorError("artifact upload belongs to a stale Job attempt")
+        record.update({"status": "verified", "verified_at": self.clock(), "updated_at": self.clock()})
+        self.store.put("artifacts", artifact_id, record)
+        return sanitize_public(record)
 
     def heartbeat_lease(
         self,
@@ -797,6 +854,7 @@ class WorkerCoordinator:
             raise CoordinatorError("event sequence must increase monotonically")
         if job.get("terminal_event_id"):
             raise CoordinatorError("job already has a valid terminal event")
+        artifacts = self._authoritative_terminal_artifacts(job, event) if event.state in TERMINAL_JOB_STATES else []
         serialized = event.to_dict()
         self.store.append("events", event.job_id, serialized)
         job["status"] = event.state
@@ -809,13 +867,7 @@ class WorkerCoordinator:
                 job["resource_usage"] = dict(event.payload["resource_usage"])
             job["cleanup_status"] = str(event.payload.get("cleanup_status") or "unknown")
             worker_receipt = event.payload.get("evidence_receipt") if isinstance(event.payload.get("evidence_receipt"), Mapping) else {}
-            artifacts: list[ArtifactDescriptor] = []
-            for raw in event.payload.get("artifacts") or ():
-                if not isinstance(raw, Mapping):
-                    continue
-                values = dict(raw)
-                values["chunks"] = tuple(values.get("chunks") or ())
-                artifacts.append(ArtifactDescriptor(**values))
+            manifest = JobManifest.from_dict(job["manifest"])
             model_usage = {"calls": 0, "tokens": 0, "cost_usd": 0.0}
             terminal_grant_ids: list[str] = []
             for grant in self.store.list("grants"):
@@ -828,7 +880,6 @@ class WorkerCoordinator:
                 model_usage["calls"] += int(usage.get("calls") or 0)
                 model_usage["tokens"] += int(usage.get("tokens") or 0)
                 model_usage["cost_usd"] += float(usage.get("cost_usd") or 0)
-            manifest = JobManifest.from_dict(job["manifest"])
             lease = JobLease(**self._lease(event.lease_id))
             node = CapabilityManifest.from_dict(self._node(event.node_id)["capability_manifest"])
             job["model_usage"] = model_usage
@@ -875,6 +926,8 @@ class WorkerCoordinator:
             for grant_id in terminal_grant_ids:
                 self.revoke_model_grant(grant_id)
         self.store.put("jobs", event.job_id, job)
+        if event.state in TERMINAL_JOB_STATES:
+            self._update_revalidation_attempt_for_job(event.job_id)
         self._audit("job.event", {"job_id": event.job_id, "event_id": event.event_id, "state": event.state, "attempt": event.attempt})
         return sanitize_public(serialized)
 
@@ -1146,9 +1199,63 @@ class WorkerCoordinator:
         job = self._job(str(lease["job_id"]))
         if job.get("terminal_event_id") or job.get("lease_id") != lease.get("lease_id"):
             return
-        job.update({"status": "queued", "node_id": None, "lease_id": None, "updated_at": self.clock(), "last_lease_failure": reason})
+        manifest = JobManifest.from_dict(job["manifest"])
+        stale = bool(manifest.goal_id and int(manifest.goal_revision or 0) != self._authorized_goal_revision({
+            "goal_id": manifest.goal_id,
+            "goal_revision": manifest.goal_revision,
+        }))
+        job.update({"status": "stale" if stale else "queued", "node_id": None, "lease_id": None, "updated_at": self.clock(), "last_lease_failure": reason})
         self.store.put("jobs", str(job["job_id"]), job)
         self._audit("job.requeued", {"job_id": job["job_id"], "reason": reason})
+
+    def _update_revalidation_attempt_for_job(self, job_id: str) -> None:
+        for attempt in self.store.list("revalidation_attempts"):
+            if job_id not in (attempt.get("job_ids") or ()):
+                continue
+            jobs = [self._job(str(identifier)) for identifier in attempt.get("job_ids") or ()]
+            if not all(job.get("terminal_event_id") for job in jobs):
+                attempt["state"] = "running"
+            else:
+                verified = all(
+                    job.get("status") == "completed"
+                    and (job.get("goal_evidence_binding") or {}).get("trust_state") == "verified"
+                    for job in jobs
+                )
+                attempt["state"] = "completed" if verified else "needs_review"
+                attempt["replacement_evidence_ids"] = [
+                    str((job.get("goal_evidence_binding") or {}).get("evidence_id") or "")
+                    for job in jobs
+                    if (job.get("goal_evidence_binding") or {}).get("evidence_id")
+                ]
+            attempt["updated_at"] = self.clock()
+            self.store.put("revalidation_attempts", str(attempt["attempt_id"]), attempt)
+
+    def _authoritative_terminal_artifacts(self, job: Mapping[str, Any], event: JobEvent) -> list[ArtifactDescriptor]:
+        artifacts: list[ArtifactDescriptor] = []
+        for raw in event.payload.get("artifacts") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            values = dict(raw)
+            values["chunks"] = tuple(values.get("chunks") or ())
+            artifacts.append(ArtifactDescriptor(**values))
+        for artifact in artifacts:
+            stored = self.store.get("artifacts", artifact.artifact_id)
+            if (
+                stored is None
+                or stored.get("status") != "verified"
+                or stored.get("descriptor") != artifact.to_dict()
+                or stored.get("lease_id") != event.lease_id
+                or int(stored.get("attempt") or 0) != event.attempt
+            ):
+                self.store.append("quarantine", event.job_id, {
+                    "reason_code": "unverified_artifact", "artifact_id": artifact.artifact_id,
+                    "created_at": self.clock(),
+                })
+                raise CoordinatorError("terminal event referenced an unverified artifact")
+        manifest = JobManifest.from_dict(job["manifest"])
+        if manifest.expected_outputs and {item.logical_name for item in artifacts} != set(manifest.expected_outputs):
+            raise CoordinatorError("terminal artifacts do not satisfy expected outputs")
+        return artifacts
 
     def _node(self, node_id: str) -> dict[str, Any]:
         node = self.store.get("nodes", node_id)

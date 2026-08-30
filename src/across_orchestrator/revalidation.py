@@ -66,6 +66,18 @@ def create_revalidation_attempt(
         by_criterion[criterion_id] = manifest
     if set(by_criterion) != selected:
         raise ValueError("one revalidation Job manifest is required per selected criterion")
+    bindings = {(manifest.goal_id, manifest.task_id, manifest.goal_revision) for manifest in by_criterion.values()}
+    if len(bindings) != 1:
+        raise ValueError("revalidation Job manifests must share one Goal, Task, and revision")
+    goal_id, task_id, goal_revision = next(iter(bindings))
+
+    # Preflight every durable collision before creating the plan or any Job.
+    for manifest in by_criterion.values():
+        existing = coordinator.store.get("idempotency", manifest.idempotency_key)
+        if existing:
+            job = coordinator.store.get("jobs", str(existing.get("job_id") or ""))
+            if not job or job.get("manifest_hash") != manifest.manifest_hash:
+                raise ValueError("revalidation idempotency key conflicts with existing work")
 
     plan_id = f"invalidation-plan-{uuid.uuid4().hex}"
     now = coordinator.clock()
@@ -76,6 +88,9 @@ def create_revalidation_attempt(
         "affected_criterion_ids": list(plan.affected_criterion_ids),
         "stale_evidence_ids": list(plan.stale_evidence_ids),
         "preserved_evidence_ids": list(plan.preserved_evidence_ids),
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "goal_revision": goal_revision,
         "created_at": now,
     }
     coordinator.store.put("invalidation_plans", plan_id, plan_record)
@@ -88,6 +103,9 @@ def create_revalidation_attempt(
         **attempt,
         "plan_id": plan_id,
         "job_ids": job_ids,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "goal_revision": goal_revision,
         "state": "queued",
         "created_at": now,
         "updated_at": now,

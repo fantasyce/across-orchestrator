@@ -207,6 +207,7 @@ class CoordinatorSessionServer:
                     await write_framed_json(writer, {"type": "coordinator.event_recorded", "event": recorded})
                 elif kind == "worker.artifact_begin":
                     descriptor = _artifact_from_dict(dict(request.get("artifact") or {}))
+                    self.coordinator.begin_artifact_upload(descriptor)
                     state = self.artifacts.begin(descriptor, chunk_size=int(request.get("chunk_size") or 1024 * 1024))
                     await write_framed_json(writer, {"type": "coordinator.artifact_ready", "state": state})
                 elif kind == "worker.artifact_chunk":
@@ -220,6 +221,7 @@ class CoordinatorSessionServer:
                     await write_framed_json(writer, {"type": "coordinator.artifact_chunk", "state": state})
                 elif kind == "worker.artifact_finalize":
                     path = self.artifacts.finalize(str(request.get("artifact_id") or ""))
+                    self.coordinator.finalize_artifact_upload(str(request.get("artifact_id") or ""), sha256_digest=_file_hash(path), size=path.stat().st_size)
                     await write_framed_json(writer, {"type": "coordinator.artifact_verified", "name": path.name, "sha256": _file_hash(path), "size": path.stat().st_size})
                 elif kind == "worker.update_result":
                     node = self.coordinator.record_node_update(
@@ -783,6 +785,7 @@ class RelayCoordinatorSession:
                     await self.endpoint.send({"type": "coordinator.event_recorded", "event": event})
                 elif kind == "worker.artifact_begin":
                     descriptor = _artifact_from_dict(dict(request.get("artifact") or {}))
+                    self.coordinator.begin_artifact_upload(descriptor)
                     state = self.artifacts.begin(descriptor, chunk_size=int(request.get("chunk_size") or 1024 * 1024))
                     await self.endpoint.send({"type": "coordinator.artifact_ready", "state": state})
                 elif kind == "worker.artifact_chunk":
@@ -791,6 +794,7 @@ class RelayCoordinatorSession:
                     await self.endpoint.send({"type": "coordinator.artifact_chunk", "state": state})
                 elif kind == "worker.artifact_finalize":
                     path = self.artifacts.finalize(str(request.get("artifact_id") or ""))
+                    self.coordinator.finalize_artifact_upload(str(request.get("artifact_id") or ""), sha256_digest=_file_hash(path), size=path.stat().st_size)
                     await self.endpoint.send({"type": "coordinator.artifact_verified", "name": path.name, "sha256": _file_hash(path), "size": path.stat().st_size})
                 elif kind == "worker.model_invoke":
                     if self.model_gateway is None:

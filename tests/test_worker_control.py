@@ -531,6 +531,46 @@ def test_host_revision_watermark_quarantines_old_active_lease(tmp_path):
     with pytest.raises(CoordinatorError, match="older than host authority"):
         coordinator.submit_job(replace(old_manifest, job_id="job-stale", idempotency_key="idem-stale"))
 
+    assert coordinator.job(old_manifest.job_id)["status"] == "stale"
+    assert coordinator.lease_next("node-test") is None
+
+
+def test_terminal_event_cannot_invent_an_artifact_that_was_never_uploaded(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(
+        expected_outputs=("result.json",),
+        goal_id="goal-artifact-authority", goal_revision=1,
+        goal_node_id="goal-node-build", criterion_ids=("criterion-tests",),
+        input_fingerprint="c" * 64, required_evidence=("test_receipt",),
+        quality_gates=("tests",),
+    )
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id, job_manifest.manifest_hash,
+        goal_id=job_manifest.goal_id, goal_revision=job_manifest.goal_revision,
+    )
+    coordinator.record_validator_result(
+        job_manifest.job_id, criterion_id="criterion-tests",
+        validator_id="quality-gate:tests", method="host pytest", status="passed",
+    )
+    invented = ArtifactDescriptor(
+        artifact_id="artifact-never-uploaded", run_id=job_manifest.run_id,
+        job_id=job_manifest.job_id, node_id="node-test", logical_name="result.json",
+        media_type="application/json", size=2, sha256=sha256(b"{}").hexdigest(),
+    )
+    event = JobEvent(
+        event_id="event-invented-artifact", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id=job_manifest.goal_id,
+        goal_revision=job_manifest.goal_revision, payload={"artifacts": [invented.to_dict()]},
+    )
+    with pytest.raises(CoordinatorError, match="unverified artifact"):
+        coordinator.record_event(event)
+    assert coordinator.job(job_manifest.job_id).get("terminal_event_id") is None
+    assert coordinator.store.read_log("quarantine", job_manifest.job_id)[-1]["reason_code"] == "unverified_artifact"
+
 
 
 def test_nw_030_033_039_040_043_048_049_bounded_executor_and_cleanup(tmp_path):
