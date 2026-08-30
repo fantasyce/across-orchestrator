@@ -9,7 +9,7 @@ SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 SENSITIVE_VALUE_RE = re.compile(
-    r"(?i)(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+    r"(?i)((?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
 SAFE_SENSITIVE_FIELD_VALUES = {False, None, "", 0, "false", "none", "not_allowed", "disabled", "not_included"}
 

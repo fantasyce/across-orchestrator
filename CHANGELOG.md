@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.2 - 2026-08-30
+
+- Preserve ordinary Task identifiers such as `task-...` across generic CLI and public-value redaction while continuing to remove standalone credential-shaped values.
+
 ## 0.12.1 - 2026-08-30
 
 - Preserve ordinary `task-...` protocol identities during public secret redaction so receipt-bound Worker evidence remains hash-verifiable while real token-shaped values are still removed.
