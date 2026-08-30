@@ -355,14 +355,14 @@ cd across-orchestrator
 python3 -m pip install -e .
 ```
 
-Or install the current release tag directly from GitHub:
+After `v0.11.0` is published from `origin/main`, install that release tag directly from GitHub:
 
 ```bash
 python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.11.0"
 ```
 
-The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.11.0` release publishes fresh
+The prepared GitHub release is source-first. There is no attached Python wheel; packaged
+hosts can install from the pinned tag after publication. The `v0.11.0` release will publish fresh
 checksummed Worker source bundles and the multi-architecture relay container
 for the Goal Contract runtime; those assets are remote execution components,
 not a notarized macOS application.
