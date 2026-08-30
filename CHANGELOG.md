@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1 - 2026-08-30
+
+- Preserve ordinary `task-...` protocol identities during public secret redaction so receipt-bound Worker evidence remains hash-verifiable while real token-shaped values are still removed.
+
 ## 0.12.0 - 2026-08-30
 
 - Added explicit, deterministic Goal revalidation `plan`, durable and

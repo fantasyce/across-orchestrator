@@ -1523,6 +1523,32 @@ def test_nw_047_public_redaction_removes_tokens_and_user_paths():
     assert "abc.def.ghi" not in rendered
 
 
+def test_public_redaction_preserves_task_ids_that_contain_sk_as_word_suffix():
+    task_id = "task-gca-final-public-worker-1788102600"
+    secret_value = "-".join(("sk", "example-secret-value"))
+    receipt = {
+        "schema_version": "across-worker-evidence/1.0",
+        "task_id": task_id,
+        "job_id": "job-gca-final-public-worker-1788102600",
+        "terminal_state": "completed",
+    }
+    receipt["receipt_hash"] = payload_hash(receipt)
+
+    public = sanitize_public(
+        {
+            "task_id": task_id,
+            "message": f"credential {secret_value} must stay private",
+            "evidence_receipt": receipt,
+        }
+    )
+
+    assert public["task_id"] == task_id
+    assert public["message"] == "credential [redacted] must stay private"
+    public_receipt = dict(public["evidence_receipt"])
+    expected_hash = public_receipt.pop("receipt_hash")
+    assert payload_hash(public_receipt) == expected_hash
+
+
 def test_nw_046_evidence_receipt_binds_execution_artifacts_model_and_cleanup():
     job = manifest(evidence_requirements=("node", "model_usage", "cleanup_status"))
     lease = JobLease(
