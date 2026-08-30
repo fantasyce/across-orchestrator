@@ -30,8 +30,7 @@ from .runtime import OrchestratorRuntime
 from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 from .store import LocalStore
 from .goal_contracts import normalize_goal_contract, stable_goal_hash
-from .goal_graph import compute_invalidation
-from .revalidation import create_revalidation_attempt
+from .revalidation import complete_host_revalidation_attempt, plan_revalidation, start_revalidation_attempt
 
 
 def _emit_public_text(text: str) -> None:
@@ -288,10 +287,13 @@ def build_parser() -> argparse.ArgumentParser:
     goal_contract.add_argument("--json", action="store_true")
 
     goal_revalidation = sub.add_parser(
-        "goal-revalidation", help="Build a selective Goal Contract revalidation attempt"
+        "goal-revalidation", help="Plan, start, or complete selective Goal Contract revalidation"
     )
-    goal_revalidation.add_argument("--payload-json", required=True)
-    goal_revalidation.add_argument("--json", action="store_true")
+    revalidation_actions = goal_revalidation.add_subparsers(dest="goal_revalidation_action", required=True)
+    for action in ("plan", "start", "complete"):
+        action_parser = revalidation_actions.add_parser(action)
+        action_parser.add_argument("--payload-json", required=True)
+        action_parser.add_argument("--json", action="store_true")
 
     install = sub.add_parser("install", help="Prepare generic host MCP registrations")
     install.add_argument("target", choices=["codex", "codex-mcp", "claude", "claude-code", "claude-desktop"])
@@ -757,25 +759,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "goal-revalidation":
         try:
             payload = _json_object_arg(args.payload_json, "--payload-json")
-            graph = payload.get("graph")
-            if not isinstance(graph, dict):
-                raise ValueError("goal revalidation graph must be an object")
-            changed = {str(item) for item in payload.get("changed_fingerprints") or () if str(item)}
-            plan = compute_invalidation(graph, changed)
-            from .coordinator import WorkerCoordinator
-            from .worker_protocol import JobManifest
-            manifests = [JobManifest.from_dict(item) for item in payload.get("job_manifests") or ()]
-            attempt = create_revalidation_attempt(
-                WorkerCoordinator(),
-                plan,
-                payload.get("criterion_ids") or (),
-                manifests,
-                prior_attempt_number=int(payload.get("prior_attempt_number") or 0),
-            )
+            if args.goal_revalidation_action == "plan":
+                result = plan_revalidation(payload)
+            else:
+                from .coordinator import WorkerCoordinator
+
+                coordinator = WorkerCoordinator()
+                if args.goal_revalidation_action == "start":
+                    result = start_revalidation_attempt(coordinator, payload)
+                else:
+                    result = complete_host_revalidation_attempt(coordinator, payload)
         except (TypeError, ValueError) as exc:
             parser.error(str(exc))
             return 2
-        _print(attempt, args.json)
+        _print(result, args.json)
         return 0
 
     if args.command == "install":
