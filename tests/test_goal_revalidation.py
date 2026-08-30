@@ -87,3 +87,30 @@ def test_revalidation_rejects_mixed_goal_authority_before_any_write(tmp_path):
     assert coordinator.store.list("invalidation_plans") == []
     assert coordinator.store.list("revalidation_attempts") == []
     assert coordinator.store.list("jobs") == []
+
+
+def test_revalidation_rejects_payload_dependent_batch_before_any_write(tmp_path):
+    import sys
+    import pytest
+    from hashlib import sha256
+    from across_orchestrator.coordinator import WorkerCoordinator
+    from across_orchestrator.goal_graph import InvalidationPlan
+    from across_orchestrator.revalidation import create_revalidation_attempt
+    from across_orchestrator.worker_protocol import JobManifest
+    from across_orchestrator.worker_store import WorkerControlStore
+
+    coordinator = WorkerCoordinator(WorkerControlStore(tmp_path / "worker-control"))
+    plan = InvalidationPlan(("source-a",), ("criterion-a",), ("evidence-a",), ())
+    manifest = JobManifest(
+        job_id="job-payload-batch", run_id="run-payload", project_id="project-test", task_id="task-test",
+        workflow_id="goal-revalidation", idempotency_key="idem-payload-batch",
+        command_argv=(sys.executable, "-c", "pass"), required_capabilities={}, permissions={}, budgets={},
+        input_artifacts=({"logical_name": "input.json", "sha256": sha256(b"{}").hexdigest()},),
+        expected_outputs=(), goal_id="goal-payload", goal_revision=1, goal_node_id="node-a",
+        criterion_ids=("criterion-a",), input_fingerprint="f" * 64, required_evidence=("test_receipt",),
+    )
+    with pytest.raises(ValueError, match="input artifacts"):
+        create_revalidation_attempt(coordinator, plan, ["criterion-a"], [manifest])
+    assert coordinator.store.list("invalidation_plans") == []
+    assert coordinator.store.list("revalidation_attempts") == []
+    assert coordinator.store.list("jobs") == []

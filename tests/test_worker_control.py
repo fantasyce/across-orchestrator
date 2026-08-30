@@ -572,6 +572,54 @@ def test_terminal_event_cannot_invent_an_artifact_that_was_never_uploaded(tmp_pa
     assert coordinator.store.read_log("quarantine", job_manifest.job_id)[-1]["reason_code"] == "unverified_artifact"
 
 
+def test_failed_goal_terminal_is_atomically_committed_and_idempotent(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(
+        goal_id="goal-failed-terminal", goal_revision=1, goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",), input_fingerprint="d" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id, job_manifest.manifest_hash,
+        goal_id=job_manifest.goal_id, goal_revision=job_manifest.goal_revision,
+    )
+    failed = JobEvent(
+        event_id="event-failed-goal", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="failed", goal_id=job_manifest.goal_id,
+        goal_revision=job_manifest.goal_revision,
+    )
+    first = coordinator.record_event(failed)
+    replay = coordinator.record_event(failed)
+    assert first == replay
+    job = coordinator.job(job_manifest.job_id)
+    assert job["status"] == "failed"
+    assert job["terminal_event_id"] == failed.event_id
+    assert job["goal_evidence_binding"]["trust_state"] == "needs_review"
+    assert len(coordinator.store.read_log("events", job_manifest.job_id)) == 1
+
+
+def test_expired_old_revision_lease_stays_stale_during_recovery(tmp_path):
+    clock = Clock()
+    coordinator = approved_coordinator(tmp_path, clock=clock)
+    old = manifest(
+        goal_id="goal-expired-watermark", goal_revision=1, goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",), input_fingerprint="e" * 64,
+        required_evidence=("test_receipt",), retry_policy={"max_attempts": 2, "retry_safe": True},
+    )
+    coordinator.submit_job(old)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.authorize_goal_revision(old.goal_id, 2)
+    clock.advance(10)
+    assert coordinator.recover_expired_leases() == []
+    assert coordinator.job(old.job_id)["status"] == "stale"
+    assert coordinator.lease_next("node-test") is None
+
+
 
 def test_nw_030_033_039_040_043_048_049_bounded_executor_and_cleanup(tmp_path):
     executor = BoundedProcessExecutor(tmp_path / "worker")

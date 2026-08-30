@@ -839,8 +839,11 @@ class WorkerCoordinator:
             )
             raise CoordinatorError("event belongs to an old or different lease")
         events = self.store.read_log("events", event.job_id)
-        if any(item.get("event_id") == event.event_id for item in events):
-            return sanitize_public(next(item for item in events if item.get("event_id") == event.event_id))
+        duplicate = next((item for item in events if item.get("event_id") == event.event_id), None)
+        if duplicate is not None:
+            if job.get("terminal_event_id") != event.event_id or duplicate != event.to_dict():
+                raise CoordinatorError("duplicate event was not fully committed or does not match")
+            return sanitize_public(duplicate)
         lease_record = self._lease(event.lease_id)
         if lease_record.get("acknowledged_at") is None:
             self._quarantine_lease_submission(lease_record, "unacknowledged_lease")
@@ -856,7 +859,6 @@ class WorkerCoordinator:
             raise CoordinatorError("job already has a valid terminal event")
         artifacts = self._authoritative_terminal_artifacts(job, event) if event.state in TERMINAL_JOB_STATES else []
         serialized = event.to_dict()
-        self.store.append("events", event.job_id, serialized)
         job["status"] = event.state
         job["updated_at"] = self.clock()
         if event.reason_category:
@@ -901,30 +903,35 @@ class WorkerCoordinator:
                     item.artifact_id: item.sha256
                     for item in artifacts
                 }
-                job["goal_evidence_binding"] = bind_evidence_to_criteria(
-                    job["evidence_receipt"],
-                    {
-                        "schema_version": "across-goal-evidence-binding/1.0",
-                        "evidence_id": f"evidence-{event.event_id}",
-                        "criterion_ids": list(manifest.criterion_ids),
-                        "artifact_digests": artifact_digests,
-                    },
-                    authority={
-                        "goal_id": manifest.goal_id,
-                        "goal_revision": manifest.goal_revision,
-                        "task_id": manifest.task_id,
-                        "job_id": manifest.job_id,
-                        "run_id": manifest.run_id,
-                        "attempt": lease.attempt,
-                        "lease_id": lease.lease_id,
-                        "lease_state": "terminal_valid",
-                        "input_fingerprint": manifest.input_fingerprint,
-                        "registered_validator_ids": list(job.get("registered_validator_ids") or ()),
-                        "validator_results": dict(job.get("validator_results") or {}),
-                    },
-                )
+                binding = {
+                    "schema_version": "across-goal-evidence-binding/1.0",
+                    "evidence_id": f"evidence-{event.event_id}",
+                    "criterion_ids": list(manifest.criterion_ids),
+                    "artifact_digests": artifact_digests,
+                }
+                authority = {
+                    "goal_id": manifest.goal_id, "goal_revision": manifest.goal_revision,
+                    "task_id": manifest.task_id, "job_id": manifest.job_id, "run_id": manifest.run_id,
+                    "attempt": lease.attempt, "lease_id": lease.lease_id, "lease_state": "terminal_valid",
+                    "input_fingerprint": manifest.input_fingerprint,
+                    "registered_validator_ids": list(job.get("registered_validator_ids") or ()),
+                    "validator_results": dict(job.get("validator_results") or {}),
+                }
+                if event.state == "completed":
+                    job["goal_evidence_binding"] = bind_evidence_to_criteria(
+                        job["evidence_receipt"], binding, authority=authority,
+                    )
+                else:
+                    job["goal_evidence_binding"] = {
+                        **binding, **authority,
+                        "receipt_hash": job["evidence_receipt"]["receipt_hash"],
+                        "terminal_state": event.state,
+                        "verdict": "needs_review",
+                        "trust_state": "needs_review",
+                    }
             for grant_id in terminal_grant_ids:
                 self.revoke_model_grant(grant_id)
+        self.store.append("events", event.job_id, serialized)
         self.store.put("jobs", event.job_id, job)
         if event.state in TERMINAL_JOB_STATES:
             self._update_revalidation_attempt_for_job(event.job_id)
@@ -1014,14 +1021,18 @@ class WorkerCoordinator:
             if not job or job.get("terminal_event_id") or job.get("lease_id") != record.get("lease_id"):
                 continue
             manifest = JobManifest.from_dict(job["manifest"])
+            stale = bool(manifest.goal_id and int(manifest.goal_revision or 0) != self._authorized_goal_revision({
+                "goal_id": manifest.goal_id, "goal_revision": manifest.goal_revision,
+            }))
             retry_safe = bool(manifest.retry_policy.get("retry_safe", True)) and not bool(manifest.retry_policy.get("external_side_effects"))
             attempts_left = int(job.get("attempt") or 0) < int(manifest.retry_policy.get("max_attempts") or 1)
-            job["status"] = "queued" if retry_safe and attempts_left else "waiting_review"
+            job["status"] = "stale" if stale else "queued" if retry_safe and attempts_left else "waiting_review"
             job["node_id"] = None
             job["lease_id"] = None
             job["updated_at"] = now
             self.store.put("jobs", manifest.job_id, job)
-            recovered.append(manifest.job_id)
+            if not stale:
+                recovered.append(manifest.job_id)
             self._audit("job.lease_recovered", {"job_id": manifest.job_id, "result": job["status"]})
         return recovered
 

@@ -73,6 +73,14 @@ def create_revalidation_attempt(
 
     # Preflight every durable collision before creating the plan or any Job.
     for manifest in by_criterion.values():
+        if manifest.input_artifacts:
+            raise ValueError("revalidation Job manifests with input artifacts require an atomic payload-aware submission path")
+        authority = coordinator.store.get("goal_revisions", str(manifest.goal_id))
+        if authority and int(authority.get("goal_revision") or 0) > int(manifest.goal_revision or 0):
+            raise ValueError("revalidation Goal revision is older than host authority")
+        existing_job = coordinator.store.get("jobs", manifest.job_id)
+        if existing_job and existing_job.get("manifest_hash") != manifest.manifest_hash:
+            raise ValueError("revalidation Job id conflicts with existing work")
         existing = coordinator.store.get("idempotency", manifest.idempotency_key)
         if existing:
             job = coordinator.store.get("jobs", str(existing.get("job_id") or ""))
@@ -93,12 +101,7 @@ def create_revalidation_attempt(
         "goal_revision": goal_revision,
         "created_at": now,
     }
-    coordinator.store.put("invalidation_plans", plan_id, plan_record)
     job_ids: list[str] = []
-    for criterion_id in sorted(by_criterion):
-        manifest = by_criterion[criterion_id]
-        coordinator.submit_job(manifest)
-        job_ids.append(manifest.job_id)
     persisted = {
         **attempt,
         "plan_id": plan_id,
@@ -110,5 +113,24 @@ def create_revalidation_attempt(
         "created_at": now,
         "updated_at": now,
     }
-    coordinator.store.put("revalidation_attempts", str(attempt["attempt_id"]), persisted)
+    created_jobs: list["JobManifest"] = []
+    try:
+        with coordinator.store.lock(f"revalidation-batch-{attempt['attempt_id']}"):
+            for criterion_id in sorted(by_criterion):
+                manifest = by_criterion[criterion_id]
+                existed = coordinator.store.get("jobs", manifest.job_id) is not None
+                coordinator.submit_job(manifest)
+                job_ids.append(manifest.job_id)
+                if not existed:
+                    created_jobs.append(manifest)
+            persisted["job_ids"] = job_ids
+            coordinator.store.put("invalidation_plans", plan_id, plan_record)
+            coordinator.store.put("revalidation_attempts", str(attempt["attempt_id"]), persisted)
+    except Exception:
+        coordinator.store.delete("revalidation_attempts", str(attempt["attempt_id"]))
+        coordinator.store.delete("invalidation_plans", plan_id)
+        for manifest in created_jobs:
+            coordinator.store.delete("jobs", manifest.job_id)
+            coordinator.store.delete("idempotency", manifest.idempotency_key)
+        raise
     return persisted
