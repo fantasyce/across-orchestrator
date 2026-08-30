@@ -30,7 +30,9 @@ from .store import LocalStore
 
 
 def _normalize_goal_execution_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    contract = dict(value or {})
+    if not isinstance(value, Mapping):
+        raise ValueError("Goal execution contract must be an object")
+    contract = dict(value)
     required = {"schema_version", "goal_id", "goal_revision", "task_id", "criterion_ids", "input_fingerprint"}
     if set(contract) != required:
         raise ValueError("Goal execution contract fields are incomplete or unsupported")

@@ -812,12 +812,8 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
             if path == "/loops":
                 camel_contract_present = "goalExecutionContract" in payload
                 snake_contract_present = "goal_execution_contract" in payload
-                if (
-                    camel_contract_present
-                    and snake_contract_present
-                    and payload["goalExecutionContract"] != payload["goal_execution_contract"]
-                ):
-                    raise ValueError("conflicting Goal execution contract fields")
+                if camel_contract_present and snake_contract_present:
+                    raise ValueError("conflicting Goal execution contract fields: cannot use both aliases")
                 goal_execution_contract = (
                     payload["goalExecutionContract"]
                     if camel_contract_present

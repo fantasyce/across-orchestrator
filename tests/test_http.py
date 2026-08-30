@@ -461,6 +461,24 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("conflicting", payload["detail"])
 
+        status, payload = self.post_error(
+            "/loops",
+            {
+                "goal": "Reject duplicate Goal contract aliases",
+                "goalExecutionContract": valid,
+                "goal_execution_contract": valid,
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("both", payload["detail"])
+
+        status, payload = self.post_error(
+            "/loops",
+            {"goal": "Reject non-object Goal contract", "goalExecutionContract": 7},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("object", payload["detail"])
+
     def test_http_agent_loop_event_stream_follows_running_loop(self):
         loop = self.post(
             "/loops",
