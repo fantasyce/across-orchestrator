@@ -628,6 +628,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("unsupported actionPlan entries", invalid.stderr)
         self.assertNotIn("Traceback", invalid.stderr)
 
+    def test_cli_loop_start_rejects_explicit_empty_goal_execution_contract(self):
+        invalid = self.run_cli(
+            "loop-start", "Reject empty Goal contract", "--project", str(self.project),
+            "--goal-execution-contract-json", "{}", "--json",
+        )
+
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("fields", invalid.stderr)
+        self.assertNotIn("Traceback", invalid.stderr)
+
     def test_cli_agent_loop_control_actions(self):
         cancel_start = self.run_cli(
             "loop-start",

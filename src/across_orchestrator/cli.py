@@ -431,7 +431,11 @@ def main(argv: list[str] | None = None) -> int:
             memory_policy = _json_object_arg(args.memory_policy_json, "--memory-policy-json")
             approval_policy = _json_object_arg(args.approval_policy_json, "--approval-policy-json")
             metadata = _json_object_arg(args.metadata_json, "--metadata-json")
-            goal_execution_contract = _json_object_arg(args.goal_execution_contract_json, "--goal-execution-contract-json")
+            goal_execution_contract = (
+                _json_object_arg(args.goal_execution_contract_json, "--goal-execution-contract-json")
+                if args.goal_execution_contract_json is not None
+                else None
+            )
         except ValueError as exc:
             parser.error(str(exc))
             return 2
@@ -449,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
                 memory_policy=memory_policy or None,
                 approval_policy=approval_policy or None,
                 metadata=metadata or None,
-                goal_execution_contract=goal_execution_contract or None,
+                goal_execution_contract=goal_execution_contract,
             )
         except ValueError as exc:
             parser.error(str(exc))

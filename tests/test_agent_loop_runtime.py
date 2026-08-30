@@ -96,13 +96,19 @@ class AgentLoopRuntimeTests(unittest.TestCase):
         expected_hash = hashlib.sha256(json.dumps(unhashed, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
         self.assertEqual(receipt["receipt_hash"], expected_hash)
         self.assertEqual(receipt["terminal_state"], "completed")
-        self.assertEqual(summary["goal_evidence_binding"]["trust_state"], "verified")
+        self.assertEqual(summary["goal_evidence_binding"]["trust_state"], "needs_review")
         self.assertEqual(summary["goal_evidence_binding"]["authority"], "across-orchestrator-loop-runtime")
 
         with self.assertRaisesRegex(ValueError, "fields"):
             runtime.start_loop(
                 goal="Reject partial Goal binding", project_root=str(self.project),
                 goal_execution_contract={"goal_id": "partial"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            runtime.start_loop(
+                goal="Reject metadata authority injection", project_root=str(self.project),
+                metadata={"goal_execution_contract": contract},
             )
 
     def test_run_loop_records_memory_action_quality_and_final_output(self):

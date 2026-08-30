@@ -809,7 +809,14 @@ class WorkerCoordinator:
         }
 
     def record_event(self, event: JobEvent) -> dict[str, Any]:
-        self._recover_terminal_transaction(event.event_id)
+        if event.state in TERMINAL_JOB_STATES:
+            with self.store.lock(f"terminal-job-{event.job_id}"):
+                self._recover_terminal_transactions_for_job(event.job_id, job_locked=True)
+                return self._record_event(event, terminal_job_locked=True)
+        return self._record_event(event, terminal_job_locked=False)
+
+    def _record_event(self, event: JobEvent, *, terminal_job_locked: bool) -> dict[str, Any]:
+        self._recover_terminal_transaction(event.event_id, event.job_id, job_locked=terminal_job_locked)
         job = self._job(event.job_id)
         manifest_goal_id = (job.get("manifest") or {}).get("goal_id")
         manifest_goal_revision = self._authorized_goal_revision(job.get("manifest") or {}) if manifest_goal_id else None
@@ -932,7 +939,7 @@ class WorkerCoordinator:
                         "trust_state": "needs_review",
                     }
         if event.state in TERMINAL_JOB_STATES:
-            self._commit_terminal_event(job, serialized)
+            self._commit_terminal_event(job, serialized, job_locked=terminal_job_locked)
             for grant_id in terminal_grant_ids:
                 self.revoke_model_grant(grant_id)
         else:
@@ -946,16 +953,42 @@ class WorkerCoordinator:
         for transaction in self.store.list("terminal_transactions"):
             if transaction.get("status") == "committed":
                 continue
-            self._apply_terminal_transaction(transaction)
+            job_id = str(transaction.get("job_id") or "")
+            with self.store.lock(f"terminal-job-{job_id}"):
+                with self.store.lock(f"terminal-event-{transaction['event_id']}"):
+                    self._apply_terminal_transaction(transaction, job_locked=True)
             recovered.append(str(transaction.get("event_id") or ""))
         return recovered
 
-    def _recover_terminal_transaction(self, event_id: str) -> None:
-        transaction = self.store.get("terminal_transactions", event_id)
-        if transaction and transaction.get("status") != "committed":
-            self._apply_terminal_transaction(transaction)
+    def _recover_terminal_transactions_for_job(self, job_id: str, *, job_locked: bool) -> None:
+        if not job_locked:
+            raise RuntimeError("terminal Job lock is required")
+        for transaction in self.store.list("terminal_transactions"):
+            if transaction.get("job_id") != job_id or transaction.get("status") == "committed":
+                continue
+            with self.store.lock(f"terminal-event-{transaction['event_id']}"):
+                self._apply_terminal_transaction(transaction, job_locked=True)
 
-    def _commit_terminal_event(self, job: Mapping[str, Any], serialized: Mapping[str, Any]) -> None:
+    def _recover_terminal_transaction(self, event_id: str, job_id: str, *, job_locked: bool) -> None:
+        transaction = self.store.get("terminal_transactions", event_id)
+        if not transaction or transaction.get("status") == "committed":
+            return
+        if transaction.get("job_id") != job_id:
+            raise CoordinatorError("terminal event id is reserved by another Job")
+        if not job_locked:
+            raise RuntimeError("terminal Job lock is required")
+        with self.store.lock(f"terminal-event-{event_id}"):
+            self._apply_terminal_transaction(transaction, job_locked=True)
+
+    def _commit_terminal_event(
+        self,
+        job: Mapping[str, Any],
+        serialized: Mapping[str, Any],
+        *,
+        job_locked: bool = True,
+    ) -> None:
+        if not job_locked:
+            raise RuntimeError("terminal Job lock is required")
         event_id = str(serialized["event_id"])
         transaction = {
             "schema_version": "across-terminal-transaction/1.0",
@@ -967,23 +1000,46 @@ class WorkerCoordinator:
             "created_at": self.clock(),
             "updated_at": self.clock(),
         }
-        self.store.put("terminal_transactions", event_id, transaction)
-        self._apply_terminal_transaction(transaction)
+        with self.store.lock(f"terminal-event-{event_id}"):
+            existing = self.store.get("terminal_transactions", event_id)
+            if existing is not None:
+                if existing.get("job_id") != transaction["job_id"] or existing.get("event") != transaction["event"]:
+                    raise CoordinatorError("terminal event id is already reserved by a conflicting transaction")
+                transaction = existing
+            else:
+                self.store.put("terminal_transactions", event_id, transaction)
+            self._apply_terminal_transaction(transaction, job_locked=True)
 
-    def _apply_terminal_transaction(self, transaction: Mapping[str, Any]) -> None:
+    def _apply_terminal_transaction(self, transaction: Mapping[str, Any], *, job_locked: bool) -> None:
+        if not job_locked:
+            raise RuntimeError("terminal Job lock is required")
         event_id = str(transaction["event_id"])
         job_id = str(transaction["job_id"])
-        with self.store.lock(f"terminal-commit-{job_id}"):
-            self.store.put("jobs", job_id, dict(transaction["job"]))
-            events = self.store.read_log("events", job_id)
-            matching = [item for item in events if item.get("event_id") == event_id]
-            if matching and matching[0] != transaction["event"]:
-                raise CoordinatorError("terminal transaction conflicts with an existing event")
-            if not matching:
-                self.store.append("events", job_id, dict(transaction["event"]))
-            self._update_revalidation_attempt_for_job(job_id)
-            committed = {**dict(transaction), "status": "committed", "updated_at": self.clock()}
-            self.store.put("terminal_transactions", event_id, committed)
+        persisted_job = self.store.get("jobs", job_id)
+        if persisted_job is None:
+            raise CoordinatorError("terminal transaction Job no longer exists")
+        terminal_event_id = persisted_job.get("terminal_event_id")
+        if terminal_event_id and terminal_event_id != event_id:
+            raise CoordinatorError("Job already has a different terminal event")
+        events = self.store.read_log("events", job_id)
+        other_terminal = next(
+            (
+                item for item in events
+                if item.get("state") in TERMINAL_JOB_STATES and item.get("event_id") != event_id
+            ),
+            None,
+        )
+        if other_terminal is not None:
+            raise CoordinatorError("Job event log already has a different terminal event")
+        matching = [item for item in events if item.get("event_id") == event_id]
+        if matching and matching[0] != transaction["event"]:
+            raise CoordinatorError("terminal transaction conflicts with an existing event")
+        self.store.put("jobs", job_id, dict(transaction["job"]))
+        if not matching:
+            self.store.append("events", job_id, dict(transaction["event"]))
+        self._update_revalidation_attempt_for_job(job_id)
+        committed = {**dict(transaction), "status": "committed", "updated_at": self.clock()}
+        self.store.put("terminal_transactions", event_id, committed)
 
     def record_validator_result(
         self,

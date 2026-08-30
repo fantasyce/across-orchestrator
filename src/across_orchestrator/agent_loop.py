@@ -57,19 +57,16 @@ def _goal_execution_projection(loop: "LoopRun", finding_lifecycle: Mapping[str, 
     if not isinstance(raw, Mapping):
         return {}
     contract = _normalize_goal_execution_contract(raw)
-    findings = finding_lifecycle.get("current") if isinstance(finding_lifecycle, Mapping) else []
-    blocked = any(
-        isinstance(item, Mapping) and str(item.get("state") or item.get("status") or "").lower() in {"blocked", "failed"}
-        for item in (findings or [])
-    )
-    verified = loop.status == "completed" and not loop.error and not blocked
     receipt = {
         "schema_version": "across-orchestrator-goal-receipt/1.0",
         "goal_id": contract["goal_id"], "goal_revision": contract["goal_revision"],
         "task_id": contract["task_id"], "criterion_ids": contract["criterion_ids"],
         "input_fingerprint": contract["input_fingerprint"],
         "orchestrator_task_id": loop.loop_id, "run_id": loop.loop_id,
-        "terminal_state": loop.status, "quality_status": "passed" if verified else "needs_review",
+        "terminal_state": loop.status,
+        # A loop terminal state proves execution only. Criterion evidence still
+        # requires a host-registered validator or explicit human review.
+        "quality_status": "needs_review",
     }
     receipt["receipt_hash"] = hashlib.sha256(json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
     return {
@@ -80,7 +77,7 @@ def _goal_execution_projection(loop: "LoopRun", finding_lifecycle: Mapping[str, 
             "execution_state": "terminal_valid" if loop.status in TERMINAL_LOOP_STATUSES else "active",
             "receipt_hash": receipt["receipt_hash"],
             "authority": "across-orchestrator-loop-runtime",
-            "trust_state": "verified" if verified else "needs_review",
+            "trust_state": "needs_review",
         },
     }
 
@@ -1183,6 +1180,8 @@ class AgentLoopRuntime:
 
     def _validated_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
         clean = dict(metadata or {})
+        if "goal_execution_contract" in clean or "goalExecutionContract" in clean:
+            raise ValueError("goal execution contract is reserved for the first-class host parameter")
         validate_autopilot_metadata(clean)
         raw_plan = clean.get("actionPlan")
         if raw_plan is None:

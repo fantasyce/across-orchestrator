@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, BrokenBarrierError, Event, Thread
 from datetime import datetime, timedelta, timezone
 import asyncio
 import base64
@@ -600,6 +600,118 @@ def test_failed_goal_terminal_is_atomically_committed_and_idempotent(tmp_path):
     assert job["terminal_event_id"] == failed.event_id
     assert job["goal_evidence_binding"]["trust_state"] == "needs_review"
     assert len(coordinator.store.read_log("events", job_manifest.job_id)) == 1
+
+
+def test_terminal_transaction_recovers_after_job_write_interruption(tmp_path, monkeypatch):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest()
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    terminal = JobEvent(
+        event_id="event-wal-recovery", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="failed",
+    )
+    original_put = coordinator.store.put
+    failed_once = False
+
+    def interrupted_put(collection, record_id, value):
+        nonlocal failed_once
+        if collection == "jobs" and value.get("terminal_event_id") == terminal.event_id and not failed_once:
+            failed_once = True
+            raise OSError("injected durable Job write interruption")
+        return original_put(collection, record_id, value)
+
+    monkeypatch.setattr(coordinator.store, "put", interrupted_put)
+    with pytest.raises(OSError, match="injected"):
+        coordinator.record_event(terminal)
+    assert coordinator.store.read_log("events", job_manifest.job_id) == []
+    assert coordinator.job(job_manifest.job_id)["status"] == "leased"
+    monkeypatch.setattr(coordinator.store, "put", original_put)
+
+    restarted = WorkerCoordinator(coordinator.store)
+    assert restarted.job(job_manifest.job_id)["status"] == "failed"
+    assert restarted.job(job_manifest.job_id)["terminal_event_id"] == terminal.event_id
+    assert restarted.store.read_log("events", job_manifest.job_id) == [terminal.to_dict()]
+    assert restarted.store.get("terminal_transactions", terminal.event_id)["status"] == "committed"
+
+
+def test_terminal_event_id_is_globally_reserved_without_overwriting_wal(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    jobs = [manifest(job_id=f"job-shared-event-{index}", run_id=f"run-shared-event-{index}") for index in (1, 2)]
+    terminals = []
+    for job_manifest in jobs:
+        coordinator.submit_job(job_manifest)
+        lease = coordinator.lease_next("node-test")
+        assert lease is not None
+        coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+        terminals.append(JobEvent(
+            event_id="event-shared-global", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+            node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+            sequence=1, state="failed",
+        ))
+
+    coordinator.record_event(terminals[0])
+    with pytest.raises(CoordinatorError, match="reserved|conflict"):
+        coordinator.record_event(terminals[1])
+
+    transaction = coordinator.store.get("terminal_transactions", "event-shared-global")
+    assert transaction is not None
+    assert transaction["job_id"] == jobs[0].job_id
+    assert coordinator.job(jobs[1].job_id)["status"] == "leased"
+    assert coordinator.store.read_log("events", jobs[1].job_id) == []
+
+
+def test_concurrent_terminal_events_commit_exactly_one_terminal(tmp_path, monkeypatch):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(job_id="job-concurrent-terminal", run_id="run-concurrent-terminal")
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    barrier = Barrier(2)
+    original_commit = coordinator._commit_terminal_event
+
+    def synchronized_commit(job, event, *, job_locked=True):
+        try:
+            barrier.wait(timeout=0.5)
+        except BrokenBarrierError:
+            pass
+        return original_commit(job, event, job_locked=job_locked)
+
+    monkeypatch.setattr(coordinator, "_commit_terminal_event", synchronized_commit)
+    terminals = [
+        JobEvent(
+            event_id=f"event-concurrent-{index}", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+            node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+            sequence=1, state=state,
+        )
+        for index, state in ((1, "completed"), (2, "failed"))
+    ]
+    outcomes = []
+
+    def submit(event):
+        try:
+            outcomes.append(("ok", coordinator.record_event(event)))
+        except CoordinatorError as exc:
+            outcomes.append(("error", str(exc)))
+
+    threads = [Thread(target=submit, args=(event,)) for event in terminals]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(kind for kind, _ in outcomes) == ["error", "ok"]
+    events = coordinator.store.read_log("events", job_manifest.job_id)
+    assert len(events) == 1
+    assert coordinator.job(job_manifest.job_id)["terminal_event_id"] == events[0]["event_id"]
+    committed = [item for item in coordinator.store.list("terminal_transactions") if item.get("job_id") == job_manifest.job_id]
+    assert len(committed) == 1
+    assert committed[0]["status"] == "committed"
 
 
 def test_expired_old_revision_lease_stays_stale_during_recovery(tmp_path):
