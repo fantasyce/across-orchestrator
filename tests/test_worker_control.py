@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, BrokenBarrierError, Event, Thread
 from datetime import datetime, timedelta, timezone
 import asyncio
 import base64
@@ -115,6 +115,7 @@ def manifest(job_id: str = "job-test", run_id: str = "run-test", **overrides) ->
         "job_id": job_id,
         "run_id": run_id,
         "project_id": "project-test",
+        "task_id": "task-test",
         "workflow_id": "scenario-simulation",
         "idempotency_key": f"idem-{job_id}",
         "command_argv": (sys.executable, "-c", "print('ok')"),
@@ -366,6 +367,370 @@ def test_nw_025_026_027_031_032_leases_recover_monotonically_and_terminal_is_ide
     clock.advance(10)
     assert coordinator.recover_expired_leases() == ["job-side-effect"]
     assert coordinator.job("job-side-effect")["status"] == "waiting_review"
+
+
+def test_goal_revision_is_bound_through_lease_heartbeat_and_terminal_event(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    goal_manifest = manifest(
+        goal_id="goal-task-1",
+        goal_revision=3,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="a" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(goal_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease.goal_id == "goal-task-1"
+    assert lease.goal_revision == 3
+
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.acknowledge_lease(
+            lease.lease_id,
+            goal_manifest.manifest_hash,
+            goal_id="goal-task-1",
+            goal_revision=2,
+        )
+    lease = coordinator.lease_next("node-test")
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        goal_manifest.manifest_hash,
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    coordinator.heartbeat_lease(
+        lease.lease_id,
+        node_id="node-test",
+        attempt=lease.attempt,
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    stale = JobEvent(
+        event_id="event-stale-goal",
+        job_id=goal_manifest.job_id,
+        run_id=goal_manifest.run_id,
+        node_id="node-test",
+        lease_id=lease.lease_id,
+        attempt=lease.attempt,
+        sequence=1,
+        state="completed",
+        goal_id="goal-task-1",
+        goal_revision=2,
+    )
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.record_event(stale)
+    assert coordinator.job(goal_manifest.job_id)["status"] == "leased"
+    quarantined = coordinator.store.read_log("quarantine", goal_manifest.job_id)
+    assert quarantined[-1]["reason_code"] == "stale_goal_revision"
+    accepted = JobEvent(
+        event_id="event-current-goal",
+        job_id=goal_manifest.job_id,
+        run_id=goal_manifest.run_id,
+        node_id="node-test",
+        lease_id=lease.lease_id,
+        attempt=lease.attempt,
+        sequence=1,
+        state="completed",
+        goal_id="goal-task-1",
+        goal_revision=3,
+    )
+    coordinator.record_event(accepted)
+    receipt = coordinator.job(goal_manifest.job_id)["evidence_receipt"]
+    assert receipt["goal_id"] == "goal-task-1"
+    assert receipt["goal_revision"] == 3
+    assert receipt["criterion_ids"] == ["criterion-tests"]
+    assert receipt["task_id"] == "task-test"
+    assert coordinator.job(goal_manifest.job_id)["goal_evidence_binding"]["trust_state"] == "needs_review"
+
+
+def test_worker_quality_gate_assertion_cannot_verify_goal_evidence(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    goal_manifest = manifest(
+        goal_id="goal-untrusted-gate",
+        goal_revision=1,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="b" * 64,
+        required_evidence=("test_receipt",),
+        quality_gates=("tests",),
+    )
+    coordinator.submit_job(goal_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        goal_manifest.manifest_hash,
+        goal_id=goal_manifest.goal_id,
+        goal_revision=goal_manifest.goal_revision,
+    )
+    coordinator.record_event(JobEvent(
+        event_id="event-self-reported-gate", job_id=goal_manifest.job_id, run_id=goal_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id=goal_manifest.goal_id,
+        goal_revision=goal_manifest.goal_revision,
+        payload={"evidence_receipt": {"quality_gates": {"tests": "passed"}}},
+    ))
+    job = coordinator.job(goal_manifest.job_id)
+    assert job["evidence_receipt"]["quality_gates"] == {}
+    assert job["goal_evidence_binding"]["verdict"] == "needs_review"
+
+
+def test_expired_acknowledged_lease_cannot_submit_a_terminal_event(tmp_path):
+    clock = Clock()
+    coordinator = approved_coordinator(tmp_path, clock=clock)
+    job_manifest = manifest()
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    clock.advance(10)
+
+    event = JobEvent(
+        event_id="event-after-expiry", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed",
+    )
+    with pytest.raises(CoordinatorError, match="expired"):
+        coordinator.record_event(event)
+
+    assert coordinator.job(job_manifest.job_id)["status"] == "queued"
+    assert coordinator.store.read_log("quarantine", job_manifest.job_id)[-1]["reason_code"] == "expired_lease"
+
+
+def test_host_revision_watermark_quarantines_old_active_lease(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    old_manifest = manifest(
+        goal_id="goal-watermark",
+        goal_revision=1,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="a" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(old_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        old_manifest.manifest_hash,
+        goal_id="goal-watermark",
+        goal_revision=1,
+    )
+
+    authority = coordinator.authorize_goal_revision("goal-watermark", 2)
+    assert authority["goal_revision"] == 2
+    stale = JobEvent(
+        event_id="event-old-authority", job_id=old_manifest.job_id, run_id=old_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id="goal-watermark", goal_revision=1,
+    )
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.record_event(stale)
+    assert coordinator.store.read_log("quarantine", old_manifest.job_id)[-1]["reason_code"] == "stale_goal_revision"
+
+    with pytest.raises(CoordinatorError, match="older than host authority"):
+        coordinator.submit_job(replace(old_manifest, job_id="job-stale", idempotency_key="idem-stale"))
+
+    assert coordinator.job(old_manifest.job_id)["status"] == "stale"
+    assert coordinator.lease_next("node-test") is None
+
+
+def test_terminal_event_cannot_invent_an_artifact_that_was_never_uploaded(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(
+        expected_outputs=("result.json",),
+        goal_id="goal-artifact-authority", goal_revision=1,
+        goal_node_id="goal-node-build", criterion_ids=("criterion-tests",),
+        input_fingerprint="c" * 64, required_evidence=("test_receipt",),
+        quality_gates=("tests",),
+    )
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id, job_manifest.manifest_hash,
+        goal_id=job_manifest.goal_id, goal_revision=job_manifest.goal_revision,
+    )
+    coordinator.record_validator_result(
+        job_manifest.job_id, criterion_id="criterion-tests",
+        validator_id="quality-gate:tests", method="host pytest", status="passed",
+    )
+    invented = ArtifactDescriptor(
+        artifact_id="artifact-never-uploaded", run_id=job_manifest.run_id,
+        job_id=job_manifest.job_id, node_id="node-test", logical_name="result.json",
+        media_type="application/json", size=2, sha256=sha256(b"{}").hexdigest(),
+    )
+    event = JobEvent(
+        event_id="event-invented-artifact", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id=job_manifest.goal_id,
+        goal_revision=job_manifest.goal_revision, payload={"artifacts": [invented.to_dict()]},
+    )
+    with pytest.raises(CoordinatorError, match="unverified artifact"):
+        coordinator.record_event(event)
+    assert coordinator.job(job_manifest.job_id).get("terminal_event_id") is None
+    assert coordinator.store.read_log("quarantine", job_manifest.job_id)[-1]["reason_code"] == "unverified_artifact"
+
+
+def test_failed_goal_terminal_is_atomically_committed_and_idempotent(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(
+        goal_id="goal-failed-terminal", goal_revision=1, goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",), input_fingerprint="d" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id, job_manifest.manifest_hash,
+        goal_id=job_manifest.goal_id, goal_revision=job_manifest.goal_revision,
+    )
+    failed = JobEvent(
+        event_id="event-failed-goal", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="failed", goal_id=job_manifest.goal_id,
+        goal_revision=job_manifest.goal_revision,
+    )
+    first = coordinator.record_event(failed)
+    replay = coordinator.record_event(failed)
+    assert first == replay
+    job = coordinator.job(job_manifest.job_id)
+    assert job["status"] == "failed"
+    assert job["terminal_event_id"] == failed.event_id
+    assert job["goal_evidence_binding"]["trust_state"] == "needs_review"
+    assert len(coordinator.store.read_log("events", job_manifest.job_id)) == 1
+
+
+def test_terminal_transaction_recovers_after_job_write_interruption(tmp_path, monkeypatch):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest()
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    terminal = JobEvent(
+        event_id="event-wal-recovery", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="failed",
+    )
+    original_put = coordinator.store.put
+    failed_once = False
+
+    def interrupted_put(collection, record_id, value):
+        nonlocal failed_once
+        if collection == "jobs" and value.get("terminal_event_id") == terminal.event_id and not failed_once:
+            failed_once = True
+            raise OSError("injected durable Job write interruption")
+        return original_put(collection, record_id, value)
+
+    monkeypatch.setattr(coordinator.store, "put", interrupted_put)
+    with pytest.raises(OSError, match="injected"):
+        coordinator.record_event(terminal)
+    assert coordinator.store.read_log("events", job_manifest.job_id) == []
+    assert coordinator.job(job_manifest.job_id)["status"] == "leased"
+    monkeypatch.setattr(coordinator.store, "put", original_put)
+
+    restarted = WorkerCoordinator(coordinator.store)
+    assert restarted.job(job_manifest.job_id)["status"] == "failed"
+    assert restarted.job(job_manifest.job_id)["terminal_event_id"] == terminal.event_id
+    assert restarted.store.read_log("events", job_manifest.job_id) == [terminal.to_dict()]
+    assert restarted.store.get("terminal_transactions", terminal.event_id)["status"] == "committed"
+
+
+def test_terminal_event_id_is_globally_reserved_without_overwriting_wal(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    jobs = [manifest(job_id=f"job-shared-event-{index}", run_id=f"run-shared-event-{index}") for index in (1, 2)]
+    terminals = []
+    for job_manifest in jobs:
+        coordinator.submit_job(job_manifest)
+        lease = coordinator.lease_next("node-test")
+        assert lease is not None
+        coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+        terminals.append(JobEvent(
+            event_id="event-shared-global", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+            node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+            sequence=1, state="failed",
+        ))
+
+    coordinator.record_event(terminals[0])
+    with pytest.raises(CoordinatorError, match="reserved|conflict"):
+        coordinator.record_event(terminals[1])
+
+    transaction = coordinator.store.get("terminal_transactions", "event-shared-global")
+    assert transaction is not None
+    assert transaction["job_id"] == jobs[0].job_id
+    assert coordinator.job(jobs[1].job_id)["status"] == "leased"
+    assert coordinator.store.read_log("events", jobs[1].job_id) == []
+
+
+def test_concurrent_terminal_events_commit_exactly_one_terminal(tmp_path, monkeypatch):
+    coordinator = approved_coordinator(tmp_path)
+    job_manifest = manifest(job_id="job-concurrent-terminal", run_id="run-concurrent-terminal")
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    barrier = Barrier(2)
+    original_commit = coordinator._commit_terminal_event
+
+    def synchronized_commit(job, event, *, job_locked=True):
+        try:
+            barrier.wait(timeout=0.5)
+        except BrokenBarrierError:
+            pass
+        return original_commit(job, event, job_locked=job_locked)
+
+    monkeypatch.setattr(coordinator, "_commit_terminal_event", synchronized_commit)
+    terminals = [
+        JobEvent(
+            event_id=f"event-concurrent-{index}", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+            node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+            sequence=1, state=state,
+        )
+        for index, state in ((1, "completed"), (2, "failed"))
+    ]
+    outcomes = []
+
+    def submit(event):
+        try:
+            outcomes.append(("ok", coordinator.record_event(event)))
+        except CoordinatorError as exc:
+            outcomes.append(("error", str(exc)))
+
+    threads = [Thread(target=submit, args=(event,)) for event in terminals]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(kind for kind, _ in outcomes) == ["error", "ok"]
+    events = coordinator.store.read_log("events", job_manifest.job_id)
+    assert len(events) == 1
+    assert coordinator.job(job_manifest.job_id)["terminal_event_id"] == events[0]["event_id"]
+    committed = [item for item in coordinator.store.list("terminal_transactions") if item.get("job_id") == job_manifest.job_id]
+    assert len(committed) == 1
+    assert committed[0]["status"] == "committed"
+
+
+def test_expired_old_revision_lease_stays_stale_during_recovery(tmp_path):
+    clock = Clock()
+    coordinator = approved_coordinator(tmp_path, clock=clock)
+    old = manifest(
+        goal_id="goal-expired-watermark", goal_revision=1, goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",), input_fingerprint="e" * 64,
+        required_evidence=("test_receipt",), retry_policy={"max_attempts": 2, "retry_safe": True},
+    )
+    coordinator.submit_job(old)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.authorize_goal_revision(old.goal_id, 2)
+    clock.advance(10)
+    assert coordinator.recover_expired_leases() == []
+    assert coordinator.job(old.job_id)["status"] == "stale"
+    assert coordinator.lease_next("node-test") is None
+
 
 
 def test_nw_030_033_039_040_043_048_049_bounded_executor_and_cleanup(tmp_path):

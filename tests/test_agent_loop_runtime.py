@@ -74,6 +74,43 @@ class AgentLoopRuntimeTests(unittest.TestCase):
             ["loop.started"],
         )
 
+    def test_goal_execution_contract_is_validated_and_projects_authoritative_terminal_receipt(self):
+        import hashlib
+        import json
+        from across_orchestrator.agent_loop import AgentLoopRuntime
+
+        runtime = AgentLoopRuntime()
+        contract = {
+            "schema_version": "across-goal-execution-contract/1.0",
+            "goal_id": "goal-loop", "goal_revision": 2, "task_id": "task-host",
+            "criterion_ids": ["criterion-tests"], "input_fingerprint": "a" * 64,
+        }
+        loop = runtime.start_loop(
+            goal="Complete a Goal-bound loop", project_root=str(self.project),
+            goal_execution_contract=contract,
+        )
+        runtime.run_loop(loop.loop_id)
+        summary = runtime.get_loop_evidence_summary(loop.loop_id)
+        receipt = summary["evidence_receipt"]
+        unhashed = {key: value for key, value in receipt.items() if key != "receipt_hash"}
+        expected_hash = hashlib.sha256(json.dumps(unhashed, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+        self.assertEqual(receipt["receipt_hash"], expected_hash)
+        self.assertEqual(receipt["terminal_state"], "completed")
+        self.assertEqual(summary["goal_evidence_binding"]["trust_state"], "needs_review")
+        self.assertEqual(summary["goal_evidence_binding"]["authority"], "across-orchestrator-loop-runtime")
+
+        with self.assertRaisesRegex(ValueError, "fields"):
+            runtime.start_loop(
+                goal="Reject partial Goal binding", project_root=str(self.project),
+                goal_execution_contract={"goal_id": "partial"},
+            )
+
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            runtime.start_loop(
+                goal="Reject metadata authority injection", project_root=str(self.project),
+                metadata={"goal_execution_contract": contract},
+            )
+
     def test_run_loop_records_memory_action_quality_and_final_output(self):
         from across_orchestrator.agent_loop import AgentLoopRuntime
 

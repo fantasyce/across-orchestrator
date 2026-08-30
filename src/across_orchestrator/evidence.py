@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import hashlib
 import json
 import re
@@ -311,6 +311,109 @@ def build_evidence_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     return receipt
 
 
+def bind_evidence_to_criteria(
+    receipt: Mapping[str, Any], binding: Mapping[str, Any], *, authority: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Project criterion evidence only from coordinator-owned authority."""
+
+    if not isinstance(receipt, Mapping) or not isinstance(binding, Mapping) or not isinstance(authority, Mapping):
+        raise ValueError("evidence receipt, binding, and authority must be objects")
+    if binding.get("schema_version") != "across-goal-evidence-binding/1.0":
+        raise ValueError("unsupported goal evidence binding schema")
+    caller_owned_forbidden = {
+        "verified", "passed", "verdict", "trust_state", "lease_state", "validator",
+        "validator_results", "goal_id", "goal_revision", "task_id", "job_id", "run_id",
+        "attempt", "attempt_id", "lease_id", "input_fingerprint",
+    }
+    if caller_owned_forbidden.intersection(binding):
+        raise ValueError("evidence trust cannot be supplied by the caller")
+    receipt_hash_field = (
+        "receipt_hash" if receipt.get("schema_version") == "across-worker-evidence/1.0" else "evidence_sha256"
+    )
+    receipt_hash = str(receipt.get(receipt_hash_field) or "")
+    unhashed = dict(receipt)
+    unhashed.pop(receipt_hash_field, None)
+    observed_hash = (
+        _worker_payload_hash(unhashed)
+        if receipt_hash_field == "receipt_hash"
+        else _canonical_sha256(unhashed)
+    )
+    if receipt_hash != observed_hash:
+        raise ValueError("evidence receipt hash is invalid")
+    for field in (
+        "goal_id", "goal_revision", "task_id", "job_id", "run_id", "attempt", "lease_id", "input_fingerprint"
+    ):
+        if authority.get(field) != receipt.get(field):
+            raise ValueError(f"evidence {field} binding mismatch")
+    if authority.get("lease_state") != "terminal_valid":
+        raise ValueError("evidence lease is expired or invalid")
+    if receipt.get("terminal_state") != "completed":
+        raise ValueError("evidence receipt is not completed")
+    receipt_criteria = set(map(str, receipt.get("criterion_ids") or ()))
+    bound_criteria = set(map(str, binding.get("criterion_ids") or ()))
+    if not bound_criteria or not bound_criteria.issubset(receipt_criteria):
+        raise ValueError("evidence criterion binding mismatch")
+    receipt_artifacts = {
+        str(item.get("artifact_id")): str(item.get("sha256"))
+        for item in receipt.get("artifacts") or ()
+        if isinstance(item, Mapping)
+    }
+    bound_artifacts = {
+        str(key): str(value) for key, value in (binding.get("artifact_digests") or {}).items()
+    }
+    if bound_artifacts != receipt_artifacts:
+        raise ValueError("evidence artifact digest mismatch")
+    registered = set(map(str, authority.get("registered_validator_ids") or ()))
+    validator_results = authority.get("validator_results")
+    if not isinstance(validator_results, Mapping):
+        raise ValueError("host validator results must be an object")
+    validators: dict[str, dict[str, str]] = {}
+    verified = True
+    for criterion_id in sorted(bound_criteria):
+        result = validator_results.get(criterion_id)
+        if not isinstance(result, Mapping):
+            verified = False
+            continue
+        validator_id = str(result.get("validator_id") or "")
+        method = str(result.get("method") or "")
+        status = str(result.get("status") or "").lower()
+        if not validator_id or validator_id not in registered or not method:
+            raise ValueError("evidence validator is not registered by the host")
+        if status not in {"passed", "ready", "verified"}:
+            verified = False
+        validators[criterion_id] = {
+            "validator_id": validator_id,
+            "method": method,
+            "status": status,
+        }
+    verdict = "verified" if verified else "needs_review"
+    return {
+        **dict(binding),
+        "goal_id": authority["goal_id"],
+        "goal_revision": authority["goal_revision"],
+        "task_id": authority["task_id"],
+        "job_id": authority["job_id"],
+        "run_id": authority["run_id"],
+        "attempt": authority["attempt"],
+        "attempt_id": f"{authority['job_id']}:{authority['attempt']}",
+        "lease_id": authority["lease_id"],
+        "lease_state": authority["lease_state"],
+        "input_fingerprint": authority["input_fingerprint"],
+        "criterion_ids": sorted(bound_criteria),
+        "artifact_digests": dict(sorted(bound_artifacts.items())),
+        "validators": validators,
+        "receipt_hash": receipt_hash,
+        "verdict": verdict,
+        "trust_state": verdict,
+        "authority": "across-orchestrator-worker-coordinator",
+    }
+
+
+def _worker_payload_hash(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _evidence_verdict(sandbox_receipt: dict[str, Any], validations: Any) -> str:
     sandbox_status = str(sandbox_receipt.get("status") or "").lower()
     if sandbox_status != "completed":
@@ -337,17 +440,60 @@ def _evidence_verdict(sandbox_receipt: dict[str, Any], validations: Any) -> str:
 
 
 def _git_commit_sha(workspace_root: Path) -> str:
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=workspace_root,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else ""
+    return _git_commit_sha_from_metadata(workspace_root)
+
+
+def _git_commit_sha_from_metadata(workspace_root: Path) -> str:
+    """Resolve HEAD without spawning Git, including linked worktrees.
+
+    Evidence projection runs inside the long-lived HTTP sidecar. On macOS a
+    nested Git process can stall in that environment, and Git's parent search
+    may escape the client-selected project root. HEAD and refs are stable,
+    read-only metadata, so read them directly only when ``.git`` belongs to
+    the selected root.
+    """
+    root = workspace_root.resolve()
+    marker = root / ".git"
+    if not marker.exists():
+        return ""
+    try:
+        if marker.is_dir():
+            git_dir = marker
+        else:
+            declaration = marker.read_text(encoding="utf-8").strip()
+            if not declaration.startswith("gitdir:"):
+                return ""
+            value = declaration.partition(":")[2].strip()
+            git_dir = (marker.parent / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+            return head.lower()
+        if not head.startswith("ref:"):
+            return ""
+        ref_name = head.partition(":")[2].strip()
+        common_dir = git_dir
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            common_value = common_marker.read_text(encoding="utf-8").strip()
+            common_dir = (git_dir / common_value).resolve()
+        for base in (git_dir, common_dir):
+            ref_path = base / ref_name
+            if ref_path.is_file():
+                commit = ref_path.read_text(encoding="utf-8").strip()
+                if re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+                    return commit.lower()
+            packed_refs = base / "packed-refs"
+            if packed_refs.is_file():
+                for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                    if not line or line.startswith(("#", "^")):
+                        continue
+                    commit, separator, packed_ref = line.partition(" ")
+                    if separator and packed_ref == ref_name and re.fullmatch(r"[0-9a-fA-F]{40,64}", commit):
+                        return commit.lower()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return ""
 
 
 def _secret_free_sandbox_receipt(value: Any) -> dict[str, Any]:

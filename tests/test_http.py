@@ -437,6 +437,48 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(telemetry["loop_id"], loop_id)
         self.assertIn("loop.duration_ms", [metric["metric"] for metric in telemetry["metrics"]])
 
+    def test_http_loop_rejects_empty_and_conflicting_goal_contract_fields(self):
+        status, payload = self.post_error(
+            "/loops",
+            {"goal": "Reject empty Goal contract", "goalExecutionContract": {}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("fields", payload["detail"])
+
+        valid = {
+            "schema_version": "across-goal-execution-contract/1.0",
+            "goal_id": "goal-http", "goal_revision": 1, "task_id": "task-http",
+            "criterion_ids": ["criterion-http"], "input_fingerprint": "a" * 64,
+        }
+        status, payload = self.post_error(
+            "/loops",
+            {
+                "goal": "Reject ambiguous Goal contract",
+                "goalExecutionContract": valid,
+                "goal_execution_contract": {**valid, "goal_id": "goal-other"},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("conflicting", payload["detail"])
+
+        status, payload = self.post_error(
+            "/loops",
+            {
+                "goal": "Reject duplicate Goal contract aliases",
+                "goalExecutionContract": valid,
+                "goal_execution_contract": valid,
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("both", payload["detail"])
+
+        status, payload = self.post_error(
+            "/loops",
+            {"goal": "Reject non-object Goal contract", "goalExecutionContract": 7},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("object", payload["detail"])
+
     def test_http_agent_loop_event_stream_follows_running_loop(self):
         loop = self.post(
             "/loops",

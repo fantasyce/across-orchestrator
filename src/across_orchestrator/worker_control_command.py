@@ -128,18 +128,42 @@ def handle_worker_control_command(request: Mapping[str, Any], coordinator: Worke
             for name, value in dict(payload.get("inputs_base64") or {}).items()
         }
         return runtime.submit_job(JobManifest.from_dict(_object(payload, "manifest")), input_payloads=inputs)
+    if action == "goal.revision.authorize":
+        return runtime.authorize_goal_revision(
+            str(payload.get("goal_id") or ""),
+            int(payload.get("goal_revision") or 0),
+        )
     if action == "job.get":
         return runtime.job(str(payload.get("job_id") or ""))
     if action == "job.lease_next":
         lease = runtime.lease_next(str(payload.get("node_id") or ""))
         return {"lease": lease.to_dict() if lease else None}
     if action == "job.acknowledge":
-        return runtime.acknowledge_lease(str(payload.get("lease_id") or ""), str(payload.get("manifest_hash") or "")).to_dict()
+        return runtime.acknowledge_lease(
+            str(payload.get("lease_id") or ""),
+            str(payload.get("manifest_hash") or ""),
+            goal_id=payload.get("goal_id"),
+            goal_revision=payload.get("goal_revision"),
+        ).to_dict()
     if action == "job.heartbeat":
-        return runtime.heartbeat_lease(str(payload.get("lease_id") or ""), node_id=str(payload.get("node_id") or ""), attempt=int(payload.get("attempt") or 0)).to_dict()
+        return runtime.heartbeat_lease(
+            str(payload.get("lease_id") or ""),
+            node_id=str(payload.get("node_id") or ""),
+            attempt=int(payload.get("attempt") or 0),
+            goal_id=payload.get("goal_id"),
+            goal_revision=payload.get("goal_revision"),
+        ).to_dict()
     if action == "job.event":
         event = JobEvent(**_object(payload, "event"))
         return runtime.record_event(event)
+    if action == "job.validator_result":
+        return runtime.record_validator_result(
+            str(payload.get("job_id") or ""),
+            criterion_id=str(payload.get("criterion_id") or ""),
+            validator_id=str(payload.get("validator_id") or ""),
+            method=str(payload.get("method") or ""),
+            status=str(payload.get("status") or ""),
+        )
     if action == "job.cancel":
         return runtime.cancel_job(str(payload.get("job_id") or ""), reason=str(payload.get("reason") or "user_cancelled"))
     if action == "job.recover":

@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import uuid
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from .goal_graph import InvalidationPlan
+
+if TYPE_CHECKING:
+    from .coordinator import WorkerCoordinator
+    from .worker_protocol import JobManifest
+
+
+def build_revalidation_attempt(
+    plan: InvalidationPlan,
+    criterion_ids: Sequence[str],
+    *,
+    prior_attempt_number: int = 0,
+) -> dict[str, object]:
+    selected = sorted(set(map(str, criterion_ids)))
+    if not selected or not set(selected).issubset(plan.affected_criterion_ids):
+        raise ValueError("revalidation criteria must be affected by the invalidation plan")
+    evidence_by_criterion = dict(plan.stale_evidence_by_criterion)
+    superseded = sorted({
+        evidence_id
+        for criterion_id in selected
+        for evidence_id in evidence_by_criterion.get(criterion_id, plan.stale_evidence_ids)
+    })
+    return {
+        "schema_version": "across-goal-revalidation-attempt/1.0",
+        "attempt_id": f"revalidation-attempt-{uuid.uuid4().hex}",
+        "attempt_number": max(0, int(prior_attempt_number)) + 1,
+        "criterion_ids": selected,
+        "changed_fingerprints": list(plan.changed_fingerprints),
+        "supersedes_evidence_ids": superseded,
+        "preserved_evidence_ids": list(plan.preserved_evidence_ids),
+        "state": "planned",
+    }
+
+
+def create_revalidation_attempt(
+    coordinator: "WorkerCoordinator",
+    plan: InvalidationPlan,
+    criterion_ids: Sequence[str],
+    manifests: Sequence["JobManifest"],
+    *,
+    prior_attempt_number: int = 0,
+) -> dict[str, object]:
+    """Persist invalidation authority and enqueue criterion-scoped replacement jobs."""
+
+    attempt = build_revalidation_attempt(
+        plan,
+        criterion_ids,
+        prior_attempt_number=prior_attempt_number,
+    )
+    selected = set(map(str, attempt["criterion_ids"]))
+    by_criterion: dict[str, "JobManifest"] = {}
+    for manifest in manifests:
+        if len(manifest.criterion_ids) != 1:
+            raise ValueError("revalidation Job manifest must bind exactly one criterion")
+        criterion_id = manifest.criterion_ids[0]
+        if criterion_id not in selected or criterion_id in by_criterion:
+            raise ValueError("revalidation Job manifests must match selected criteria exactly")
+        if not manifest.goal_id or not manifest.task_id:
+            raise ValueError("revalidation Job manifest must include the complete Goal binding")
+        by_criterion[criterion_id] = manifest
+    if set(by_criterion) != selected:
+        raise ValueError("one revalidation Job manifest is required per selected criterion")
+    bindings = {(manifest.goal_id, manifest.task_id, manifest.goal_revision) for manifest in by_criterion.values()}
+    if len(bindings) != 1:
+        raise ValueError("revalidation Job manifests must share one Goal, Task, and revision")
+    goal_id, task_id, goal_revision = next(iter(bindings))
+
+    # Preflight every durable collision before creating the plan or any Job.
+    for manifest in by_criterion.values():
+        if manifest.input_artifacts:
+            raise ValueError("revalidation Job manifests with input artifacts require an atomic payload-aware submission path")
+        authority = coordinator.store.get("goal_revisions", str(manifest.goal_id))
+        if authority and int(authority.get("goal_revision") or 0) > int(manifest.goal_revision or 0):
+            raise ValueError("revalidation Goal revision is older than host authority")
+        existing_job = coordinator.store.get("jobs", manifest.job_id)
+        if existing_job and existing_job.get("manifest_hash") != manifest.manifest_hash:
+            raise ValueError("revalidation Job id conflicts with existing work")
+        existing = coordinator.store.get("idempotency", manifest.idempotency_key)
+        if existing:
+            job = coordinator.store.get("jobs", str(existing.get("job_id") or ""))
+            if not job or job.get("manifest_hash") != manifest.manifest_hash:
+                raise ValueError("revalidation idempotency key conflicts with existing work")
+
+    plan_id = f"invalidation-plan-{uuid.uuid4().hex}"
+    now = coordinator.clock()
+    plan_record = {
+        "schema_version": "across-goal-invalidation-plan/1.0",
+        "plan_id": plan_id,
+        "changed_fingerprints": list(plan.changed_fingerprints),
+        "affected_criterion_ids": list(plan.affected_criterion_ids),
+        "stale_evidence_ids": list(plan.stale_evidence_ids),
+        "preserved_evidence_ids": list(plan.preserved_evidence_ids),
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "goal_revision": goal_revision,
+        "created_at": now,
+    }
+    job_ids: list[str] = []
+    persisted = {
+        **attempt,
+        "plan_id": plan_id,
+        "job_ids": job_ids,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "goal_revision": goal_revision,
+        "state": "queued",
+        "created_at": now,
+        "updated_at": now,
+    }
+    created_jobs: list["JobManifest"] = []
+    try:
+        with coordinator.store.lock(f"revalidation-batch-{attempt['attempt_id']}"):
+            for criterion_id in sorted(by_criterion):
+                manifest = by_criterion[criterion_id]
+                existed = coordinator.store.get("jobs", manifest.job_id) is not None
+                coordinator.submit_job(manifest)
+                job_ids.append(manifest.job_id)
+                if not existed:
+                    created_jobs.append(manifest)
+            persisted["job_ids"] = job_ids
+            coordinator.store.put("invalidation_plans", plan_id, plan_record)
+            coordinator.store.put("revalidation_attempts", str(attempt["attempt_id"]), persisted)
+    except Exception:
+        coordinator.store.delete("revalidation_attempts", str(attempt["attempt_id"]))
+        coordinator.store.delete("invalidation_plans", plan_id)
+        for manifest in created_jobs:
+            coordinator.store.delete("jobs", manifest.job_id)
+            coordinator.store.delete("idempotency", manifest.idempotency_key)
+        raise
+    return persisted

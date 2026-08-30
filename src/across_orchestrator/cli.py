@@ -29,6 +29,9 @@ from .run_contracts import build_execution_policy_contract, build_replay_plan, b
 from .runtime import OrchestratorRuntime
 from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandbox_provider_registry
 from .store import LocalStore
+from .goal_contracts import normalize_goal_contract, stable_goal_hash
+from .goal_graph import compute_invalidation
+from .revalidation import create_revalidation_attempt
 
 
 def _emit_public_text(text: str) -> None:
@@ -118,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop_start.add_argument("--memory-policy-json")
     loop_start.add_argument("--approval-policy-json")
     loop_start.add_argument("--metadata-json")
+    loop_start.add_argument("--goal-execution-contract-json")
     loop_start.add_argument("--json", action="store_true")
 
     loop_run = sub.add_parser("loop-run", help="Run or continue an agent loop")
@@ -279,6 +283,16 @@ def build_parser() -> argparse.ArgumentParser:
     health = sub.add_parser("health", help="Probe local runtime health")
     health.add_argument("--json", action="store_true")
 
+    goal_contract = sub.add_parser("goal-contract", help="Normalize a Goal Contract through the installed plugin runtime")
+    goal_contract.add_argument("--contract-json", required=True)
+    goal_contract.add_argument("--json", action="store_true")
+
+    goal_revalidation = sub.add_parser(
+        "goal-revalidation", help="Build a selective Goal Contract revalidation attempt"
+    )
+    goal_revalidation.add_argument("--payload-json", required=True)
+    goal_revalidation.add_argument("--json", action="store_true")
+
     install = sub.add_parser("install", help="Prepare generic host MCP registrations")
     install.add_argument("target", choices=["codex", "codex-mcp", "claude", "claude-code", "claude-desktop"])
     install.add_argument("--stdout", action="store_true")
@@ -417,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
             memory_policy = _json_object_arg(args.memory_policy_json, "--memory-policy-json")
             approval_policy = _json_object_arg(args.approval_policy_json, "--approval-policy-json")
             metadata = _json_object_arg(args.metadata_json, "--metadata-json")
+            goal_execution_contract = (
+                _json_object_arg(args.goal_execution_contract_json, "--goal-execution-contract-json")
+                if args.goal_execution_contract_json is not None
+                else None
+            )
         except ValueError as exc:
             parser.error(str(exc))
             return 2
@@ -434,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
                 memory_policy=memory_policy or None,
                 approval_policy=approval_policy or None,
                 metadata=metadata or None,
+                goal_execution_contract=goal_execution_contract,
             )
         except ValueError as exc:
             parser.error(str(exc))
@@ -716,6 +736,46 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "health":
         _print(render_plugin_health(), args.json)
+        return 0
+
+    if args.command == "goal-contract":
+        try:
+            contract = _json_object_arg(args.contract_json, "--contract-json")
+            normalized = normalize_goal_contract(contract)
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+            return 2
+        _print({
+            "schema_version": "across-goal-contract-probe/1.0",
+            "goal_id": normalized["goal_id"],
+            "goal_revision": normalized["revision"],
+            "criterion_ids": sorted(item["criterion_id"] for item in normalized["acceptance_criteria"]),
+            "evidence_hash": stable_goal_hash(normalized),
+        }, args.json)
+        return 0
+
+    if args.command == "goal-revalidation":
+        try:
+            payload = _json_object_arg(args.payload_json, "--payload-json")
+            graph = payload.get("graph")
+            if not isinstance(graph, dict):
+                raise ValueError("goal revalidation graph must be an object")
+            changed = {str(item) for item in payload.get("changed_fingerprints") or () if str(item)}
+            plan = compute_invalidation(graph, changed)
+            from .coordinator import WorkerCoordinator
+            from .worker_protocol import JobManifest
+            manifests = [JobManifest.from_dict(item) for item in payload.get("job_manifests") or ()]
+            attempt = create_revalidation_attempt(
+                WorkerCoordinator(),
+                plan,
+                payload.get("criterion_ids") or (),
+                manifests,
+                prior_attempt_number=int(payload.get("prior_attempt_number") or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+            return 2
+        _print(attempt, args.json)
         return 0
 
     if args.command == "install":

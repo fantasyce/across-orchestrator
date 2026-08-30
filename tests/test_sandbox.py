@@ -213,6 +213,61 @@ class SandboxPolicyTests(unittest.TestCase):
         canonical = json.dumps(unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
         self.assertEqual(receipt_hash, hashlib.sha256(canonical).hexdigest())
 
+    @unittest.skipUnless(
+        sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file(),
+        "requires the macOS sandbox-exec kernel policy backend",
+    )
+    def test_execution_receipt_redacts_traceback_source_line_paths_before_hashing(self):
+        from across_orchestrator.sandbox import execute_sandbox_command
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            base = Path(tempdir).resolve()
+            workspace = base / "workspace"
+            runtime_state = base / "runtime-state"
+            workspace.mkdir()
+            runtime_state.mkdir()
+            allowed = runtime_state / "allowed.json"
+            denied = base / "private" / "denied.json"
+            allowed.write_text("before", encoding="utf-8")
+            denied.parent.mkdir()
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"Path({str(allowed)!r}).write_text('allowed'); "
+                    f"Path({str(denied)!r}).write_text('denied')"
+                ),
+            ]
+            result = execute_sandbox_command(
+                {
+                    "network_policy": "none",
+                    "filesystem_policy": {
+                        "mode": "read_only",
+                        "runtime_state_files": [str(allowed)],
+                    },
+                    "workspace_root": str(workspace),
+                    "command_allowlist": [command],
+                },
+                command=command,
+                cwd=str(workspace),
+            )
+
+            self.assertEqual(result["status"], "failed", result)
+            self.assertEqual(allowed.read_text(encoding="utf-8"), "allowed")
+            self.assertFalse(denied.exists())
+            serialized = json.dumps(result, sort_keys=True)
+            self.assertNotIn(str(allowed), serialized)
+            self.assertNotIn(str(denied), serialized)
+            self.assertIn("<redacted-path>", result["output"]["stderr"])
+            receipt_hash = result["receipt_sha256"]
+            unhashed = dict(result)
+            unhashed.pop("receipt_sha256")
+            canonical = json.dumps(
+                unhashed, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+            self.assertEqual(receipt_hash, hashlib.sha256(canonical).hexdigest())
+
     def test_local_provider_times_out_and_terminates_process(self):
         from across_orchestrator.sandbox import execute_sandbox_command
 

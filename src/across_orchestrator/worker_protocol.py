@@ -219,6 +219,7 @@ class JobManifest:
     job_id: str
     run_id: str
     project_id: str
+    task_id: str | None
     workflow_id: str
     idempotency_key: str
     command_argv: tuple[str, ...]
@@ -237,11 +238,19 @@ class JobManifest:
     evidence_requirements: tuple[str, ...] = ()
     created_by: str = "host"
     created_at: float = field(default_factory=time.time)
+    goal_id: str | None = None
+    goal_revision: int | None = None
+    goal_node_id: str | None = None
+    criterion_ids: tuple[str, ...] = ()
+    input_fingerprint: str | None = None
+    required_evidence: tuple[str, ...] = ()
     schema_version: str = JOB_SCHEMA
 
     def __post_init__(self) -> None:
         for name in ("job_id", "run_id", "project_id", "workflow_id", "idempotency_key"):
             require_identifier(getattr(self, name), name)
+        if self.task_id is not None:
+            require_identifier(self.task_id, "task_id")
         if self.schema_version != JOB_SCHEMA:
             raise ProtocolError("unsupported job manifest schema")
         if self.executor not in EXECUTORS:
@@ -256,6 +265,34 @@ class JobManifest:
             raise ProtocolError("jobs with external side effects cannot be marked retry_safe")
         if self.permissions.get("network", {}).get("mode", "none") not in {"none", "allowlist"}:
             raise ProtocolError("worker network permission must be none or allowlist")
+        goal_values_present = any((
+            self.goal_id,
+            self.goal_revision is not None,
+            self.goal_node_id,
+            self.criterion_ids,
+            self.input_fingerprint,
+            self.required_evidence,
+        ))
+        if goal_values_present:
+            if not (
+                self.goal_id
+                and self.task_id
+                and type(self.goal_revision) is int
+                and self.goal_revision > 0
+                and self.goal_node_id
+                and self.criterion_ids
+                and self.input_fingerprint
+                and self.required_evidence
+            ):
+                raise ProtocolError("goal binding must include task, id, revision, node, criteria, input fingerprint, and evidence")
+            require_identifier(self.goal_id, "goal_id")
+            require_identifier(self.goal_node_id, "goal_node_id")
+            for criterion_id in self.criterion_ids:
+                require_identifier(criterion_id, "criterion_ids")
+            for evidence_kind in self.required_evidence:
+                require_identifier(evidence_kind, "required_evidence")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.input_fingerprint):
+                raise ProtocolError("goal binding input_fingerprint must be sha256")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "JobManifest":
@@ -267,6 +304,7 @@ class JobManifest:
             job_id=str(value.get("job_id") or ""),
             run_id=str(value.get("run_id") or ""),
             project_id=str(value.get("project_id") or ""),
+            task_id=str(value.get("task_id")) if value.get("task_id") is not None else None,
             workflow_id=str(value.get("workflow_id") or ""),
             idempotency_key=str(value.get("idempotency_key") or ""),
             command_argv=tuple(command),
@@ -285,12 +323,29 @@ class JobManifest:
             evidence_requirements=tuple(map(str, value.get("evidence_requirements") or ())),
             created_by=str(value.get("created_by") or "host"),
             created_at=float(value.get("created_at") or time.time()),
+            goal_id=str(value.get("goal_id")) if value.get("goal_id") is not None else None,
+            goal_revision=value.get("goal_revision"),
+            goal_node_id=str(value.get("goal_node_id")) if value.get("goal_node_id") is not None else None,
+            criterion_ids=tuple(map(str, value.get("criterion_ids") or ())),
+            input_fingerprint=(
+                str(value.get("input_fingerprint")) if value.get("input_fingerprint") is not None else None
+            ),
+            required_evidence=tuple(map(str, value.get("required_evidence") or ())),
         )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        for key in ("command_argv", "expected_outputs", "input_artifacts", "preferred_labels", "quality_gates", "evidence_requirements"):
+        for key in (
+            "command_argv", "expected_outputs", "input_artifacts", "preferred_labels",
+            "quality_gates", "evidence_requirements", "criterion_ids", "required_evidence",
+        ):
             data[key] = list(data[key])
+        if self.goal_id is None:
+            for key in (
+                "goal_id", "goal_revision", "goal_node_id", "criterion_ids",
+                "input_fingerprint", "required_evidence",
+            ):
+                data.pop(key, None)
         return data
 
     @property
@@ -309,6 +364,8 @@ class JobLease:
     issued_at: float
     expires_at: float
     heartbeat_interval_seconds: float
+    goal_id: str | None = None
+    goal_revision: int | None = None
     acknowledged_at: float | None = None
     schema_version: str = LEASE_SCHEMA
 
@@ -319,9 +376,19 @@ class JobLease:
             raise ProtocolError("lease attempt and expiry must be valid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.manifest_hash):
             raise ProtocolError("lease manifest_hash must be sha256")
+        if bool(self.goal_id) != (self.goal_revision is not None):
+            raise ProtocolError("lease goal binding must include id and revision")
+        if self.goal_id:
+            require_identifier(self.goal_id, "goal_id")
+            if type(self.goal_revision) is not int or self.goal_revision < 1:
+                raise ProtocolError("lease goal_revision must be positive")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.goal_id is None:
+            data.pop("goal_id", None)
+            data.pop("goal_revision", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -334,6 +401,8 @@ class JobEvent:
     attempt: int
     sequence: int
     state: str
+    goal_id: str | None = None
+    goal_revision: int | None = None
     reason_category: str | None = None
     payload: Mapping[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -346,9 +415,19 @@ class JobEvent:
             raise ProtocolError("event attempt and sequence must be positive")
         for name in ("event_id", "job_id", "run_id", "node_id", "lease_id"):
             require_identifier(getattr(self, name), name)
+        if bool(self.goal_id) != (self.goal_revision is not None):
+            raise ProtocolError("event goal binding must include id and revision")
+        if self.goal_id:
+            require_identifier(self.goal_id, "goal_id")
+            if type(self.goal_revision) is not int or self.goal_revision < 1:
+                raise ProtocolError("event goal_revision must be positive")
 
     def to_dict(self) -> dict[str, Any]:
-        return sanitize_public(asdict(self))
+        data = asdict(self)
+        if self.goal_id is None:
+            data.pop("goal_id", None)
+            data.pop("goal_revision", None)
+        return sanitize_public(data)
 
 
 @dataclass(frozen=True)
@@ -443,7 +522,8 @@ def build_evidence_receipt(
     receipt = {
         "schema_version": EVIDENCE_SCHEMA,
         "run_id": manifest.run_id,
-        "job_id": manifest.job_id,
+            "job_id": manifest.job_id,
+            "task_id": manifest.task_id,
         "goal_hash": payload_hash({"workflow_id": manifest.workflow_id, "project_id": manifest.project_id}),
         "manifest_hash": manifest.manifest_hash,
         "permission_plan_hash": payload_hash(manifest.permissions),
@@ -468,5 +548,14 @@ def build_evidence_receipt(
         "cleanup_status": cleanup_status,
         "resource_usage": sanitize_public(dict(resource_usage or {})),
     }
+    if manifest.goal_id:
+        receipt.update({
+            "goal_id": manifest.goal_id,
+            "goal_revision": manifest.goal_revision,
+            "goal_node_id": manifest.goal_node_id,
+            "criterion_ids": list(manifest.criterion_ids),
+            "input_fingerprint": manifest.input_fingerprint,
+            "required_evidence": list(manifest.required_evidence),
+        })
     receipt["receipt_hash"] = payload_hash(receipt)
     return receipt

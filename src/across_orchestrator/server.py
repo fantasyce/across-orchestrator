@@ -810,6 +810,15 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                 self.respond(replay)
                 return
             if path == "/loops":
+                camel_contract_present = "goalExecutionContract" in payload
+                snake_contract_present = "goal_execution_contract" in payload
+                if camel_contract_present and snake_contract_present:
+                    raise ValueError("conflicting Goal execution contract fields: cannot use both aliases")
+                goal_execution_contract = (
+                    payload["goalExecutionContract"]
+                    if camel_contract_present
+                    else payload.get("goal_execution_contract")
+                )
                 loop = self.loop_runtime.start_loop(
                     goal=payload.get("goal") or "",
                     project_root=_server_managed_project_root("http-loop"),
@@ -818,6 +827,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     memory_policy=payload.get("memoryPolicy") or payload.get("memory_policy"),
                     approval_policy=payload.get("approvalPolicy") or payload.get("approval_policy"),
                     metadata=payload.get("metadata"),
+                    goal_execution_contract=goal_execution_contract,
                 )
                 self.respond(loop.to_dict(), status=201)
                 return
