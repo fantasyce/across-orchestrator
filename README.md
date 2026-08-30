@@ -44,6 +44,10 @@ Agent-readable entrypoints:
 
 ## Current Status
 
+`v0.11.0` adds the shared Goal Contract, criterion-bound evidence graph,
+revision-aware revalidation, and Worker claim/receipt bindings used by hosts
+to prevent stale or incomplete work from being presented as complete.
+
 `v0.10.12` rejects pre-existing artifacts when a task requires fresh output,
 prevents local deliveries from claiming unrecorded remote Worker execution,
 separates structural delivery success from pending human semantic review, and
@@ -354,11 +358,16 @@ python3 -m pip install -e .
 Or install the current release tag directly from GitHub:
 
 ```bash
-python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.10.12"
+python3 -m pip install "git+https://github.com/fantasyce/across-orchestrator.git@v0.11.0"
 ```
 
 The GitHub release is source-first. There is no attached Python wheel; packaged
-hosts can install from the pinned tag. The `v0.10.12` release retains the
+hosts can install from the pinned tag. The `v0.11.0` release publishes fresh
+checksummed Worker source bundles and the multi-architecture relay container
+for the Goal Contract runtime; those assets are remote execution components,
+not a notarized macOS application.
+
+The `v0.10.12` release retains the
 checksummed Worker source bundles and multi-architecture relay container from
 `v0.10.11`; those assets are remote execution components, not a notarized
 macOS application. The `v0.10.11` release additionally
