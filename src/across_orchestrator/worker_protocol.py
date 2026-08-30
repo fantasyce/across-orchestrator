@@ -107,7 +107,11 @@ def sanitize_public(value: Any) -> Any:
     if isinstance(value, str):
         text = _ABSOLUTE_USER_PATH.sub("<user-home>", value)
         text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/-]+=*", "Bearer [redacted]", text)
-        text = re.sub(r"(?i)(?:sk|gh[op])[-_][A-Za-z0-9_-]{16,}", "[redacted]", text)
+        text = re.sub(
+            r"(?i)(?<![A-Za-z0-9])(?:sk|gh[op])[-_][A-Za-z0-9_-]{16,}",
+            "[redacted]",
+            text,
+        )
         return text
     return value
 
