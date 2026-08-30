@@ -1,11 +1,10 @@
 import json
 import tempfile
-import unittest
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock
 
 
-class EvidenceReceiptTests(unittest.TestCase):
+class EvidenceReceiptTests(TestCase):
     def test_git_commit_sha_reads_linked_worktree_metadata_without_spawning_git(self):
         from across_orchestrator.evidence import _git_commit_sha
 
@@ -161,4 +160,4 @@ class EvidenceReceiptTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
