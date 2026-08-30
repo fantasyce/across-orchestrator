@@ -219,6 +219,7 @@ class JobManifest:
     job_id: str
     run_id: str
     project_id: str
+    task_id: str | None
     workflow_id: str
     idempotency_key: str
     command_argv: tuple[str, ...]
@@ -248,6 +249,8 @@ class JobManifest:
     def __post_init__(self) -> None:
         for name in ("job_id", "run_id", "project_id", "workflow_id", "idempotency_key"):
             require_identifier(getattr(self, name), name)
+        if self.task_id is not None:
+            require_identifier(self.task_id, "task_id")
         if self.schema_version != JOB_SCHEMA:
             raise ProtocolError("unsupported job manifest schema")
         if self.executor not in EXECUTORS:
@@ -273,6 +276,7 @@ class JobManifest:
         if goal_values_present:
             if not (
                 self.goal_id
+                and self.task_id
                 and type(self.goal_revision) is int
                 and self.goal_revision > 0
                 and self.goal_node_id
@@ -280,7 +284,7 @@ class JobManifest:
                 and self.input_fingerprint
                 and self.required_evidence
             ):
-                raise ProtocolError("goal binding must include id, revision, node, criteria, input fingerprint, and evidence")
+                raise ProtocolError("goal binding must include task, id, revision, node, criteria, input fingerprint, and evidence")
             require_identifier(self.goal_id, "goal_id")
             require_identifier(self.goal_node_id, "goal_node_id")
             for criterion_id in self.criterion_ids:
@@ -300,6 +304,7 @@ class JobManifest:
             job_id=str(value.get("job_id") or ""),
             run_id=str(value.get("run_id") or ""),
             project_id=str(value.get("project_id") or ""),
+            task_id=str(value.get("task_id")) if value.get("task_id") is not None else None,
             workflow_id=str(value.get("workflow_id") or ""),
             idempotency_key=str(value.get("idempotency_key") or ""),
             command_argv=tuple(command),
@@ -517,7 +522,8 @@ def build_evidence_receipt(
     receipt = {
         "schema_version": EVIDENCE_SCHEMA,
         "run_id": manifest.run_id,
-        "job_id": manifest.job_id,
+            "job_id": manifest.job_id,
+            "task_id": manifest.task_id,
         "goal_hash": payload_hash({"workflow_id": manifest.workflow_id, "project_id": manifest.project_id}),
         "manifest_hash": manifest.manifest_hash,
         "permission_plan_hash": payload_hash(manifest.permissions),

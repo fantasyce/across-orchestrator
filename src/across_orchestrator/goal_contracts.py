@@ -56,9 +56,27 @@ def _string_list(value: Any, name: str) -> list[str]:
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return json.dumps(_canonical_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("goal protocol values must be canonical JSON") from exc
+
+
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 2**53 - 1:
+            raise ValueError("Goal Contract numbers must be finite safe integers")
+        return value
+    if isinstance(value, float):
+        if not value.is_integer() or abs(value) > 2**53 - 1:
+            raise ValueError("Goal Contract numbers must be finite safe integers")
+        return int(value)
+    raise ValueError("goal protocol values must be canonical JSON")
 
 
 def criterion_id(description: str, validator_kind: str) -> str:
@@ -74,7 +92,7 @@ def stable_goal_hash(value: Mapping[str, Any]) -> str:
 
 
 def normalize_goal_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    contract = copy.deepcopy(dict(_mapping(value, "goal contract")))
+    contract = _canonical_value(copy.deepcopy(dict(_mapping(value, "goal contract"))))
     if contract.get("schema_version") != GOAL_CONTRACT_SCHEMA:
         raise ValueError(f"schema_version must be {GOAL_CONTRACT_SCHEMA}")
     _required_text(contract.get("goal_id"), "goal_id")
@@ -109,13 +127,16 @@ def normalize_goal_contract(value: Mapping[str, Any]) -> dict[str, Any]:
     _required_text(contract.get("source"), "source")
     if bool(contract.get("confirmed_by")) != bool(contract.get("confirmed_at")):
         raise ValueError("confirmed_by and confirmed_at must be supplied together")
+    if "confirmed_by" in contract or "confirmed_at" in contract:
+        _required_text(contract.get("confirmed_by"), "confirmed_by")
+        _required_text(contract.get("confirmed_at"), "confirmed_at")
     _required_text(contract.get("created_at"), "created_at")
     _canonical_json(contract)
     return contract
 
 
 def normalize_goal_change_proposal(value: Mapping[str, Any]) -> dict[str, Any]:
-    proposal = copy.deepcopy(dict(_mapping(value, "goal change proposal")))
+    proposal = _canonical_value(copy.deepcopy(dict(_mapping(value, "goal change proposal"))))
     if proposal.get("schema_version") != GOAL_CHANGE_PROPOSAL_SCHEMA:
         raise ValueError(f"schema_version must be {GOAL_CHANGE_PROPOSAL_SCHEMA}")
     _required_text(proposal.get("proposal_id"), "proposal_id")

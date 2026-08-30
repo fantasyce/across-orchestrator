@@ -48,7 +48,7 @@ class GoalContractTests(unittest.TestCase):
         self.assertEqual(stable_goal_hash(fixture), "2d6996c43ab0104c3b94f87a2b6030d2d6bab0df1fca777bebba894b21fe83a8")
 
     def test_invalid_revision_schema_and_duplicate_criterion_fail_closed(self):
-        from across_orchestrator.goal_contracts import normalize_goal_contract
+        from across_orchestrator.goal_contracts import normalize_goal_contract, stable_goal_hash
 
         for mutate in (
             lambda value: value.update(revision=0),
@@ -60,6 +60,16 @@ class GoalContractTests(unittest.TestCase):
             mutate(fixture)
             with self.assertRaises(ValueError):
                 normalize_goal_contract(fixture)
+
+        whitespace = simple_goal_contract()
+        whitespace["confirmed_by"] = "   "
+        whitespace["confirmed_at"] = "   "
+        with self.assertRaises(ValueError):
+            normalize_goal_contract(whitespace)
+        with self.assertRaisesRegex(ValueError, "integer|canonical JSON"):
+            stable_goal_hash({"value": 1e-7})
+        self.assertEqual(stable_goal_hash({"value": 1.0}), stable_goal_hash({"value": 1}))
+        self.assertEqual(stable_goal_hash({"value": -0.0}), stable_goal_hash({"value": 0}))
 
     def test_change_proposals_cannot_use_a_management_operation(self):
         from across_orchestrator.goal_contracts import normalize_goal_change_proposal

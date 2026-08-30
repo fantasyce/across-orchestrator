@@ -11,6 +11,7 @@ class RunContractTests(unittest.TestCase):
             "job_id": "job-goal-1",
             "run_id": "run-goal-1",
             "project_id": "project-1",
+            "task_id": "task-1",
             "workflow_id": "workflow-1",
             "idempotency_key": "goal-job-1",
             "command_argv": ["python", "-c", "print('ok')"],

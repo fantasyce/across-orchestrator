@@ -57,34 +57,47 @@ class EvidenceReceiptTests(unittest.TestCase):
         binding = {
             "schema_version": "across-goal-evidence-binding/1.0",
             "evidence_id": "evidence-1",
+            "criterion_ids": ["criterion-tests"],
+            "artifact_digests": {"artifact-1": "b" * 64},
+        }
+        receipt["task_id"] = "task-1"
+        receipt["receipt_hash"] = payload_hash({key: value for key, value in receipt.items() if key != "receipt_hash"})
+        authority = {
             "goal_id": "goal-1",
             "goal_revision": 3,
-            "criterion_ids": ["criterion-tests"],
             "task_id": "task-1",
             "run_id": "run-1",
-            "attempt_id": "attempt-2",
+            "job_id": "job-1",
             "attempt": 2,
             "lease_id": "lease-1",
             "lease_state": "terminal_valid",
-            "artifact_digests": {"artifact-1": "b" * 64},
             "input_fingerprint": "a" * 64,
-            "validator": {"validator_id": "quality-gate:tests", "method": "receipt_quality_gate"},
+            "registered_validator_ids": ["quality-gate:tests"],
+            "validator_results": {
+                "criterion-tests": {
+                    "validator_id": "quality-gate:tests",
+                    "method": "host_quality_gate",
+                    "status": "passed",
+                }
+            },
         }
-        result = bind_evidence_to_criteria(receipt, binding)
+        result = bind_evidence_to_criteria(receipt, binding, authority=authority)
         self.assertEqual(result["trust_state"], "verified")
         self.assertEqual(result["verdict"], "verified")
         self.assertEqual(result["receipt_hash"], receipt["receipt_hash"])
 
         for mutation in (
-            lambda value: value.update(goal_revision=2),
-            lambda value: value.update(artifact_digests={"artifact-1": "c" * 64}),
-            lambda value: value.update(lease_state="expired"),
-            lambda value: value.update(verified=True),
+            lambda value: value[0].update(artifact_digests={"artifact-1": "c" * 64}),
+            lambda value: value[1].update(goal_revision=2),
+            lambda value: value[1].update(lease_state="expired"),
+            lambda value: value[1].update(task_id="task-foreign"),
+            lambda value: value[1].update(validator_results={"criterion-tests": {"validator_id": "self_report", "method": "worker", "status": "passed"}}),
         ):
-            invalid = dict(binding)
-            mutation(invalid)
+            invalid_binding = dict(binding)
+            invalid_authority = {**authority, "validator_results": dict(authority["validator_results"])}
+            mutation((invalid_binding, invalid_authority))
             with self.assertRaises(ValueError):
-                bind_evidence_to_criteria(receipt, invalid)
+                bind_evidence_to_criteria(receipt, invalid_binding, authority=invalid_authority)
 
     def test_hash_is_stable_and_payload_is_secret_free(self):
         from across_orchestrator.evidence import build_evidence_receipt

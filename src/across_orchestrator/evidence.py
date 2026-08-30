@@ -312,15 +312,20 @@ def build_evidence_receipt(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def bind_evidence_to_criteria(
-    receipt: Mapping[str, Any], binding: Mapping[str, Any]
+    receipt: Mapping[str, Any], binding: Mapping[str, Any], *, authority: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Verify a durable receipt before projecting criterion-level evidence."""
+    """Project criterion evidence only from coordinator-owned authority."""
 
-    if not isinstance(receipt, Mapping) or not isinstance(binding, Mapping):
-        raise ValueError("evidence receipt and binding must be objects")
+    if not isinstance(receipt, Mapping) or not isinstance(binding, Mapping) or not isinstance(authority, Mapping):
+        raise ValueError("evidence receipt, binding, and authority must be objects")
     if binding.get("schema_version") != "across-goal-evidence-binding/1.0":
         raise ValueError("unsupported goal evidence binding schema")
-    if "verified" in binding or "passed" in binding or "verdict" in binding:
+    caller_owned_forbidden = {
+        "verified", "passed", "verdict", "trust_state", "lease_state", "validator",
+        "validator_results", "goal_id", "goal_revision", "task_id", "job_id", "run_id",
+        "attempt", "attempt_id", "lease_id", "input_fingerprint",
+    }
+    if caller_owned_forbidden.intersection(binding):
         raise ValueError("evidence trust cannot be supplied by the caller")
     receipt_hash_field = (
         "receipt_hash" if receipt.get("schema_version") == "across-worker-evidence/1.0" else "evidence_sha256"
@@ -335,10 +340,12 @@ def bind_evidence_to_criteria(
     )
     if receipt_hash != observed_hash:
         raise ValueError("evidence receipt hash is invalid")
-    for field in ("goal_id", "goal_revision", "run_id", "attempt", "lease_id", "input_fingerprint"):
-        if binding.get(field) != receipt.get(field):
+    for field in (
+        "goal_id", "goal_revision", "task_id", "job_id", "run_id", "attempt", "lease_id", "input_fingerprint"
+    ):
+        if authority.get(field) != receipt.get(field):
             raise ValueError(f"evidence {field} binding mismatch")
-    if binding.get("lease_state") != "terminal_valid":
+    if authority.get("lease_state") != "terminal_valid":
         raise ValueError("evidence lease is expired or invalid")
     if receipt.get("terminal_state") != "completed":
         raise ValueError("evidence receipt is not completed")
@@ -354,21 +361,50 @@ def bind_evidence_to_criteria(
     bound_artifacts = {
         str(key): str(value) for key, value in (binding.get("artifact_digests") or {}).items()
     }
-    if not bound_artifacts or any(receipt_artifacts.get(key) != value for key, value in bound_artifacts.items()):
+    if bound_artifacts != receipt_artifacts:
         raise ValueError("evidence artifact digest mismatch")
-    validator = binding.get("validator")
-    if not isinstance(validator, Mapping) or not validator.get("validator_id") or not validator.get("method"):
-        raise ValueError("evidence validator identity is required")
-    quality_values = list((receipt.get("quality_gates") or {}).values())
-    if not quality_values or any(str(value).lower() not in {"passed", "ready", "verified"} for value in quality_values):
-        raise ValueError("evidence validator output is not satisfied")
+    registered = set(map(str, authority.get("registered_validator_ids") or ()))
+    validator_results = authority.get("validator_results")
+    if not isinstance(validator_results, Mapping):
+        raise ValueError("host validator results must be an object")
+    validators: dict[str, dict[str, str]] = {}
+    verified = True
+    for criterion_id in sorted(bound_criteria):
+        result = validator_results.get(criterion_id)
+        if not isinstance(result, Mapping):
+            verified = False
+            continue
+        validator_id = str(result.get("validator_id") or "")
+        method = str(result.get("method") or "")
+        status = str(result.get("status") or "").lower()
+        if not validator_id or validator_id not in registered or not method:
+            raise ValueError("evidence validator is not registered by the host")
+        if status not in {"passed", "ready", "verified"}:
+            verified = False
+        validators[criterion_id] = {
+            "validator_id": validator_id,
+            "method": method,
+            "status": status,
+        }
+    verdict = "verified" if verified else "needs_review"
     return {
         **dict(binding),
+        "goal_id": authority["goal_id"],
+        "goal_revision": authority["goal_revision"],
+        "task_id": authority["task_id"],
+        "job_id": authority["job_id"],
+        "run_id": authority["run_id"],
+        "attempt": authority["attempt"],
+        "attempt_id": f"{authority['job_id']}:{authority['attempt']}",
+        "lease_id": authority["lease_id"],
+        "lease_state": authority["lease_state"],
+        "input_fingerprint": authority["input_fingerprint"],
         "criterion_ids": sorted(bound_criteria),
         "artifact_digests": dict(sorted(bound_artifacts.items())),
+        "validators": validators,
         "receipt_hash": receipt_hash,
-        "verdict": "verified",
-        "trust_state": "verified",
+        "verdict": verdict,
+        "trust_state": verdict,
     }
 
 

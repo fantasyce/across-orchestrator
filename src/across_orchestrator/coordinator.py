@@ -28,6 +28,7 @@ from .worker_protocol import (
     sanitize_public,
 )
 from .worker_store import WorkerControlStore
+from .evidence import bind_evidence_to_criteria
 
 
 class CoordinatorError(RuntimeError):
@@ -528,6 +529,13 @@ class WorkerCoordinator:
                 raise CoordinatorError("idempotency key was reused with a different manifest")
             if job:
                 return sanitize_public({key: value for key, value in job.items() if key != "inputs_base64"})
+        if manifest.goal_id:
+            authority = self.store.get("goal_revisions", manifest.goal_id)
+            current_revision = int((authority or {}).get("goal_revision") or 0)
+            if current_revision and int(manifest.goal_revision or 0) < current_revision:
+                raise CoordinatorError("job Goal revision is older than host authority")
+            if int(manifest.goal_revision or 0) > current_revision:
+                self.authorize_goal_revision(manifest.goal_id, int(manifest.goal_revision or 0))
         encoded_inputs = self._validate_inputs(manifest, input_payloads or {})
         record = {
             "schema_version": "across-coordinator-job/1.0",
@@ -548,6 +556,40 @@ class WorkerCoordinator:
         self.store.put("idempotency", manifest.idempotency_key, {"idempotency_key": manifest.idempotency_key, "job_id": manifest.job_id, "manifest_hash": manifest.manifest_hash})
         self._audit("job.created", {"job_id": manifest.job_id, "run_id": manifest.run_id})
         return sanitize_public({key: value for key, value in record.items() if key != "inputs_base64"})
+
+    def authorize_goal_revision(self, goal_id: str, goal_revision: int) -> dict[str, Any]:
+        """Persist the host-owned Goal revision watermark and fence older work."""
+
+        identifier = str(goal_id or "").strip()
+        if not identifier:
+            raise CoordinatorError("goal_id is required")
+        if type(goal_revision) is not int or goal_revision < 1:
+            raise CoordinatorError("goal_revision must be a positive integer")
+        with self.store.lock(f"goal-revision-{identifier}"):
+            current = self.store.get("goal_revisions", identifier)
+            current_revision = int((current or {}).get("goal_revision") or 0)
+            if goal_revision < current_revision:
+                raise CoordinatorError("Goal revision cannot move backwards")
+            record = {
+                "schema_version": "across-goal-revision-authority/1.0",
+                "goal_id": identifier,
+                "goal_revision": goal_revision,
+                "updated_at": self.clock(),
+            }
+            self.store.put("goal_revisions", identifier, record)
+            if goal_revision > current_revision:
+                for job in self.store.list("jobs"):
+                    manifest = job.get("manifest") if isinstance(job.get("manifest"), Mapping) else {}
+                    if manifest.get("goal_id") != identifier:
+                        continue
+                    if int(manifest.get("goal_revision") or 0) >= goal_revision or job.get("terminal_event_id"):
+                        continue
+                    job["cancel_requested_at"] = self.clock()
+                    job["cancel_reason"] = "stale_goal_revision"
+                    job["updated_at"] = self.clock()
+                    self.store.put("jobs", str(job["job_id"]), job)
+            self._audit("goal.revision_authorized", {"goal_id": identifier, "goal_revision": goal_revision})
+            return sanitize_public(record)
 
     def choose_node(self, manifest: JobManifest) -> dict[str, Any] | None:
         candidates: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -647,6 +689,10 @@ class WorkerCoordinator:
             self._quarantine_lease_submission(record, "stale_goal_revision")
             self._requeue_expired(record, reason="goal_revision_mismatch")
             raise CoordinatorError("lease goal revision mismatch")
+        if record.get("goal_id") and int(record.get("goal_revision") or 0) != self._authorized_goal_revision(record):
+            self._quarantine_lease_submission(record, "stale_goal_revision")
+            self._requeue_expired(record, reason="stale_goal_revision")
+            raise CoordinatorError("lease goal revision is older than host authority")
         record["acknowledged_at"] = self.clock()
         self.store.put("leases", lease_id, record)
         return JobLease(**record)
@@ -668,6 +714,9 @@ class WorkerCoordinator:
         ):
             self._quarantine_lease_submission(record, "stale_goal_revision")
             raise CoordinatorError("lease goal revision mismatch")
+        if record.get("goal_id") and int(record.get("goal_revision") or 0) != self._authorized_goal_revision(record):
+            self._quarantine_lease_submission(record, "stale_goal_revision")
+            raise CoordinatorError("lease goal revision is older than host authority")
         if record.get("acknowledged_at") is None:
             raise CoordinatorError("lease must be acknowledged before heartbeat")
         now = self.clock()
@@ -704,7 +753,7 @@ class WorkerCoordinator:
     def record_event(self, event: JobEvent) -> dict[str, Any]:
         job = self._job(event.job_id)
         manifest_goal_id = (job.get("manifest") or {}).get("goal_id")
-        manifest_goal_revision = (job.get("manifest") or {}).get("goal_revision")
+        manifest_goal_revision = self._authorized_goal_revision(job.get("manifest") or {}) if manifest_goal_id else None
         if manifest_goal_id and (
             event.goal_id != manifest_goal_id or event.goal_revision != manifest_goal_revision
         ):
@@ -735,6 +784,14 @@ class WorkerCoordinator:
         events = self.store.read_log("events", event.job_id)
         if any(item.get("event_id") == event.event_id for item in events):
             return sanitize_public(next(item for item in events if item.get("event_id") == event.event_id))
+        lease_record = self._lease(event.lease_id)
+        if lease_record.get("acknowledged_at") is None:
+            self._quarantine_lease_submission(lease_record, "unacknowledged_lease")
+            raise CoordinatorError("lease must be acknowledged before events")
+        if self.clock() >= float(lease_record.get("expires_at") or 0):
+            self._quarantine_lease_submission(lease_record, "expired_lease")
+            self._requeue_expired(lease_record, reason="expired_lease")
+            raise CoordinatorError("lease expired before event submission")
         current_sequence = max((int(item.get("sequence") or 0) for item in events if int(item.get("attempt") or 0) == event.attempt), default=0)
         if event.sequence <= current_sequence:
             raise CoordinatorError("event sequence must increase monotonically")
@@ -781,18 +838,83 @@ class WorkerCoordinator:
                 lease=lease,
                 terminal_state=event.state,
                 artifacts=tuple(artifacts),
-                quality_gates=dict(worker_receipt.get("quality_gates") or {}),
+                quality_gates={},
                 model_usage=model_usage,
                 cleanup_status=job["cleanup_status"],
                 started_at=float(worker_receipt.get("started_at") or event.created_at),
                 ended_at=float(worker_receipt.get("ended_at") or event.created_at),
                 resource_usage=dict(job.get("resource_usage") or {}),
             )
+            if manifest.goal_id:
+                artifact_digests = {
+                    item.artifact_id: item.sha256
+                    for item in artifacts
+                }
+                job["goal_evidence_binding"] = bind_evidence_to_criteria(
+                    job["evidence_receipt"],
+                    {
+                        "schema_version": "across-goal-evidence-binding/1.0",
+                        "evidence_id": f"evidence-{event.event_id}",
+                        "criterion_ids": list(manifest.criterion_ids),
+                        "artifact_digests": artifact_digests,
+                    },
+                    authority={
+                        "goal_id": manifest.goal_id,
+                        "goal_revision": manifest.goal_revision,
+                        "task_id": manifest.task_id,
+                        "job_id": manifest.job_id,
+                        "run_id": manifest.run_id,
+                        "attempt": lease.attempt,
+                        "lease_id": lease.lease_id,
+                        "lease_state": "terminal_valid",
+                        "input_fingerprint": manifest.input_fingerprint,
+                        "registered_validator_ids": list(job.get("registered_validator_ids") or ()),
+                        "validator_results": dict(job.get("validator_results") or {}),
+                    },
+                )
             for grant_id in terminal_grant_ids:
                 self.revoke_model_grant(grant_id)
         self.store.put("jobs", event.job_id, job)
         self._audit("job.event", {"job_id": event.job_id, "event_id": event.event_id, "state": event.state, "attempt": event.attempt})
         return sanitize_public(serialized)
+
+    def record_validator_result(
+        self,
+        job_id: str,
+        *,
+        criterion_id: str,
+        validator_id: str,
+        method: str,
+        status: str,
+    ) -> dict[str, Any]:
+        """Record a host-executed validator result before terminal projection."""
+
+        job = self._job(job_id)
+        if job.get("terminal_event_id"):
+            raise CoordinatorError("validator results cannot change after terminal evidence")
+        manifest = JobManifest.from_dict(job["manifest"])
+        if criterion_id not in manifest.criterion_ids:
+            raise CoordinatorError("validator criterion is not part of the job Goal binding")
+        allowed = {f"quality-gate:{gate}" for gate in manifest.quality_gates}
+        if validator_id not in allowed:
+            raise CoordinatorError("validator is not registered by the host manifest")
+        if not str(method or "").strip():
+            raise CoordinatorError("validator method is required")
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"passed", "ready", "verified", "failed", "blocked", "needs_review"}:
+            raise CoordinatorError("validator status is invalid")
+        results = dict(job.get("validator_results") or {})
+        results[criterion_id] = {
+            "validator_id": validator_id,
+            "method": str(method).strip(),
+            "status": normalized_status,
+        }
+        job["validator_results"] = results
+        job["registered_validator_ids"] = sorted(allowed)
+        job["updated_at"] = self.clock()
+        self.store.put("jobs", job_id, job)
+        self._audit("job.validator_result", {"job_id": job_id, "criterion_id": criterion_id, "validator_id": validator_id, "status": normalized_status})
+        return sanitize_public(results[criterion_id])
 
     def _quarantine_lease_submission(self, lease: Mapping[str, Any], reason_code: str) -> None:
         self.store.append(
@@ -807,6 +929,14 @@ class WorkerCoordinator:
                 "created_at": self.clock(),
             },
         )
+
+    def _authorized_goal_revision(self, binding: Mapping[str, Any]) -> int:
+        goal_id = str(binding.get("goal_id") or "")
+        fallback = int(binding.get("goal_revision") or 0)
+        if not goal_id:
+            return fallback
+        authority = self.store.get("goal_revisions", goal_id)
+        return int((authority or {}).get("goal_revision") or fallback)
 
     def cancel_job(self, job_id: str, *, reason: str = "user_cancelled") -> dict[str, Any]:
         job = self._job(job_id)

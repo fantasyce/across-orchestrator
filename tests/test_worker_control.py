@@ -115,6 +115,7 @@ def manifest(job_id: str = "job-test", run_id: str = "run-test", **overrides) ->
         "job_id": job_id,
         "run_id": run_id,
         "project_id": "project-test",
+        "task_id": "task-test",
         "workflow_id": "scenario-simulation",
         "idempotency_key": f"idem-{job_id}",
         "command_argv": (sys.executable, "-c", "print('ok')"),
@@ -438,6 +439,97 @@ def test_goal_revision_is_bound_through_lease_heartbeat_and_terminal_event(tmp_p
     assert receipt["goal_id"] == "goal-task-1"
     assert receipt["goal_revision"] == 3
     assert receipt["criterion_ids"] == ["criterion-tests"]
+    assert receipt["task_id"] == "task-test"
+    assert coordinator.job(goal_manifest.job_id)["goal_evidence_binding"]["trust_state"] == "needs_review"
+
+
+def test_worker_quality_gate_assertion_cannot_verify_goal_evidence(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    goal_manifest = manifest(
+        goal_id="goal-untrusted-gate",
+        goal_revision=1,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="b" * 64,
+        required_evidence=("test_receipt",),
+        quality_gates=("tests",),
+    )
+    coordinator.submit_job(goal_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        goal_manifest.manifest_hash,
+        goal_id=goal_manifest.goal_id,
+        goal_revision=goal_manifest.goal_revision,
+    )
+    coordinator.record_event(JobEvent(
+        event_id="event-self-reported-gate", job_id=goal_manifest.job_id, run_id=goal_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id=goal_manifest.goal_id,
+        goal_revision=goal_manifest.goal_revision,
+        payload={"evidence_receipt": {"quality_gates": {"tests": "passed"}}},
+    ))
+    job = coordinator.job(goal_manifest.job_id)
+    assert job["evidence_receipt"]["quality_gates"] == {}
+    assert job["goal_evidence_binding"]["verdict"] == "needs_review"
+
+
+def test_expired_acknowledged_lease_cannot_submit_a_terminal_event(tmp_path):
+    clock = Clock()
+    coordinator = approved_coordinator(tmp_path, clock=clock)
+    job_manifest = manifest()
+    coordinator.submit_job(job_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(lease.lease_id, job_manifest.manifest_hash)
+    clock.advance(10)
+
+    event = JobEvent(
+        event_id="event-after-expiry", job_id=job_manifest.job_id, run_id=job_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed",
+    )
+    with pytest.raises(CoordinatorError, match="expired"):
+        coordinator.record_event(event)
+
+    assert coordinator.job(job_manifest.job_id)["status"] == "queued"
+    assert coordinator.store.read_log("quarantine", job_manifest.job_id)[-1]["reason_code"] == "expired_lease"
+
+
+def test_host_revision_watermark_quarantines_old_active_lease(tmp_path):
+    coordinator = approved_coordinator(tmp_path)
+    old_manifest = manifest(
+        goal_id="goal-watermark",
+        goal_revision=1,
+        goal_node_id="goal-node-build",
+        criterion_ids=("criterion-tests",),
+        input_fingerprint="a" * 64,
+        required_evidence=("test_receipt",),
+    )
+    coordinator.submit_job(old_manifest)
+    lease = coordinator.lease_next("node-test")
+    assert lease is not None
+    coordinator.acknowledge_lease(
+        lease.lease_id,
+        old_manifest.manifest_hash,
+        goal_id="goal-watermark",
+        goal_revision=1,
+    )
+
+    authority = coordinator.authorize_goal_revision("goal-watermark", 2)
+    assert authority["goal_revision"] == 2
+    stale = JobEvent(
+        event_id="event-old-authority", job_id=old_manifest.job_id, run_id=old_manifest.run_id,
+        node_id="node-test", lease_id=lease.lease_id, attempt=lease.attempt,
+        sequence=1, state="completed", goal_id="goal-watermark", goal_revision=1,
+    )
+    with pytest.raises(CoordinatorError, match="goal revision"):
+        coordinator.record_event(stale)
+    assert coordinator.store.read_log("quarantine", old_manifest.job_id)[-1]["reason_code"] == "stale_goal_revision"
+
+    with pytest.raises(CoordinatorError, match="older than host authority"):
+        coordinator.submit_job(replace(old_manifest, job_id="job-stale", idempotency_key="idem-stale"))
 
 
 

@@ -356,6 +356,26 @@ class CliTests(unittest.TestCase):
             "changed_fingerprints": ["source-a"],
             "criterion_ids": ["criterion-a"],
             "prior_attempt_number": 0,
+            "job_manifests": [{
+                "schema_version": "across-job-manifest/1.0",
+                "job_id": "job-cli-revalidation-a",
+                "run_id": "run-cli-revalidation",
+                "project_id": "project-cli",
+                "task_id": "task-cli",
+                "workflow_id": "goal-revalidation",
+                "idempotency_key": "idem-cli-revalidation-a",
+                "command_argv": [sys.executable, "-c", "print('revalidate')"],
+                "required_capabilities": {},
+                "permissions": {"network": {"mode": "none"}},
+                "budgets": {},
+                "expected_outputs": [],
+                "goal_id": "goal-cli",
+                "goal_revision": 2,
+                "goal_node_id": "goal-node-a",
+                "criterion_ids": ["criterion-a"],
+                "input_fingerprint": "a" * 64,
+                "required_evidence": ["test_receipt"],
+            }],
         }
         result = self.run_cli("goal-revalidation", "--payload-json", json.dumps(payload), "--json")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -365,6 +385,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(attempt["preserved_evidence_ids"], ["evidence-b"])
         self.assertEqual(attempt["attempt_number"], 1)
         self.assertEqual(attempt["state"], "queued")
+        self.assertEqual(attempt["job_ids"], ["job-cli-revalidation-a"])
+        stored = self.home.parent / "across-home" / "data" / "across-orchestrator" / "worker-control" / "revalidation_attempts" / f"{attempt['attempt_id']}.json"
+        self.assertTrue(stored.is_file())
 
     def test_cli_sandbox_probe_and_evidence_graph(self):
         policy = {
