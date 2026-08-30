@@ -121,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop_start.add_argument("--memory-policy-json")
     loop_start.add_argument("--approval-policy-json")
     loop_start.add_argument("--metadata-json")
+    loop_start.add_argument("--goal-execution-contract-json")
     loop_start.add_argument("--json", action="store_true")
 
     loop_run = sub.add_parser("loop-run", help="Run or continue an agent loop")
@@ -430,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
             memory_policy = _json_object_arg(args.memory_policy_json, "--memory-policy-json")
             approval_policy = _json_object_arg(args.approval_policy_json, "--approval-policy-json")
             metadata = _json_object_arg(args.metadata_json, "--metadata-json")
+            goal_execution_contract = _json_object_arg(args.goal_execution_contract_json, "--goal-execution-contract-json")
         except ValueError as exc:
             parser.error(str(exc))
             return 2
@@ -447,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
                 memory_policy=memory_policy or None,
                 approval_policy=approval_policy or None,
                 metadata=metadata or None,
+                goal_execution_contract=goal_execution_contract or None,
             )
         except ValueError as exc:
             parser.error(str(exc))

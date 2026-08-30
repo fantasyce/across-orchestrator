@@ -36,6 +36,7 @@ class WorkerControlStore:
         "goal_revisions",
         "invalidation_plans",
         "revalidation_attempts",
+        "terminal_transactions",
     )
 
     def __init__(self, home: str | Path | None = None, env: Mapping[str, str] | None = None):

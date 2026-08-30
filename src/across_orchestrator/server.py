@@ -818,6 +818,7 @@ class OrchestratorHandler(BaseHTTPRequestHandler):
                     memory_policy=payload.get("memoryPolicy") or payload.get("memory_policy"),
                     approval_policy=payload.get("approvalPolicy") or payload.get("approval_policy"),
                     metadata=payload.get("metadata"),
+                    goal_execution_contract=payload.get("goalExecutionContract") or payload.get("goal_execution_contract"),
                 )
                 self.respond(loop.to_dict(), status=201)
                 return

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 import csv
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,62 @@ from .findings import (
 )
 from .models import new_id
 from .store import LocalStore
+
+
+def _normalize_goal_execution_contract(value: Mapping[str, Any]) -> dict[str, Any]:
+    contract = dict(value or {})
+    required = {"schema_version", "goal_id", "goal_revision", "task_id", "criterion_ids", "input_fingerprint"}
+    if set(contract) != required:
+        raise ValueError("Goal execution contract fields are incomplete or unsupported")
+    if contract.get("schema_version") != "across-goal-execution-contract/1.0":
+        raise ValueError("unsupported Goal execution contract schema")
+    for field in ("goal_id", "task_id"):
+        if not isinstance(contract.get(field), str) or not contract[field].strip():
+            raise ValueError(f"{field} is required")
+    if type(contract.get("goal_revision")) is not int or contract["goal_revision"] < 1:
+        raise ValueError("goal_revision must be a positive integer")
+    criteria = contract.get("criterion_ids")
+    if not isinstance(criteria, list) or not criteria or any(not isinstance(item, str) or not item.strip() for item in criteria):
+        raise ValueError("criterion_ids must be a non-empty string list")
+    if len(set(criteria)) != len(criteria):
+        raise ValueError("criterion_ids must be unique")
+    fingerprint = contract.get("input_fingerprint")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint):
+        raise ValueError("input_fingerprint must be a sha256 digest")
+    return {**contract, "goal_id": contract["goal_id"].strip(), "task_id": contract["task_id"].strip(), "criterion_ids": sorted(criteria)}
+
+
+def _goal_execution_projection(loop: "LoopRun", finding_lifecycle: Mapping[str, Any]) -> dict[str, Any]:
+    raw = loop.metadata.get("goal_execution_contract")
+    if not isinstance(raw, Mapping):
+        return {}
+    contract = _normalize_goal_execution_contract(raw)
+    findings = finding_lifecycle.get("current") if isinstance(finding_lifecycle, Mapping) else []
+    blocked = any(
+        isinstance(item, Mapping) and str(item.get("state") or item.get("status") or "").lower() in {"blocked", "failed"}
+        for item in (findings or [])
+    )
+    verified = loop.status == "completed" and not loop.error and not blocked
+    receipt = {
+        "schema_version": "across-orchestrator-goal-receipt/1.0",
+        "goal_id": contract["goal_id"], "goal_revision": contract["goal_revision"],
+        "task_id": contract["task_id"], "criterion_ids": contract["criterion_ids"],
+        "input_fingerprint": contract["input_fingerprint"],
+        "orchestrator_task_id": loop.loop_id, "run_id": loop.loop_id,
+        "terminal_state": loop.status, "quality_status": "passed" if verified else "needs_review",
+    }
+    receipt["receipt_hash"] = hashlib.sha256(json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    return {
+        "evidence_receipt": receipt,
+        "goal_evidence_binding": {
+            **contract,
+            "orchestrator_task_id": loop.loop_id, "run_id": loop.loop_id,
+            "execution_state": "terminal_valid" if loop.status in TERMINAL_LOOP_STATUSES else "active",
+            "receipt_hash": receipt["receipt_hash"],
+            "authority": "across-orchestrator-loop-runtime",
+            "trust_state": "verified" if verified else "needs_review",
+        },
+    }
 
 
 TERMINAL_LOOP_STATUSES = {"completed", "failed", "stopped", "cancelled"}
@@ -632,10 +689,13 @@ class AgentLoopRuntime:
         memory_policy: dict[str, Any] | None = None,
         approval_policy: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        goal_execution_contract: dict[str, Any] | None = None,
     ) -> LoopRun:
         if not goal or not goal.strip():
             raise ValueError("goal is required")
         clean_metadata = self._validated_metadata(metadata)
+        if goal_execution_contract is not None:
+            clean_metadata["goal_execution_contract"] = _normalize_goal_execution_contract(goal_execution_contract)
         self._enforce_start_concurrency_budget(clean_metadata)
         requested_max_turns = self._budget_max_turns(clean_metadata) or max_turns
         effective_max_turns = self._effective_max_turns(clean_metadata, requested_max_turns)
@@ -680,7 +740,7 @@ class AgentLoopRuntime:
         last_event_at = events[-1]["timestamp"] if events else loop.created_at
         finding_lifecycle = self._finding_lifecycle_summary(loop)
 
-        return {
+        summary = {
             "schema_version": "0.1",
             "loop_id": loop.loop_id,
             "status": loop.status,
@@ -707,6 +767,7 @@ class AgentLoopRuntime:
             "cancel_ack_pending": cancel_request is not None and loop.status not in TERMINAL_LOOP_STATUSES,
             "budget": self._budget_policy(loop),
         }
+        return summary
 
     def get_loop_evidence_summary(self, loop_id: str) -> dict[str, Any]:
         """Return a compact, read-only evidence summary derived from durable loop state."""
@@ -742,7 +803,7 @@ class AgentLoopRuntime:
         action_plan = self._evidence_action_plan(loop)
         finding_lifecycle = self._finding_lifecycle_summary(loop)
 
-        return {
+        summary = {
             "schema_version": "0.1",
             "loop_id": loop.loop_id,
             "status": loop.status,
@@ -776,6 +837,10 @@ class AgentLoopRuntime:
                 finding_lifecycle=finding_lifecycle,
             ),
         }
+        goal_projection = _goal_execution_projection(loop, finding_lifecycle)
+        if goal_projection:
+            summary.update(goal_projection)
+        return summary
 
     def get_loop_telemetry(self, loop_id: str) -> dict[str, Any]:
         """Return bounded Agent Loop telemetry without raw observations or memory text."""

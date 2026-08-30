@@ -405,6 +405,7 @@ def bind_evidence_to_criteria(
         "receipt_hash": receipt_hash,
         "verdict": verdict,
         "trust_state": verdict,
+        "authority": "across-orchestrator-worker-coordinator",
     }
 
 

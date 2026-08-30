@@ -199,6 +199,7 @@ class WorkerCoordinator:
         self.clock = clock
         self.lease_seconds = max(5.0, float(lease_seconds))
         self.enrollment = EnrollmentAuthority(self.store, clock=clock)
+        self.recover_terminal_transactions()
 
     def list_nodes(self) -> list[dict[str, Any]]:
         return [sanitize_public(item) for item in self.store.list("nodes")]
@@ -808,6 +809,7 @@ class WorkerCoordinator:
         }
 
     def record_event(self, event: JobEvent) -> dict[str, Any]:
+        self._recover_terminal_transaction(event.event_id)
         job = self._job(event.job_id)
         manifest_goal_id = (job.get("manifest") or {}).get("goal_id")
         manifest_goal_revision = self._authorized_goal_revision(job.get("manifest") or {}) if manifest_goal_id else None
@@ -929,14 +931,59 @@ class WorkerCoordinator:
                         "verdict": "needs_review",
                         "trust_state": "needs_review",
                     }
+        if event.state in TERMINAL_JOB_STATES:
+            self._commit_terminal_event(job, serialized)
             for grant_id in terminal_grant_ids:
                 self.revoke_model_grant(grant_id)
-        self.store.append("events", event.job_id, serialized)
-        self.store.put("jobs", event.job_id, job)
-        if event.state in TERMINAL_JOB_STATES:
-            self._update_revalidation_attempt_for_job(event.job_id)
+        else:
+            self.store.append("events", event.job_id, serialized)
+            self.store.put("jobs", event.job_id, job)
         self._audit("job.event", {"job_id": event.job_id, "event_id": event.event_id, "state": event.state, "attempt": event.attempt})
         return sanitize_public(serialized)
+
+    def recover_terminal_transactions(self) -> list[str]:
+        recovered: list[str] = []
+        for transaction in self.store.list("terminal_transactions"):
+            if transaction.get("status") == "committed":
+                continue
+            self._apply_terminal_transaction(transaction)
+            recovered.append(str(transaction.get("event_id") or ""))
+        return recovered
+
+    def _recover_terminal_transaction(self, event_id: str) -> None:
+        transaction = self.store.get("terminal_transactions", event_id)
+        if transaction and transaction.get("status") != "committed":
+            self._apply_terminal_transaction(transaction)
+
+    def _commit_terminal_event(self, job: Mapping[str, Any], serialized: Mapping[str, Any]) -> None:
+        event_id = str(serialized["event_id"])
+        transaction = {
+            "schema_version": "across-terminal-transaction/1.0",
+            "event_id": event_id,
+            "job_id": str(job["job_id"]),
+            "job": dict(job),
+            "event": dict(serialized),
+            "status": "prepared",
+            "created_at": self.clock(),
+            "updated_at": self.clock(),
+        }
+        self.store.put("terminal_transactions", event_id, transaction)
+        self._apply_terminal_transaction(transaction)
+
+    def _apply_terminal_transaction(self, transaction: Mapping[str, Any]) -> None:
+        event_id = str(transaction["event_id"])
+        job_id = str(transaction["job_id"])
+        with self.store.lock(f"terminal-commit-{job_id}"):
+            self.store.put("jobs", job_id, dict(transaction["job"]))
+            events = self.store.read_log("events", job_id)
+            matching = [item for item in events if item.get("event_id") == event_id]
+            if matching and matching[0] != transaction["event"]:
+                raise CoordinatorError("terminal transaction conflicts with an existing event")
+            if not matching:
+                self.store.append("events", job_id, dict(transaction["event"]))
+            self._update_revalidation_attempt_for_job(job_id)
+            committed = {**dict(transaction), "status": "committed", "updated_at": self.clock()}
+            self.store.put("terminal_transactions", event_id, committed)
 
     def record_validator_result(
         self,
