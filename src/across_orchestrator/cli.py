@@ -31,7 +31,7 @@ from .sandbox import evaluate_sandbox_policy, execute_sandbox_command, get_sandb
 from .store import LocalStore
 from .goal_contracts import normalize_goal_contract, stable_goal_hash
 from .goal_graph import compute_invalidation
-from .revalidation import build_revalidation_attempt
+from .revalidation import create_revalidation_attempt
 
 
 def _emit_public_text(text: str) -> None:
@@ -755,9 +755,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("goal revalidation graph must be an object")
             changed = {str(item) for item in payload.get("changed_fingerprints") or () if str(item)}
             plan = compute_invalidation(graph, changed)
-            attempt = build_revalidation_attempt(
+            from .coordinator import WorkerCoordinator
+            from .worker_protocol import JobManifest
+            manifests = [JobManifest.from_dict(item) for item in payload.get("job_manifests") or ()]
+            attempt = create_revalidation_attempt(
+                WorkerCoordinator(),
                 plan,
                 payload.get("criterion_ids") or (),
+                manifests,
                 prior_attempt_number=int(payload.get("prior_attempt_number") or 0),
             )
         except (TypeError, ValueError) as exc:
