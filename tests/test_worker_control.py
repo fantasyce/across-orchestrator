@@ -678,6 +678,8 @@ def test_concurrent_terminal_events_commit_exactly_one_terminal(tmp_path, monkey
         try:
             barrier.wait(timeout=0.5)
         except BrokenBarrierError:
+            # The competing terminal event may finish first; the assertion
+            # below verifies that this losing path still cannot double-commit.
             pass
         return original_commit(job, event, job_locked=job_locked)
 
